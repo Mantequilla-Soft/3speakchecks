@@ -83,8 +83,10 @@ router.get('/check/:username', async (req, res) => {
             });
         }
 
-        // Query the database
-        const collection = db.collection(COLLECTION_NAME);
+        // Creator settings (banned / canUpload) live in the contentcreators
+        // collection — NOT COLLECTION_NAME (which is the 'videos' collection via
+        // env). Querying COLLECTION_NAME here always returned "User not found".
+        const collection = db.collection('contentcreators');
         const user = await collection.findOne({ username: username });
 
         if (!user) {
