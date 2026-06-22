@@ -767,6 +767,95 @@ router.put('/video/thumbnail', validateApiKey, async (req, res) => {
     }
 });
 
+// Endpoint to list / unlist a video — sets `listed_on_3speak`, which every feed
+// query filters on, so an unlisted video disappears from the UI feeds/search
+// while staying playable by direct link. Same app-key auth as /video/thumbnail.
+router.put('/video/listing', validateApiKey, async (req, res) => {
+    const db = getDb();
+    if (!ENABLE_MONGO_WRITES) {
+        return res.status(503).json({ success: false, error: 'Writes disabled', message: 'MongoDB writes are currently disabled' });
+    }
+    try {
+        const { owner, permlink, listed } = req.body;
+        if (!owner || !permlink || typeof listed !== 'boolean') {
+            return res.status(400).json({ success: false, error: 'Invalid request', message: 'owner, permlink and a boolean `listed` are required' });
+        }
+
+        const now = new Date();
+        const videosCollection = db.collection('videos');
+        const embedVideoCollection = db.collection('embed-video');
+        const [videoDoc, embedDoc] = await Promise.all([
+            videosCollection.findOne({ owner, permlink }),
+            embedVideoCollection.findOne({ $or: [{ owner, permlink }, { hive_author: owner, hive_permlink: permlink }] }),
+        ]);
+
+        if (!videoDoc && !embedDoc) {
+            return res.status(404).json({ success: false, error: 'Video not found', message: `No video found for owner: ${owner}, permlink: ${permlink}` });
+        }
+
+        const updated = [];
+        if (videoDoc) {
+            await videosCollection.updateOne({ owner, permlink }, { $set: { listed_on_3speak: listed, listing_updated_at: now } });
+            updated.push('videos');
+        }
+        if (embedDoc) {
+            await embedVideoCollection.updateOne({ _id: embedDoc._id }, { $set: { listed_on_3speak: listed, listing_updated_at: now } });
+            updated.push('embed-video');
+        }
+
+        console.log(`Listing set to ${listed} for ${owner}/${permlink} in [${updated.join(', ')}]`);
+        res.json({ success: true, message: 'Listing updated', data: { owner, permlink, listed, collections: updated } });
+    } catch (error) {
+        console.error('Error updating listing:', error);
+        res.status(500).json({ success: false, error: 'Internal server error', message: 'Failed to update listing' });
+    }
+});
+
+// Endpoint to mark a video NSFW (or clear it) — sets `isNsfwContent`, which the
+// nsfw filters exclude from feeds/search unless ?nsfw=true. The canonical signal
+// is the Hive `nsfw` tag (synced into hive_tags); this gives an immediate effect
+// before the Hive→Mongo sync catches up. Same app-key auth as /video/thumbnail.
+router.put('/video/nsfw', validateApiKey, async (req, res) => {
+    const db = getDb();
+    if (!ENABLE_MONGO_WRITES) {
+        return res.status(503).json({ success: false, error: 'Writes disabled', message: 'MongoDB writes are currently disabled' });
+    }
+    try {
+        const { owner, permlink, nsfw } = req.body;
+        if (!owner || !permlink || typeof nsfw !== 'boolean') {
+            return res.status(400).json({ success: false, error: 'Invalid request', message: 'owner, permlink and a boolean `nsfw` are required' });
+        }
+
+        const now = new Date();
+        const videosCollection = db.collection('videos');
+        const embedVideoCollection = db.collection('embed-video');
+        const [videoDoc, embedDoc] = await Promise.all([
+            videosCollection.findOne({ owner, permlink }),
+            embedVideoCollection.findOne({ $or: [{ owner, permlink }, { hive_author: owner, hive_permlink: permlink }] }),
+        ]);
+
+        if (!videoDoc && !embedDoc) {
+            return res.status(404).json({ success: false, error: 'Video not found', message: `No video found for owner: ${owner}, permlink: ${permlink}` });
+        }
+
+        const updated = [];
+        if (videoDoc) {
+            await videosCollection.updateOne({ owner, permlink }, { $set: { isNsfwContent: nsfw, nsfw_updated_at: now } });
+            updated.push('videos');
+        }
+        if (embedDoc) {
+            await embedVideoCollection.updateOne({ _id: embedDoc._id }, { $set: { isNsfwContent: nsfw, nsfw_updated_at: now } });
+            updated.push('embed-video');
+        }
+
+        console.log(`NSFW set to ${nsfw} for ${owner}/${permlink} in [${updated.join(', ')}]`);
+        res.json({ success: true, message: 'NSFW flag updated', data: { owner, permlink, nsfw, collections: updated } });
+    } catch (error) {
+        console.error('Error updating NSFW flag:', error);
+        res.status(500).json({ success: false, error: 'Internal server error', message: 'Failed to update NSFW flag' });
+    }
+});
+
 // Endpoint to get extended video details by author/permlink
 router.get('/videodetails/:author/:permlink', async (req, res) => {
     const db = getDb();
