@@ -56,6 +56,59 @@ router.get('/recommended', async (req, res) => {
     }
 });
 
+// Endpoint to get currently-promoted videos (promotedUntil in the future).
+// Powers the home "Promoted" section (logged-in) and is mixed into Home Feed
+// for logged-out viewers. Sorted by soonest-expiring first so freshly-paid
+// promotions rotate through. NSFW/banned/listed filters still apply.
+router.get('/promoted', async (req, res) => {
+    try {
+        const db = getDb();
+        const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 50);
+        const embedVideoCollection = db.collection('embed-video');
+        const now = new Date();
+
+        const embedVideosRaw = await embedVideoCollection.find({
+            status: 'published',
+            short: false,
+            listed_on_3speak: true,
+            promotedUntil: { $gt: now },
+            hive_author: { $nin: [null, ...HIDDEN_AUTHORS] },
+            hive_permlink: { $ne: null },
+            ...nsfwFilterHiveTags(req)
+        }).sort({ promotedUntil: 1 }).limit(limit).toArray();
+
+        const videos = embedVideosRaw.map(ev => ({
+            owner: ev.owner,
+            author: ev.hive_author,
+            permlink: ev.hive_permlink,
+            title: ev.hive_title || ev.originalFilename || '',
+            body: ev.hive_body || '',
+            status: 'published',
+            created: ev.createdAt,
+            created_at: ev.createdAt,
+            duration: ev.duration || 0,
+            tags: ev.hive_tags || [],
+            tags_v2: (ev.hive_tags || []).map(t => t.toLowerCase()),
+            images: {
+                thumbnail: ev.thumbnail_url || `https://img.3speak.tv/${ev.permlink}/thumbnail.png`,
+                poster: ev.thumbnail_url || `https://img.3speak.tv/${ev.permlink}/poster.jpg`
+            },
+            spkvideo: {
+                duration: ev.duration || 0,
+                video_v2: ev.permlink,
+                play_url: ev.manifest_cid ? `https://ipfs.3speak.tv/ipfs/${ev.manifest_cid}` : null
+            },
+            promoted: true,
+            promotedUntil: ev.promotedUntil,
+        }));
+
+        res.json({ success: true, feed: 'promoted', limit, total: videos.length, videos });
+    } catch (error) {
+        console.error('Error fetching promoted feed:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
 // Endpoint to get new content feed (excludes first uploads)
 router.get('/new', async (req, res) => {
     try {

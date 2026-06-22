@@ -45,4 +45,13 @@ module.exports = {
     // VITE_PPL_BENEFICIARY. A track is "pay-per-listen" when its Hive post
     // routes (near) all beneficiaries here; only those get listen-tracked.
     PPL_BENEFICIARY: process.env.PPL_BENEFICIARY || 'threespeak-audio',
+    // --- Video promotion ---
+    // Account that receives promotion payments (HBD or HIVE). Users transfer here
+    // with memo `promote:<author>/<permlink>`; we verify on-chain before crediting.
+    PROMOTION_ACCOUNT: process.env.PROMOTION_ACCOUNT || 'threespeakfund',
+    // Cost (in HBD) that buys 24h of promoted position. HIVE payments are valued
+    // at the on-chain median price. Keep in sync with the frontend's VITE_ var.
+    COST_PER_24H_PROMOTION_HBD: parseFloat(process.env.COST_PER_24H_PROMOTION_HBD) || 0.5,
+    // Hard cap on how far out promotedUntil can reach (days from now).
+    MAX_PROMOTION_DAYS: parseInt(process.env.MAX_PROMOTION_DAYS) || 7,
 };

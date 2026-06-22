@@ -83,8 +83,10 @@ router.get('/check/:username', async (req, res) => {
             });
         }
 
-        // Query the database
-        const collection = db.collection(COLLECTION_NAME);
+        // Creator settings (banned / canUpload) live in the contentcreators
+        // collection — NOT COLLECTION_NAME (which is the 'videos' collection via
+        // env). Querying COLLECTION_NAME here always returned "User not found".
+        const collection = db.collection('contentcreators');
         const user = await collection.findOne({ username: username });
 
         if (!user) {
@@ -216,6 +218,10 @@ router.get('/api/my-videos', async (req, res) => {
         const offset = parseInt(req.query.offset) || 0;
         const statusFilter = req.query.status || 'all';
         const username = req.query.username;
+        // When the owner views their OWN profile the frontend sets this so
+        // unlisted videos still appear (badged) and can be re-listed. Every
+        // other surface keeps the default listed_on_3speak:true filter.
+        const includeUnlisted = req.query.include_unlisted === '1' || req.query.include_unlisted === 'true';
 
         if (!username) {
             return res.status(400).json({
@@ -233,7 +239,10 @@ router.get('/api/my-videos', async (req, res) => {
 
         // Build query for embed-video collection (embed uploads, non-shorts only)
         const embedVideoCollection = db.collection('embed-video');
-        const embedQuery = { owner: username, short: false, listed_on_3speak: true, ...BANNED_FILTER };
+        const embedQuery = { owner: username, short: false, ...BANNED_FILTER };
+        if (!includeUnlisted) {
+            embedQuery.listed_on_3speak = true;
+        }
         if (statusFilter !== 'all') {
             embedQuery.status = statusFilter;
         }
@@ -301,6 +310,12 @@ router.get('/api/my-videos', async (req, res) => {
                         play_url: ev.manifest_cid ? `https://ipfs.3speak.tv/ipfs/${ev.manifest_cid}` : null
                     },
                     _source: 'embed',
+                    // false only when explicitly unlisted; lets the owner's profile badge it.
+                    listed_on_3speak: ev.listed_on_3speak !== false,
+                    unlisted: ev.listed_on_3speak === false,
+                    // NSFW = explicit doc flag OR the Hive `nsfw` tag.
+                    isNsfwContent: ev.isNsfwContent === true || (Array.isArray(ev.hive_tags) && ev.hive_tags.some(t => String(t).toLowerCase() === 'nsfw')),
+                    promotedUntil: ev.promotedUntil || null,
                     _sortDate: new Date(ev.createdAt || 0).getTime()
                 };
             });

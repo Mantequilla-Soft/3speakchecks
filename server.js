@@ -28,6 +28,8 @@ const feedsRoutes = require('./routes/feeds');
 const rssRoutes = require('./routes/rss');
 const verifyRoutes = require('./routes/verify');
 const scheduledPostsRoutes = require('./routes/scheduledPosts');
+const communitiesRoutes = require('./routes/communities');
+const promoteRoutes = require('./routes/promote');
 
 const app = express();
 
@@ -44,12 +46,14 @@ app.use('/', healthRoutes);
 app.use('/search', searchRoutes);
 app.use('/', userRoutes);
 app.use('/', videosRoutes);
+app.use('/', promoteRoutes);
 app.use('/', shortsRoutes);
 app.use('/audio', audioRoutes);
 app.use('/feeds', feedsRoutes);
 app.use('/rss', rssRoutes);
 app.use('/verify', verifyRoutes);
 app.use('/scheduled-posts', scheduledPostsRoutes);
+app.use('/', communitiesRoutes);
 
 // Track whether heavy sync tasks are running
 let syncRunning = false;
