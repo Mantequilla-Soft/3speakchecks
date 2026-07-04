@@ -27,6 +27,7 @@ router.get('/shorts', async (req, res) => {
             short: true,
             status: 'published',
             processed: true,
+            listed_on_3speak: { $ne: false }, // hide unlisted shorts (matches the video feeds)
             embed_url: { $exists: true, $ne: null },
             createdAt: { $gte: sevenDaysAgo },
             owner: { $nin: HIDDEN_AUTHORS },
@@ -83,7 +84,10 @@ router.get('/shorts', async (req, res) => {
                     createdAt: short.createdAt,
                     thumbnail_url: short.thumbnail_url,
                     embed_url: short.embed_url,
-                    embed_title: short.embed_title
+                    embed_title: short.embed_title,
+                    // false only when explicitly unlisted; lets the owner's profile badge it.
+                    listed_on_3speak: short.listed_on_3speak !== false,
+                    unlisted: short.listed_on_3speak === false
                 };
             })
         );
@@ -128,6 +132,7 @@ router.get('/shorts/stories', async (req, res) => {
             short: true,
             status: 'published',
             processed: true,
+            listed_on_3speak: { $ne: false }, // hide unlisted shorts (matches the video feeds)
             embed_url: { $exists: true, $ne: null },
             createdAt: { $gte: sevenDaysAgo },
             owner: { $nin: HIDDEN_AUTHORS },
@@ -247,6 +252,11 @@ router.get('/shorts/:username', async (req, res) => {
 
         const embedVideoCollection = db.collection('embed-video');
 
+        // On the owner's own profile the client passes include_unlisted so their
+        // unlisted shorts still appear (badged) and can be re-listed. Every other
+        // surface keeps the default unlisted-hidden filter.
+        const includeUnlisted = req.query.include_unlisted === '1' || req.query.include_unlisted === 'true';
+
         // Count total shorts for this user
         const query = {
             short: true,
@@ -256,6 +266,9 @@ router.get('/shorts/:username', async (req, res) => {
             owner: username,
             ...nsfwFilterHiveTags(req)
         };
+        if (!includeUnlisted) {
+            query.listed_on_3speak = { $ne: false }; // hide unlisted shorts (matches the video feeds)
+        }
 
         const [total, shortsData] = await Promise.all([
             embedVideoCollection.countDocuments(query),
@@ -327,7 +340,10 @@ router.get('/shorts/:username', async (req, res) => {
                     createdAt: short.createdAt,
                     thumbnail_url: short.thumbnail_url,
                     embed_url: short.embed_url,
-                    embed_title: short.embed_title
+                    embed_title: short.embed_title,
+                    // false only when explicitly unlisted; lets the owner's profile badge it.
+                    listed_on_3speak: short.listed_on_3speak !== false,
+                    unlisted: short.listed_on_3speak === false
                 };
             })
         );
@@ -390,6 +406,7 @@ router.get('/shortssorted', async (req, res) => {
                 short: true,
                 status: 'published',
                 processed: true,
+                listed_on_3speak: { $ne: false }, // hide unlisted shorts (matches the video feeds)
                 embed_url: { $exists: true, $ne: null },
                 createdAt: { $gte: fourteenDaysAgo },
                 owner: { $nin: HIDDEN_AUTHORS },
@@ -611,7 +628,10 @@ router.get('/shortssorted', async (req, res) => {
                     createdAt: short.createdAt,
                     thumbnail_url: short.thumbnail_url,
                     embed_url: short.embed_url,
-                    embed_title: short.embed_title
+                    embed_title: short.embed_title,
+                    // false only when explicitly unlisted; lets the owner's profile badge it.
+                    listed_on_3speak: short.listed_on_3speak !== false,
+                    unlisted: short.listed_on_3speak === false
                 };
             })
         );
