@@ -5,6 +5,7 @@ const { nsfwFilterHiveTags } = require('../utils/filters');
 const { HIDDEN_AUTHORS, SHORT_SORT_INTERVAL, REWARD_WEIGHT, RESHARE_WEIGHT, ENABLE_MONGO_WRITES } = require('../utils/config');
 const { fetchHiveRewards, fetchLivePageData, fetchFollowerCounts, hiveReputationToScore, mulberry32, getFollowingList, reputationCache } = require('../utils/hive');
 const { sortedShortsCache, SORTED_SHORTS_CACHE_TTL, getCachedViews, setCachedViews } = require('../utils/cache');
+const { INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTags, tagsMatchInterests } = require('../utils/interests');
 
 // Endpoint to get shorts feed (original)
 router.get('/shorts', async (req, res) => {
@@ -385,8 +386,14 @@ router.get('/shortssorted', async (req, res) => {
             ? parseInt(req.query.seed)
             : Math.floor(Date.now() / SEED_BUCKET_MS);
 
-        // Check sorted list cache (keyed by seed+app, stores only lightweight identifiers)
-        const cacheKey = `${seed}|${appFilter || 'all'}`;
+        // Interest weighting inputs. The token goes into the cache key so each
+        // distinct interest set gets its own cached ordering (and no-interest
+        // callers keep the legacy 'none' ordering — backwards compatible).
+        const interestSet = parseInterests(req);
+        const interestsToken = interestSet.size ? [...interestSet].sort().join(',') : 'none';
+
+        // Check sorted list cache (keyed by seed+app+interests, stores only lightweight identifiers)
+        const cacheKey = `${seed}|${appFilter || 'all'}|${interestsToken}`;
         let sortedShorts;
         const cached = sortedShortsCache.get(cacheKey);
 
@@ -510,6 +517,12 @@ router.get('/shortssorted', async (req, res) => {
             const maxReward = Math.max(...filteredShorts.map(s => s.hive_reward || 0), 0.001);
             const maxReshares = Math.max(...filteredShorts.map(s => s.reshare_count || 0), 1);
 
+            // Interest weighting: pull transcription tags for the whole batch so
+            // we can boost shorts whose tags match the caller's interests.
+            const transcriptionTags = interestSet.size
+                ? await fetchTranscriptionTags(db, filteredShorts.map(s => ({ author: s.owner, permlink: s.permlink })))
+                : new Map();
+
             // Assign weighted sort scores
             for (const short of filteredShorts) {
                 const normalizedReward = (short.hive_reward || 0) / maxReward;
@@ -524,6 +537,14 @@ router.get('/shortssorted', async (req, res) => {
                 const recencyBonus = (totalBuckets - bucketIndex) / totalBuckets; // 1.0 for newest, decreasing
 
                 short.sort_score = recencyBonus + normalizedReward * REWARD_WEIGHT + normalizedReshares * RESHARE_WEIGHT + randomComponent * randomWeight;
+
+                // Boost shorts whose tags (own hive tags + transcription tags)
+                // match the caller's interests.
+                if (interestSet.size) {
+                    const own = normalizeTags(short.hive_tags);
+                    const tr = transcriptionTags.get(`${short.owner}/${short.permlink}`);
+                    if (tagsMatchInterests(own, tr, interestSet)) short.sort_score *= INTEREST_MULTIPLIER;
+                }
             }
 
             // Sort by score descending
