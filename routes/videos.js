@@ -410,9 +410,25 @@ router.get('/feed/:username', async (req, res) => {
         const allVideos = [...legacyWithDate, ...uniqueEmbed];
         allVideos.sort((a, b) => b._sortDate - a._sortDate);
 
-        const total = allVideos.length;
+        // Hide videos the requesting user has already watched (server-side, before
+        // pagination, so pages stay full). Backwards compatible: only when
+        // ?currentuser= is supplied. watch_history _id = "user:owner:hivePermlink"
+        // (here v.owner + v.permlink, permlink being the Hive permlink) — same
+        // filter the trending / grouped feeds use.
+        const currentuser = (req.query.currentuser || '').trim().toLowerCase();
+        let visibleVideos = allVideos;
+        if (currentuser) {
+            const wkey = (v) => `${v.owner}:${v.permlink}`;
+            const ids = allVideos.map((v) => `${currentuser}:${wkey(v)}`);
+            const watched = await db.collection('watch_history')
+                .find({ _id: { $in: ids } }, { projection: { _id: 1 } }).toArray();
+            const watchedSet = new Set(watched.map((w) => w._id));
+            visibleVideos = allVideos.filter((v) => !watchedSet.has(`${currentuser}:${wkey(v)}`));
+        }
+
+        const total = visibleVideos.length;
         const totalPages = Math.ceil(total / limit);
-        const videos = allVideos.slice(skip, skip + limit);
+        const videos = visibleVideos.slice(skip, skip + limit);
         videos.forEach(v => { delete v._sortDate; delete v._source; });
 
         // Return response

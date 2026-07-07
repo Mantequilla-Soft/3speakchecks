@@ -4,6 +4,7 @@ const { getDb } = require('../utils/db');
 const { nsfwFilterTags, nsfwFilterHiveTags } = require('../utils/filters');
 const { HIDDEN_AUTHORS, TRENDING_CANDIDATE_LIMIT, TRENDING_VIEWS_WEIGHT, TRENDING_VOTES_WEIGHT, TRENDING_COMMENTS_WEIGHT, TRENDING_REWARD_WEIGHT, TRENDING_RESHARE_WEIGHT, RESHARE_WEIGHT } = require('../utils/config');
 const { fetchHiveRewards, fetchLivePageData } = require('../utils/hive');
+const { INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTags, tagsMatchInterests } = require('../utils/interests');
 
 // Endpoint to get recommended feed
 router.get('/recommended', async (req, res) => {
@@ -442,12 +443,47 @@ router.get('/trendingSorted', async (req, res) => {
             video.trending_score = (video.base_score || 0) + reshareCount * TRENDING_RESHARE_WEIGHT;
         }
 
+        // Interest weighting: multiply the score of videos whose tags (own hive
+        // tags + transcription tags) match the caller's ?interests=. No-op when
+        // no interests are supplied, so existing callers are unaffected.
+        const interestSet = parseInterests(req);
+        if (interestSet.size) {
+            const subKey = (v) => ({
+                author: v.owner,
+                permlink: v._source === 'embed' ? v._embedPermlink : v.permlink,
+            });
+            const transcription = await fetchTranscriptionTags(db, candidateVideos.map(subKey));
+            for (const video of candidateVideos) {
+                const { author, permlink } = subKey(video);
+                const own = normalizeTags(video.tags_v2 || video.tags);
+                const tr = transcription.get(`${author}/${permlink}`);
+                if (tagsMatchInterests(own, tr, interestSet)) {
+                    video.trending_score = (video.trending_score || 0) * INTEREST_MULTIPLIER;
+                    video.interest_match = true;
+                }
+            }
+        }
+
         // Sort by final score
         candidateVideos.sort((a, b) => b.trending_score - a.trending_score);
 
-        const total = candidateVideos.length;
+        // Hide videos the requesting user has already watched (server-side, before
+        // pagination, so pages stay full). Backwards compatible: only when
+        // ?currentuser= is supplied. watch_history _id = "user:owner:hivePermlink".
+        const currentuser = (req.query.currentuser || '').trim().toLowerCase();
+        let visibleVideos = candidateVideos;
+        if (currentuser) {
+            const wkey = (v) => `${v.owner}:${v.permlink}`;
+            const ids = candidateVideos.map((v) => `${currentuser}:${wkey(v)}`);
+            const watched = await db.collection('watch_history')
+                .find({ _id: { $in: ids } }, { projection: { _id: 1 } }).toArray();
+            const watchedSet = new Set(watched.map((w) => w._id));
+            visibleVideos = candidateVideos.filter((v) => !watchedSet.has(`${currentuser}:${wkey(v)}`));
+        }
+
+        const total = visibleVideos.length;
         const totalPages = Math.ceil(total / limit);
-        const videos = candidateVideos.slice(skip, skip + limit);
+        const videos = visibleVideos.slice(skip, skip + limit);
 
         // Clean up internal fields
         videos.forEach(v => { delete v._source; delete v._embedPermlink; });
