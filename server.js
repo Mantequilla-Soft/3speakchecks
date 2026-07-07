@@ -16,6 +16,7 @@ const { schedule: scheduleCollectSubs } = require('./services/collectSubscriptio
 const { schedule: scheduleAudioPayouts } = require('./services/audioPayouts');
 const { schedule: scheduleListenConsolidation } = require('./services/listenConsolidation');
 const { schedule: scheduleScheduledPosts } = require('./services/scheduledPosts');
+const { schedule: scheduleWatchRetention } = require('./services/watchRetention');
 
 // Routes
 const healthRoutes = require('./routes/health');
@@ -30,6 +31,7 @@ const verifyRoutes = require('./routes/verify');
 const scheduledPostsRoutes = require('./routes/scheduledPosts');
 const communitiesRoutes = require('./routes/communities');
 const promoteRoutes = require('./routes/promote');
+const analyticsRoutes = require('./routes/analytics');
 
 const app = express();
 
@@ -54,6 +56,7 @@ app.use('/rss', rssRoutes);
 app.use('/verify', verifyRoutes);
 app.use('/scheduled-posts', scheduledPostsRoutes);
 app.use('/', communitiesRoutes);
+app.use('/', analyticsRoutes);
 
 // Track whether heavy sync tasks are running
 let syncRunning = false;
@@ -169,6 +172,10 @@ async function startServer() {
     // into embed-audio (archivedListens) then delete them. Keeps unpaid payable
     // rows. Set LISTEN_CONSOLIDATE_DRY_RUN=true to preview without deleting.
     scheduleListenConsolidation();
+
+    // Delete watch-time records (view-durations/heatmaps/sessions) for videos
+    // whose post date is older than 3 months (WATCH_RETENTION_DAYS).
+    scheduleWatchRetention();
 
     app.listen(PORT, () => {
         console.log(`Server is running on port ${PORT}`);
