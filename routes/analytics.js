@@ -224,7 +224,7 @@ function fmtVideo(v, meta, eng) {
 }
 
 // GET /analytics/overview?username=X&days=&content=
-router.get('/analytics/overview', async (req, res) => {
+router.get(['/analytics/overview', '/creator-stats/overview'], async (req, res) => {
   try {
     const username = String(req.query.username || '').toLowerCase();
     if (!HIVE_RE.test(username)) return res.status(400).json({ success: false, error: 'invalid username' });
@@ -285,7 +285,7 @@ router.get('/analytics/overview', async (req, res) => {
 });
 
 // GET /analytics/timeseries?username=X&days=&content=  → daily watch-time + views
-router.get('/analytics/timeseries', async (req, res) => {
+router.get(['/analytics/timeseries', '/creator-stats/timeseries'], async (req, res) => {
   try {
     const username = String(req.query.username || '').toLowerCase();
     if (!HIVE_RE.test(username)) return res.status(400).json({ success: false, error: 'invalid username' });
@@ -322,7 +322,7 @@ router.get('/analytics/timeseries', async (req, res) => {
 });
 
 // GET /analytics/has-data?username=X&permlink=Y
-router.get('/analytics/has-data', async (req, res) => {
+router.get(['/analytics/has-data', '/creator-stats/has-data'], async (req, res) => {
   try {
     const username = String(req.query.username || '').toLowerCase();
     const permlink = String(req.query.permlink || '').trim();
@@ -340,7 +340,7 @@ router.get('/analytics/has-data', async (req, res) => {
 });
 
 // GET /analytics/video?username=X&permlink=Y  (all-time; retention + most-replayed)
-router.get('/analytics/video', async (req, res) => {
+router.get(['/analytics/video', '/creator-stats/video'], async (req, res) => {
   try {
     const username = String(req.query.username || '').toLowerCase();
     const permlink = String(req.query.permlink || '').trim();
@@ -396,7 +396,7 @@ router.get('/analytics/video', async (req, res) => {
 });
 
 // GET /analytics/demographics?username=X&days=&content=
-router.get('/analytics/demographics', async (req, res) => {
+router.get(['/analytics/demographics', '/creator-stats/demographics'], async (req, res) => {
   try {
     const username = String(req.query.username || '').toLowerCase();
     if (!HIVE_RE.test(username)) return res.status(400).json({ success: false, error: 'invalid username' });
