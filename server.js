@@ -17,6 +17,7 @@ const { schedule: scheduleAudioPayouts } = require('./services/audioPayouts');
 const { schedule: scheduleListenConsolidation } = require('./services/listenConsolidation');
 const { schedule: scheduleScheduledPosts } = require('./services/scheduledPosts');
 const { schedule: scheduleWatchRetention } = require('./services/watchRetention');
+const { scheduleRetention } = require('./services/retention');
 
 // Routes
 const healthRoutes = require('./routes/health');
@@ -176,6 +177,10 @@ async function startServer() {
     // Delete watch-time records (view-durations/heatmaps/sessions) for videos
     // whose post date is older than 3 months (WATCH_RETENTION_DAYS).
     scheduleWatchRetention();
+
+    // Retention ranking: score every video from its watch-duration data in a
+    // worker thread every RETENTION_INTERVAL_MIN; feeds multiply their score by it.
+    scheduleRetention();
 
     app.listen(PORT, () => {
         console.log(`Server is running on port ${PORT}`);

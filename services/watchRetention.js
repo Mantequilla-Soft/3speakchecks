@@ -1,11 +1,12 @@
 /**
  * Watch-time retention cleanup.
  *
- * Deletes the watch-time records (view-durations rows, the view-heatmaps
- * aggregate, and any leftover view-sessions) for videos whose POST DATE is older
- * than WATCH_RETENTION_DAYS (default 90 ≈ 3 months). The post date comes from the
- * video's embed-video / legacy `videos` doc; if it can't be determined the
- * records are left untouched (never guess-delete).
+ * Deletes individual watch-time ROWS (view-durations sessions) once the ROW
+ * itself is older than WATCH_RETENTION_DAYS (default 90 ≈ 3 months), by the row's
+ * own `updatedAt` — NOT by the video's post date. So an old video that gets
+ * watched again keeps its fresh rows and can re-enter the retention ranking; only
+ * stale watch data ages out. Old view-sessions are pruned too, and a video's
+ * "most replayed" heatmap is dropped only once it has NO remaining rows at all.
  */
 const cron = require('node-cron');
 const { getDb } = require('../utils/db');
@@ -24,54 +25,48 @@ async function purgeOldWatchRecords() {
   const db = getDb();
   const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000);
 
-  // The set of videos that have watch data (one heatmap doc per video), plus any
-  // that have duration rows but no heatmap doc.
-  const videos = await db.collection(WATCH_HEATMAP)
+  // 1. Delete watch rows whose OWN last activity is older than the window. A new
+  //    watch of an old video is a fresh row (recent updatedAt) → it survives, so
+  //    the video re-enters ranking instead of being permanently purged.
+  const rowRes = await db.collection(WATCH_LOG).deleteMany({ updatedAt: { $lt: cutoff } });
+
+  // 2. Prune stale sessions (they also carry a TTL; this is a backstop).
+  const sesRes = await db.collection(WATCH_SESSION).deleteMany({
+    $or: [{ startedAt: { $lt: cutoff } }, { lastBeatAt: { $lt: cutoff } }],
+  });
+
+  // 3. Drop the "most replayed" heatmap only for videos that have NO watch rows
+  //    left at all (fully aged out) — otherwise the aggregate would linger forever.
+  const liveVids = new Set(
+    (await db.collection(WATCH_LOG)
+      .aggregate([{ $group: { _id: { owner: '$owner', permlink: '$permlink' } } }]).toArray())
+      .map((d) => `${d._id.owner}/${d._id.permlink}`)
+  );
+  const heatmaps = await db.collection(WATCH_HEATMAP)
     .find({}, { projection: { owner: 1, permlink: 1 } }).toArray();
-  const seen = new Set(videos.map((v) => `${v.owner}/${v.permlink}`));
-  const durVids = await db.collection(WATCH_LOG).aggregate([
-    { $group: { _id: { owner: '$owner', permlink: '$permlink' } } },
-  ]).toArray();
-  for (const d of durVids) {
-    const key = `${d._id.owner}/${d._id.permlink}`;
-    if (!seen.has(key)) { seen.add(key); videos.push({ owner: d._id.owner, permlink: d._id.permlink }); }
+  const deadIds = heatmaps
+    .filter((h) => !liveVids.has(`${h.owner}/${h.permlink}`))
+    .map((h) => h._id);
+  let deadHeatmaps = 0;
+  if (deadIds.length) {
+    const hr = await db.collection(WATCH_HEATMAP).deleteMany({ _id: { $in: deadIds } });
+    deadHeatmaps = hr.deletedCount || 0;
   }
 
-  let purgedVideos = 0;
-  let purgedRows = 0;
-  for (const { owner, permlink } of videos) {
-    if (!owner || !permlink) continue;
-
-    // Resolve the video's post date from its doc.
-    let postDate = null;
-    const ev = await db.collection('embed-video').findOne({ owner, permlink }, { projection: { createdAt: 1 } });
-    if (ev?.createdAt) postDate = new Date(ev.createdAt);
-    if (!postDate) {
-      const lv = await db.collection('videos').findOne({ owner, permlink }, { projection: { created: 1, createdAt: 1 } });
-      const raw = lv?.created || lv?.createdAt;
-      if (raw) postDate = new Date(raw);
-    }
-    if (!postDate || isNaN(postDate.getTime()) || postDate >= cutoff) continue;
-
-    const r = await db.collection(WATCH_LOG).deleteMany({ owner, permlink });
-    await db.collection(WATCH_HEATMAP).deleteMany({ owner, permlink });
-    await db.collection(WATCH_SESSION).deleteMany({ owner, permlink });
-    purgedVideos += 1;
-    purgedRows += r.deletedCount || 0;
-  }
-
-  console.log(`[watch-retention] purged ${purgedRows} watch records across ${purgedVideos} videos older than ${RETENTION_DAYS} days`);
+  console.log(`[watch-retention] purged ${rowRes.deletedCount} watch rows, ${sesRes.deletedCount} sessions, ${deadHeatmaps} dead heatmaps (rows older than ${RETENTION_DAYS}d)`);
 }
 
 // Daily at 04:30, plus one delayed run ~5 min after startup.
 function schedule() {
+  // Index the field both this cleanup and the retention worker filter on.
+  getDb().collection(WATCH_LOG).createIndex({ updatedAt: 1 }).catch(() => {});
   cron.schedule('30 4 * * *', () => {
     purgeOldWatchRecords().catch((e) => console.error('[watch-retention] error:', e.message));
   });
   setTimeout(() => {
     purgeOldWatchRecords().catch((e) => console.error('[watch-retention] error:', e.message));
   }, 5 * 60 * 1000);
-  console.log(`Watch-retention cleanup scheduled (daily 04:30, >${RETENTION_DAYS}d old videos)`);
+  console.log(`Watch-retention cleanup scheduled (daily 04:30, rows older than ${RETENTION_DAYS}d)`);
 }
 
 module.exports = { purgeOldWatchRecords, schedule };

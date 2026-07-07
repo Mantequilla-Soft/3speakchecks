@@ -6,6 +6,7 @@ const { HIDDEN_AUTHORS, SHORT_SORT_INTERVAL, REWARD_WEIGHT, RESHARE_WEIGHT, ENAB
 const { fetchHiveRewards, fetchLivePageData, fetchFollowerCounts, hiveReputationToScore, mulberry32, getFollowingList, reputationCache } = require('../utils/hive');
 const { sortedShortsCache, SORTED_SHORTS_CACHE_TTL, getCachedViews, setCachedViews } = require('../utils/cache');
 const { INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTags, tagsMatchInterests } = require('../utils/interests');
+const { applyRetention } = require('../utils/retentionRank');
 
 // Endpoint to get shorts feed (original)
 router.get('/shorts', async (req, res) => {
@@ -546,6 +547,10 @@ router.get('/shortssorted', async (req, res) => {
                     if (tagsMatchInterests(own, tr, interestSet)) short.sort_score *= INTEREST_MULTIPLIER;
                 }
             }
+
+            // Retention re-rank (bounded multiplier from the cached video-retention;
+            // shorts key by owner/permlink = the asset id, same as view-durations).
+            await applyRetention(db, filteredShorts, { scoreField: 'sort_score' });
 
             // Sort by score descending
             const scoreSorted = [...filteredShorts].sort((a, b) => b.sort_score - a.sort_score);
