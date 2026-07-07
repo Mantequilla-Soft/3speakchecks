@@ -5,6 +5,7 @@ const { nsfwFilterTags, nsfwFilterHiveTags } = require('../utils/filters');
 const { HIDDEN_AUTHORS, TRENDING_CANDIDATE_LIMIT, TRENDING_VIEWS_WEIGHT, TRENDING_VOTES_WEIGHT, TRENDING_COMMENTS_WEIGHT, TRENDING_REWARD_WEIGHT, TRENDING_RESHARE_WEIGHT, RESHARE_WEIGHT } = require('../utils/config');
 const { fetchHiveRewards, fetchLivePageData } = require('../utils/hive');
 const { INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTags, tagsMatchInterests } = require('../utils/interests');
+const { applyRetention } = require('../utils/retentionRank');
 
 // Endpoint to get recommended feed
 router.get('/recommended', async (req, res) => {
@@ -463,6 +464,12 @@ router.get('/trendingSorted', async (req, res) => {
                 }
             }
         }
+
+        // Retention re-rank: multiply trending_score by each video's bounded
+        // retention factor (cached in video-retention; no-op for videos without a
+        // record). This is the shared quality signal applied to every feed that
+        // already uses interests / watch-history. See algo.md.
+        await applyRetention(db, candidateVideos, { scoreField: 'trending_score' });
 
         // Sort by final score
         candidateVideos.sort((a, b) => b.trending_score - a.trending_score);

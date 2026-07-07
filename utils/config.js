@@ -40,6 +40,33 @@ module.exports = {
     HIDDEN_AUTHORS: (process.env.HIDDEN_AUTHORS || 'threespeak-fixer')
         .split(',').map(s => s.trim()).filter(Boolean),
     TRENDING_INTERVAL_MIN: parseInt(process.env.TRENDING_INTERVAL_MIN) || 15,
+
+    // ─── Retention ranking (NEW, independent of the legacy trending flagger) ───
+    // A separate cron aggregates the watch-duration data (view-durations /
+    // view-heatmaps) into a per-video quality score, cached in RETENTION_COLLECTION.
+    // Feeds that already use interests / watch-history then multiply their existing
+    // score by a bounded retention factor. See services/retention.js + algo.md.
+    RETENTION_ENABLED: parseBool(process.env.RETENTION_ENABLED, true),
+    RETENTION_INTERVAL_MIN: parseInt(process.env.RETENTION_INTERVAL_MIN) || 5,   // was 15 for trending; retention runs every 5 min
+    RETENTION_COLLECTION: process.env.RETENTION_COLLECTION || 'video-retention',
+    RETENTION_WINDOW_DAYS: parseInt(process.env.RETENTION_WINDOW_DAYS) || 90,    // matches the watch-retention cleanup window
+    RETENTION_MIN_SESSION_SECONDS: parseFloat(process.env.RETENTION_MIN_SESSION_SECONDS) || 2, // drop junk/1-beat sessions
+    RETENTION_COMPLETION_PCT: parseFloat(process.env.RETENTION_COMPLETION_PCT) || 70,          // watchedPct ≥ this = "finished"
+    RETENTION_HOOK_FRAC: parseFloat(process.env.RETENTION_HOOK_FRAC) || 0.15,                  // got past the first 15% = "hooked"
+    RETENTION_BAYES_M: parseFloat(process.env.RETENTION_BAYES_M) || 30,          // Bayesian prior strength (≈ viewers needed to trust the raw score)
+    // rawQuality weights (renormalized): unique-coverage %, finish rate, hook rate, replay.
+    RETENTION_W_PCT: parseFloat(process.env.RETENTION_W_PCT ?? '0.5'),
+    RETENTION_W_COMPLETION: parseFloat(process.env.RETENTION_W_COMPLETION ?? '0.3'),
+    RETENTION_W_HOOK: parseFloat(process.env.RETENTION_W_HOOK ?? '0.2'),
+    RETENTION_W_REPLAY: parseFloat(process.env.RETENTION_W_REPLAY ?? '0.1'),
+    // Feed multiplier: score *= clamp(1 + WEIGHT*(relQ-1), MIN_MULT, MAX_MULT).
+    RETENTION_WEIGHT: parseFloat(process.env.RETENTION_WEIGHT ?? '0.6'),
+    RETENTION_MIN_MULT: parseFloat(process.env.RETENTION_MIN_MULT ?? '0.5'),
+    RETENTION_MAX_MULT: parseFloat(process.env.RETENTION_MAX_MULT ?? '2'),
+    // Follow feed is chronological — retention only nudges. A recency half-life
+    // (hours) keeps "newest first" dominant so retention just reorders similar-age
+    // videos. Long default (7 days) → the feed stays close to chronological.
+    RETENTION_FOLLOW_HALFLIFE_H: parseFloat(process.env.RETENTION_FOLLOW_HALFLIFE_H ?? '168'),
     COMMUNITY_SYNC_DELAY_H: parseInt(process.env.COMMUNITY_SYNC_DELAY_H) || 4,
     COMMUNITY_SYNC_INTERVAL_H: parseInt(process.env.COMMUNITY_SYNC_INTERVAL_H) || 4,
     PROFILE_SYNC_DELAY_H: parseInt(process.env.PROFILE_SYNC_DELAY_H) || 3,

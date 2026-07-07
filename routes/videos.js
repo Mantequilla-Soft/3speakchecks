@@ -5,7 +5,8 @@ const { nsfwFilter, nsfwFilterTags, nsfwFilterHiveTags, BANNED_FILTER } = requir
 const { getFollowingList, hiveRpcBatch } = require('../utils/hive');
 const { getCachedViews, setCachedViews } = require('../utils/cache');
 const { validateApiKey } = require('../utils/middleware');
-const { ENABLE_MONGO_WRITES } = require('../utils/config');
+const { ENABLE_MONGO_WRITES, RETENTION_FOLLOW_HALFLIFE_H } = require('../utils/config');
+const { applyRetention } = require('../utils/retentionRank');
 
 // Cache whether hive_tags_lower has been backfilled
 // Once true it stays true. If false, re-check periodically so a backfill
@@ -394,6 +395,7 @@ router.get('/feed/:username', async (req, res) => {
                 play_url: ev.manifest_cid ? `https://ipfs.3speak.tv/ipfs/${ev.manifest_cid}` : null
             },
             _source: 'embed',
+            _embedPermlink: ev.permlink,   // asset id — retention/view-durations key
             _sortDate: new Date(ev.createdAt || 0).getTime()
         }));
 
@@ -406,9 +408,20 @@ router.get('/feed/:username', async (req, res) => {
         const legacyKeys = new Set(legacyWithDate.map(v => `${v.author || v.owner}/${v.permlink}`));
         const uniqueEmbed = embedVideos.filter(ev => !legacyKeys.has(`${ev.author}/${ev.permlink}`));
 
-        // Merge and sort by date descending, then paginate.
+        // Merge, then rank. Base rank = recency decay (half-life
+        // RETENTION_FOLLOW_HALFLIFE_H) so the follow feed stays newest-first;
+        // retention then multiplies it as a bounded nudge, so a slightly older
+        // video with strong retention can edge above a brand-new one but recency
+        // still dominates. See algo.md.
         const allVideos = [...legacyWithDate, ...uniqueEmbed];
-        allVideos.sort((a, b) => b._sortDate - a._sortDate);
+        const nowMs = Date.now();
+        const halfLifeMs = Math.max(1, RETENTION_FOLLOW_HALFLIFE_H) * 3600 * 1000;
+        for (const v of allVideos) {
+            const ageMs = Math.max(0, nowMs - (v._sortDate || 0));
+            v._rankScore = Math.pow(0.5, ageMs / halfLifeMs);
+        }
+        await applyRetention(db, allVideos, { scoreField: '_rankScore' });
+        allVideos.sort((a, b) => (b._rankScore - a._rankScore) || (b._sortDate - a._sortDate));
 
         // Hide videos the requesting user has already watched (server-side, before
         // pagination, so pages stay full). Backwards compatible: only when
@@ -429,7 +442,7 @@ router.get('/feed/:username', async (req, res) => {
         const total = visibleVideos.length;
         const totalPages = Math.ceil(total / limit);
         const videos = visibleVideos.slice(skip, skip + limit);
-        videos.forEach(v => { delete v._sortDate; delete v._source; });
+        videos.forEach(v => { delete v._sortDate; delete v._source; delete v._rankScore; delete v._embedPermlink; delete v.retention_mult; delete v.retention_relq; });
 
         // Return response
         res.json({
