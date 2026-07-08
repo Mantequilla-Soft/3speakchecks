@@ -51,7 +51,7 @@ async function run() {
       { $group: {
         _id: { owner: '$owner', permlink: '$permlink' },
         sessions: { $sum: 1 },
-        viewers: { $addToSet: '$ip' },                       // distinct IPs = confidence (not sessions)
+        viewers: { $addToSet: { $ifNull: ['$viewerId', '$ip'] } }, // distinct viewers = confidence (viewerId; IP for legacy rows)
         sumPct: { $sum: { $ifNull: ['$watchedPct', 0] } },
         completed: { $sum: { $cond: [{ $gte: [{ $ifNull: ['$watchedPct', 0] }, RETENTION_COMPLETION_PCT] }, 1, 0] } },
         hooked: { $sum: { $cond: [{ $gte: [

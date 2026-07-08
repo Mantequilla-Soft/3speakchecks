@@ -92,7 +92,7 @@ async function watchStatsByVideo(db, username, extra = {}) {
     { $group: {
       _id: '$permlink',
       sessions: { $sum: 1 },
-      viewers: { $addToSet: '$ip' },
+      viewers: { $addToSet: { $ifNull: ['$viewerId', '$ip'] } },
       watchSeconds: { $sum: WATCH_SEC },
       avgPct: { $avg: '$watchedPct' },
       avgRate: { $avg: '$avgRate' },
@@ -245,7 +245,11 @@ router.get(['/analytics/overview', '/creator-stats/overview'], async (req, res) 
     const eng = await fetchHiveEngagement(refs);
 
     const videos = perVideo.map((v) => fmtVideo(v, meta, eng));
-    const uniqueViewers = (await db.collection(WATCH_LOG).distinct('ip', { owner: username, ...extra })).length;
+    const uniqueViewers = (await db.collection(WATCH_LOG).aggregate([
+      { $match: { owner: username, ...extra } },
+      { $group: { _id: { $ifNull: ['$viewerId', '$ip'] } } },
+      { $count: 'n' },
+    ]).toArray())[0]?.n || 0;
 
     let totalWatch = 0, totalSessions = 0, totalVotes = 0, totalComments = 0, totalPayout = 0, totalRealViews = 0, pctW = 0, rateW = 0;
     for (const v of videos) {
@@ -300,7 +304,7 @@ router.get(['/analytics/timeseries', '/creator-stats/timeseries'], async (req, r
         _id: { $dateToString: { format: '%Y-%m-%d', date: '$updatedAt' } },
         watchSeconds: { $sum: WATCH_SEC },
         views: { $sum: 1 },
-        viewers: { $addToSet: '$ip' },
+        viewers: { $addToSet: { $ifNull: ['$viewerId', '$ip'] } },
       } },
       { $project: { _id: 0, date: '$_id', watchSeconds: { $round: ['$watchSeconds', 0] }, views: 1, viewers: { $size: '$viewers' } } },
       { $sort: { date: 1 } },
@@ -406,9 +410,17 @@ router.get(['/analytics/demographics', '/creator-stats/demographics'], async (re
     const extra = { ...dateMatch(days), ...(await contentMatch(db, username, content)) };
     const match = { owner: username, ...extra };
 
-    // Sessions per distinct IP → countries (viewers = distinct IPs).
-    const perIp = await db.collection(WATCH_LOG).aggregate([
+    // Distinct VIEWERS (viewerId; IP is the legacy fallback) — for totals and the
+    // new-vs-returning split. Works for private-mode rows (no IP) too.
+    const perViewer = await db.collection(WATCH_LOG).aggregate([
       { $match: match },
+      { $group: { _id: { $ifNull: ['$viewerId', '$ip'] }, sessions: { $sum: 1 } } },
+    ]).toArray();
+
+    // Country demographics come from the IP, which is present only on non-private
+    // rows — private-mode viewers simply don't appear on the map (by design).
+    const perIp = await db.collection(WATCH_LOG).aggregate([
+      { $match: { ...match, ip: { $ne: null } } },
       { $group: { _id: '$ip', sessions: { $sum: 1 } } },
     ]).toArray();
     const countries = {};
@@ -461,15 +473,15 @@ router.get(['/analytics/demographics', '/creator-stats/demographics'], async (re
     // New vs returning: a viewer is "returning" if they have more than one watch
     // session in this range (i.e. they came back), otherwise "new".
     let newViewers = 0, returningViewers = 0;
-    for (const r of perIp) {
+    for (const r of perViewer) {
       if ((r.sessions || 0) >= 2) returningViewers += 1; else newViewers += 1;
     }
 
     res.json({
       success: true, username, days, content: content || 'all',
-      totalViewers: perIp.length,
+      totalViewers: perViewer.length,
       locatedViewers: located,
-      unknownViewers: unknown,
+      unknownViewers: Math.max(0, perViewer.length - located), // not on the map (incl. private-mode viewers)
       byCountry,
       byDevice: toSorted(devices, 'device'),
       byBrowser: toSorted(browsers, 'browser'),
