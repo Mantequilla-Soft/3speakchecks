@@ -418,7 +418,9 @@ router.get('/feed/:username', async (req, res) => {
         const halfLifeMs = Math.max(1, RETENTION_FOLLOW_HALFLIFE_H) * 3600 * 1000;
         for (const v of allVideos) {
             const ageMs = Math.max(0, nowMs - (v._sortDate || 0));
-            v._rankScore = Math.pow(0.5, ageMs / halfLifeMs);
+            // Floor > 0 so a missing/epoch _sortDate can't zero the score (which
+            // would make the interest/retention multipliers no-ops).
+            v._rankScore = Math.max(1e-6, Math.pow(0.5, ageMs / halfLifeMs));
         }
         // Interest boost → retention → sort → hide-seen (?currentuser=), on the
         // recency-decayed base score. Shared with the discovery feeds so the follow
@@ -428,7 +430,7 @@ router.get('/feed/:username', async (req, res) => {
         const total = visibleVideos.length;
         const totalPages = Math.ceil(total / limit);
         const videos = visibleVideos.slice(skip, skip + limit);
-        videos.forEach(v => { delete v._sortDate; delete v._source; delete v._rankScore; delete v._embedPermlink; delete v.retention_mult; delete v.retention_relq; });
+        videos.forEach(v => { delete v._sortDate; delete v._source; delete v._rankScore; delete v._embedPermlink; delete v.retention_mult; delete v.retention_relq; delete v.interest_match; });
 
         // Return response
         res.json({

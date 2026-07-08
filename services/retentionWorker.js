@@ -47,7 +47,12 @@ async function run() {
   try {
     // ── 1. Per-video watch metrics (the aggregation runs on the Mongo server) ──
     const rows = await db.collection(WATCH_LOG).aggregate([
-      { $match: { updatedAt: { $gte: cutoff }, contentSeconds: { $gte: RETENTION_MIN_SESSION_SECONDS } } },
+      // Junk-session filter on the SAME coalesced value used downstream — matching
+      // `contentSeconds` alone would silently drop older watchedSeconds-only rows.
+      { $match: {
+        updatedAt: { $gte: cutoff },
+        $expr: { $gte: [{ $ifNull: ['$contentSeconds', { $ifNull: ['$watchedSeconds', 0] }] }, RETENTION_MIN_SESSION_SECONDS] },
+      } },
       { $group: {
         _id: { owner: '$owner', permlink: '$permlink' },
         sessions: { $sum: 1 },

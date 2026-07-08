@@ -495,7 +495,7 @@ router.get('/trendingSorted', async (req, res) => {
         const videos = visibleVideos.slice(skip, skip + limit);
 
         // Clean up internal fields
-        videos.forEach(v => { delete v._source; delete v._embedPermlink; });
+        videos.forEach(v => { delete v._source; delete v._embedPermlink; delete v.retention_mult; delete v.retention_relq; delete v.interest_match; });
 
         res.json({
             success: true,
@@ -626,7 +626,7 @@ router.get('/firstUploads', async (req, res) => {
         const halfLifeMs = Math.max(1, RETENTION_FOLLOW_HALFLIFE_H) * 3600 * 1000;
         for (const v of allVideos) {
             const ageMs = Math.max(0, nowMs - (v._sortDate || 0));
-            v._rankScore = Math.pow(0.5, ageMs / halfLifeMs);
+            v._rankScore = Math.max(1e-6, Math.pow(0.5, ageMs / halfLifeMs)); // floor > 0 (see follow feed)
         }
         const rankedVideos = await rankFeed(db, req, allVideos, { scoreField: '_rankScore' });
 
