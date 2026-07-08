@@ -383,10 +383,15 @@ router.get('/feed/:username', async (req, res) => {
             console.log(`Feed fallback for ${username}: showing all videos (no following list)`);
         }
 
-        // Fetch legacy + embed videos in parallel (over-fetch, merge, paginate).
+        // Fetch a BOUNDED recent-candidate pool from each collection, then rank +
+        // hide-seen + paginate over it. A fixed cap (not limit+skip) is what keeps
+        // `total` stable and correct: with "Hide watched" on, a limit+skip window
+        // would shrink after filtering and stop infinite scroll early, while a
+        // countDocuments total would loop on empty pages. Bounded pool = neither.
+        const FOLLOW_CANDIDATE_LIMIT = Math.max(limit, 300);
         const [legacyVideos, embedVideosRaw] = await Promise.all([
-            videosCollection.find(legacyQuery).sort({ created: -1 }).limit(limit + skip).toArray(),
-            embedVideoCollection.find(embedQuery).sort({ createdAt: -1 }).limit(limit + skip).toArray()
+            videosCollection.find(legacyQuery).sort({ created: -1 }).limit(FOLLOW_CANDIDATE_LIMIT).toArray(),
+            embedVideoCollection.find(embedQuery).sort({ createdAt: -1 }).limit(FOLLOW_CANDIDATE_LIMIT).toArray()
         ]);
 
         // Transform embed videos to the legacy shape (same mapping the other feeds use).
