@@ -6,6 +6,8 @@ const { HIDDEN_AUTHORS, TRENDING_CANDIDATE_LIMIT, TRENDING_VIEWS_WEIGHT, TRENDIN
 const { fetchHiveRewards, fetchLivePageData } = require('../utils/hive');
 const { INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTags, tagsMatchInterests } = require('../utils/interests');
 const { applyRetention } = require('../utils/retentionRank');
+const { rankFeed } = require('../utils/feedRank');
+const { RETENTION_FOLLOW_HALFLIFE_H } = require('../utils/config');
 
 // Endpoint to get recommended feed
 router.get('/recommended', async (req, res) => {
@@ -600,6 +602,8 @@ router.get('/firstUploads', async (req, res) => {
                 video_v2: ev.permlink,
                 play_url: ev.manifest_cid ? `https://ipfs.3speak.tv/ipfs/${ev.manifest_cid}` : null
             },
+            _source: 'embed',
+            _embedPermlink: ev.permlink,   // asset id — retention/interest key
             _sortDate: new Date(ev.createdAt || 0).getTime()
         }));
 
@@ -613,16 +617,25 @@ router.get('/firstUploads', async (req, res) => {
         const legacyKeys = new Set(legacyWithDate.map(v => `${v.author || v.owner}/${v.permlink}`));
         const uniqueEmbed = embedVideos.filter(ev => !legacyKeys.has(`${ev.author}/${ev.permlink}`));
 
-        // Merge and sort by date descending
+        // Recency-decayed base, then the shared pipeline (interests → retention →
+        // sort → hide-seen). Recency stays dominant so this still showcases the
+        // newest first-time uploads; retention is ~neutral for brand-new creators
+        // (no data) and interests/hide-seen apply when the caller sends them.
         const allVideos = [...legacyWithDate, ...uniqueEmbed];
-        allVideos.sort((a, b) => b._sortDate - a._sortDate);
+        const nowMs = Date.now();
+        const halfLifeMs = Math.max(1, RETENTION_FOLLOW_HALFLIFE_H) * 3600 * 1000;
+        for (const v of allVideos) {
+            const ageMs = Math.max(0, nowMs - (v._sortDate || 0));
+            v._rankScore = Math.pow(0.5, ageMs / halfLifeMs);
+        }
+        const rankedVideos = await rankFeed(db, req, allVideos, { scoreField: '_rankScore' });
 
-        const total = allVideos.length;
+        const total = rankedVideos.length;
         const totalPages = Math.ceil(total / limit);
-        const videos = allVideos.slice(skip, skip + limit);
+        const videos = rankedVideos.slice(skip, skip + limit);
 
         // Clean up internal fields
-        videos.forEach(v => { delete v._sortDate; });
+        videos.forEach(v => { delete v._sortDate; delete v._source; delete v._embedPermlink; delete v._rankScore; delete v.retention_mult; delete v.retention_relq; delete v.interest_match; });
 
         // Return response
         res.json({
@@ -680,6 +693,7 @@ function transformEmbedVideoToLegacy(ev) {
             play_url: ev.manifest_cid ? `https://ipfs.3speak.tv/ipfs/${ev.manifest_cid}` : null,
         },
         _source: 'embed',
+        _embedPermlink: ev.permlink,   // asset id — retention/interest key
         _sortDate: new Date(ev.createdAt || 0).getTime(),
     };
 }
@@ -824,14 +838,15 @@ router.get('/community/:id/trending', async (req, res) => {
         const legacyKeys = new Set(legacyWithMeta.map(v => `${v.author || v.owner}/${v.permlink}`));
         const uniqueEmbed = embedWithMeta.filter(ev => !legacyKeys.has(`${ev.author}/${ev.permlink}`));
 
-        // Rank by views desc, tie-break by recency.
-        const allVideos = [...legacyWithMeta, ...uniqueEmbed].sort(
-            (a, b) => (b._views - a._views) || (b._sortDate - a._sortDate)
-        );
-        const total = allVideos.length;
+        // Base = views (this is the community "trending" row), then the shared
+        // pipeline (interests → retention → sort → hide-seen) tilts it.
+        const allVideos = [...legacyWithMeta, ...uniqueEmbed];
+        for (const v of allVideos) v._rankScore = (v._views || 0) + 1;
+        const rankedVideos = await rankFeed(db, req, allVideos, { scoreField: '_rankScore' });
+        const total = rankedVideos.length;
         const totalPages = Math.ceil(total / limit);
-        const videos = allVideos.slice(skip, skip + limit);
-        videos.forEach(v => { delete v._views; delete v._sortDate; delete v._source; });
+        const videos = rankedVideos.slice(skip, skip + limit);
+        videos.forEach(v => { delete v._views; delete v._sortDate; delete v._source; delete v._embedPermlink; delete v._rankScore; delete v.retention_mult; delete v.retention_relq; delete v.interest_match; });
 
         res.json({
             success: true,

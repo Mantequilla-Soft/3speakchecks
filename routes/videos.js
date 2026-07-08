@@ -6,7 +6,7 @@ const { getFollowingList, hiveRpcBatch } = require('../utils/hive');
 const { getCachedViews, setCachedViews } = require('../utils/cache');
 const { validateApiKey } = require('../utils/middleware');
 const { ENABLE_MONGO_WRITES, RETENTION_FOLLOW_HALFLIFE_H } = require('../utils/config');
-const { applyRetention } = require('../utils/retentionRank');
+const { rankFeed } = require('../utils/feedRank');
 
 // Cache whether hive_tags_lower has been backfilled
 // Once true it stays true. If false, re-check periodically so a backfill
@@ -420,24 +420,10 @@ router.get('/feed/:username', async (req, res) => {
             const ageMs = Math.max(0, nowMs - (v._sortDate || 0));
             v._rankScore = Math.pow(0.5, ageMs / halfLifeMs);
         }
-        await applyRetention(db, allVideos, { scoreField: '_rankScore' });
-        allVideos.sort((a, b) => (b._rankScore - a._rankScore) || (b._sortDate - a._sortDate));
-
-        // Hide videos the requesting user has already watched (server-side, before
-        // pagination, so pages stay full). Backwards compatible: only when
-        // ?currentuser= is supplied. watch_history _id = "user:owner:hivePermlink"
-        // (here v.owner + v.permlink, permlink being the Hive permlink) — same
-        // filter the trending / grouped feeds use.
-        const currentuser = (req.query.currentuser || '').trim().toLowerCase();
-        let visibleVideos = allVideos;
-        if (currentuser) {
-            const wkey = (v) => `${v.owner}:${v.permlink}`;
-            const ids = allVideos.map((v) => `${currentuser}:${wkey(v)}`);
-            const watched = await db.collection('watch_history')
-                .find({ _id: { $in: ids } }, { projection: { _id: 1 } }).toArray();
-            const watchedSet = new Set(watched.map((w) => w._id));
-            visibleVideos = allVideos.filter((v) => !watchedSet.has(`${currentuser}:${wkey(v)}`));
-        }
+        // Interest boost → retention → sort → hide-seen (?currentuser=), on the
+        // recency-decayed base score. Shared with the discovery feeds so the follow
+        // feed re-ranks by the same signals when interests / hide-watched are on.
+        const visibleVideos = await rankFeed(db, req, allVideos, { scoreField: '_rankScore' });
 
         const total = visibleVideos.length;
         const totalPages = Math.ceil(total / limit);
