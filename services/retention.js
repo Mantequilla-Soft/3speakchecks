@@ -23,7 +23,16 @@ function runOnce() {
   }
   running = true;
   const startedAt = Date.now();
-  const worker = new Worker(WORKER_PATH);
+  let worker;
+  try {
+    worker = new Worker(WORKER_PATH);
+  } catch (err) {
+    // A synchronous spawn failure would otherwise leave `running` stuck true and
+    // silently disable retention forever — always release the guard.
+    running = false;
+    console.error('[retention] failed to spawn worker:', err && err.message);
+    return;
+  }
   worker.once('message', (msg) => {
     if (msg && msg.ok) {
       console.log(`[retention] scored ${msg.videos} videos in ${msg.ms}ms (globalMean=${msg.globalMean}, removed=${msg.removed})`);

@@ -6,7 +6,7 @@ const { getFollowingList, hiveRpcBatch } = require('../utils/hive');
 const { getCachedViews, setCachedViews } = require('../utils/cache');
 const { validateApiKey } = require('../utils/middleware');
 const { ENABLE_MONGO_WRITES, RETENTION_FOLLOW_HALFLIFE_H } = require('../utils/config');
-const { applyRetention } = require('../utils/retentionRank');
+const { rankFeed } = require('../utils/feedRank');
 
 // Cache whether hive_tags_lower has been backfilled
 // Once true it stays true. If false, re-check periodically so a backfill
@@ -80,6 +80,22 @@ router.get('/videos/tag/:tag', async (req, res) => {
 
         // Build query — special case for "mantecurated" tag
         let videos, total;
+
+        // Tag feed is already tag-scoped; the shared pipeline still adds retention
+        // re-rank, interest boost and hide-seen (?currentuser=). Recency-decayed
+        // base keeps it roughly newest-first. Operates on the fetched candidate
+        // window (same over-fetch model as the other feeds).
+        const tagHalfLifeMs = Math.max(1, RETENTION_FOLLOW_HALFLIFE_H) * 3600 * 1000;
+        const rankTag = async (arr) => {
+            const nowMs = Date.now();
+            for (const v of arr) {
+                const ageMs = Math.max(0, nowMs - new Date(v.created || v.created_at || 0).getTime());
+                v._rankScore = Math.max(1e-6, Math.pow(0.5, ageMs / tagHalfLifeMs));
+            }
+            const ranked = await rankFeed(db, req, arr, { scoreField: '_rankScore' });
+            ranked.forEach(v => { delete v._rankScore; delete v._source; delete v._embedPermlink; delete v.retention_mult; delete v.retention_relq; delete v.interest_match; });
+            return ranked;
+        };
         if (tag.toLowerCase() === 'mantecurated') {
             const legacyQuery = { mantecurated: true, status: 'published', ...nsfwFilter(req) };
             const embedQuery = { mantecurated: true, status: 'published', ...nsfwFilterHiveTags(req) };
@@ -123,9 +139,9 @@ router.get('/videos/tag/:tag', async (req, res) => {
                 short: !!ev.short,
                 _source: 'embed',
             }));
-            const merged = [...legacyVideos, ...normalized].sort((a, b) => new Date(b.created) - new Date(a.created));
-            total = merged.length;
-            videos = merged.slice(skip, skip + limit);
+            const ranked = await rankTag([...legacyVideos, ...normalized]);
+            total = ranked.length;
+            videos = ranked.slice(skip, skip + limit);
         } else {
             const tagLower = tag.toLowerCase();
             const embedCollection = db.collection('embed-video');
@@ -163,6 +179,7 @@ router.get('/videos/tag/:tag', async (req, res) => {
                 },
                 short: !!ev.short,
                 _source: 'embed',
+                _embedPermlink: ev.permlink,   // asset id — retention/interest key
             });
 
             if (type === 'videos') {
@@ -185,9 +202,9 @@ router.get('/videos/tag/:tag', async (req, res) => {
                 const uniqueEmbed = normalizedEmbed.filter(v => !legacyKeys.has(`${v.author}/${v.permlink}`));
 
                 // Merge, sort, paginate
-                const merged = [...legacyMapped, ...uniqueEmbed].sort((a, b) => new Date(b.created) - new Date(a.created));
+                const ranked = await rankTag([...legacyMapped, ...uniqueEmbed]);
                 total = legacyCount + uniqueEmbed.length;
-                videos = merged.slice(skip, skip + limit);
+                videos = ranked.slice(skip, skip + limit);
 
             } else if (type === 'shorts') {
                 // Shorts only: DB-level pagination on embed-video
@@ -198,8 +215,8 @@ router.get('/videos/tag/:tag', async (req, res) => {
                 if (sinceDate) query.createdAt = { $gte: sinceDate };
 
                 total = await embedCollection.countDocuments(query);
-                const docs = await embedCollection.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray();
-                videos = docs.map(normalizeEmbed);
+                const docs = await embedCollection.find(query).sort({ createdAt: -1 }).limit(skip + limit).toArray();
+                videos = (await rankTag(docs.map(normalizeEmbed))).slice(skip, skip + limit);
 
             } else {
                 // No type specified — default to videos behaviour
@@ -219,9 +236,9 @@ router.get('/videos/tag/:tag', async (req, res) => {
                 const legacyKeys = new Set(legacyMapped.map(v => `${v.author || v.owner}/${v.permlink}`));
                 const uniqueEmbed = normalizedEmbed.filter(v => !legacyKeys.has(`${v.author}/${v.permlink}`));
 
-                const merged = [...legacyMapped, ...uniqueEmbed].sort((a, b) => new Date(b.created) - new Date(a.created));
+                const ranked = await rankTag([...legacyMapped, ...uniqueEmbed]);
                 total = legacyCount + uniqueEmbed.length;
-                videos = merged.slice(skip, skip + limit);
+                videos = ranked.slice(skip, skip + limit);
             }
         }
 
@@ -366,10 +383,15 @@ router.get('/feed/:username', async (req, res) => {
             console.log(`Feed fallback for ${username}: showing all videos (no following list)`);
         }
 
-        // Fetch legacy + embed videos in parallel (over-fetch, merge, paginate).
+        // Fetch a BOUNDED recent-candidate pool from each collection, then rank +
+        // hide-seen + paginate over it. A fixed cap (not limit+skip) is what keeps
+        // `total` stable and correct: with "Hide watched" on, a limit+skip window
+        // would shrink after filtering and stop infinite scroll early, while a
+        // countDocuments total would loop on empty pages. Bounded pool = neither.
+        const FOLLOW_CANDIDATE_LIMIT = Math.max(limit, 300);
         const [legacyVideos, embedVideosRaw] = await Promise.all([
-            videosCollection.find(legacyQuery).sort({ created: -1 }).limit(limit + skip).toArray(),
-            embedVideoCollection.find(embedQuery).sort({ createdAt: -1 }).limit(limit + skip).toArray()
+            videosCollection.find(legacyQuery).sort({ created: -1 }).limit(FOLLOW_CANDIDATE_LIMIT).toArray(),
+            embedVideoCollection.find(embedQuery).sort({ createdAt: -1 }).limit(FOLLOW_CANDIDATE_LIMIT).toArray()
         ]);
 
         // Transform embed videos to the legacy shape (same mapping the other feeds use).
@@ -418,31 +440,19 @@ router.get('/feed/:username', async (req, res) => {
         const halfLifeMs = Math.max(1, RETENTION_FOLLOW_HALFLIFE_H) * 3600 * 1000;
         for (const v of allVideos) {
             const ageMs = Math.max(0, nowMs - (v._sortDate || 0));
-            v._rankScore = Math.pow(0.5, ageMs / halfLifeMs);
+            // Floor > 0 so a missing/epoch _sortDate can't zero the score (which
+            // would make the interest/retention multipliers no-ops).
+            v._rankScore = Math.max(1e-6, Math.pow(0.5, ageMs / halfLifeMs));
         }
-        await applyRetention(db, allVideos, { scoreField: '_rankScore' });
-        allVideos.sort((a, b) => (b._rankScore - a._rankScore) || (b._sortDate - a._sortDate));
-
-        // Hide videos the requesting user has already watched (server-side, before
-        // pagination, so pages stay full). Backwards compatible: only when
-        // ?currentuser= is supplied. watch_history _id = "user:owner:hivePermlink"
-        // (here v.owner + v.permlink, permlink being the Hive permlink) — same
-        // filter the trending / grouped feeds use.
-        const currentuser = (req.query.currentuser || '').trim().toLowerCase();
-        let visibleVideos = allVideos;
-        if (currentuser) {
-            const wkey = (v) => `${v.owner}:${v.permlink}`;
-            const ids = allVideos.map((v) => `${currentuser}:${wkey(v)}`);
-            const watched = await db.collection('watch_history')
-                .find({ _id: { $in: ids } }, { projection: { _id: 1 } }).toArray();
-            const watchedSet = new Set(watched.map((w) => w._id));
-            visibleVideos = allVideos.filter((v) => !watchedSet.has(`${currentuser}:${wkey(v)}`));
-        }
+        // Interest boost → retention → sort → hide-seen (?currentuser=), on the
+        // recency-decayed base score. Shared with the discovery feeds so the follow
+        // feed re-ranks by the same signals when interests / hide-watched are on.
+        const visibleVideos = await rankFeed(db, req, allVideos, { scoreField: '_rankScore' });
 
         const total = visibleVideos.length;
         const totalPages = Math.ceil(total / limit);
         const videos = visibleVideos.slice(skip, skip + limit);
-        videos.forEach(v => { delete v._sortDate; delete v._source; delete v._rankScore; delete v._embedPermlink; delete v.retention_mult; delete v.retention_relq; });
+        videos.forEach(v => { delete v._sortDate; delete v._source; delete v._rankScore; delete v._embedPermlink; delete v.retention_mult; delete v.retention_relq; delete v.interest_match; });
 
         // Return response
         res.json({
