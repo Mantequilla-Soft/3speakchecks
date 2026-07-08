@@ -80,6 +80,22 @@ router.get('/videos/tag/:tag', async (req, res) => {
 
         // Build query — special case for "mantecurated" tag
         let videos, total;
+
+        // Tag feed is already tag-scoped; the shared pipeline still adds retention
+        // re-rank, interest boost and hide-seen (?currentuser=). Recency-decayed
+        // base keeps it roughly newest-first. Operates on the fetched candidate
+        // window (same over-fetch model as the other feeds).
+        const tagHalfLifeMs = Math.max(1, RETENTION_FOLLOW_HALFLIFE_H) * 3600 * 1000;
+        const rankTag = async (arr) => {
+            const nowMs = Date.now();
+            for (const v of arr) {
+                const ageMs = Math.max(0, nowMs - new Date(v.created || v.created_at || 0).getTime());
+                v._rankScore = Math.max(1e-6, Math.pow(0.5, ageMs / tagHalfLifeMs));
+            }
+            const ranked = await rankFeed(db, req, arr, { scoreField: '_rankScore' });
+            ranked.forEach(v => { delete v._rankScore; delete v._source; delete v._embedPermlink; delete v.retention_mult; delete v.retention_relq; delete v.interest_match; });
+            return ranked;
+        };
         if (tag.toLowerCase() === 'mantecurated') {
             const legacyQuery = { mantecurated: true, status: 'published', ...nsfwFilter(req) };
             const embedQuery = { mantecurated: true, status: 'published', ...nsfwFilterHiveTags(req) };
@@ -123,9 +139,9 @@ router.get('/videos/tag/:tag', async (req, res) => {
                 short: !!ev.short,
                 _source: 'embed',
             }));
-            const merged = [...legacyVideos, ...normalized].sort((a, b) => new Date(b.created) - new Date(a.created));
-            total = merged.length;
-            videos = merged.slice(skip, skip + limit);
+            const ranked = await rankTag([...legacyVideos, ...normalized]);
+            total = ranked.length;
+            videos = ranked.slice(skip, skip + limit);
         } else {
             const tagLower = tag.toLowerCase();
             const embedCollection = db.collection('embed-video');
@@ -163,6 +179,7 @@ router.get('/videos/tag/:tag', async (req, res) => {
                 },
                 short: !!ev.short,
                 _source: 'embed',
+                _embedPermlink: ev.permlink,   // asset id — retention/interest key
             });
 
             if (type === 'videos') {
@@ -185,9 +202,9 @@ router.get('/videos/tag/:tag', async (req, res) => {
                 const uniqueEmbed = normalizedEmbed.filter(v => !legacyKeys.has(`${v.author}/${v.permlink}`));
 
                 // Merge, sort, paginate
-                const merged = [...legacyMapped, ...uniqueEmbed].sort((a, b) => new Date(b.created) - new Date(a.created));
+                const ranked = await rankTag([...legacyMapped, ...uniqueEmbed]);
                 total = legacyCount + uniqueEmbed.length;
-                videos = merged.slice(skip, skip + limit);
+                videos = ranked.slice(skip, skip + limit);
 
             } else if (type === 'shorts') {
                 // Shorts only: DB-level pagination on embed-video
@@ -198,8 +215,8 @@ router.get('/videos/tag/:tag', async (req, res) => {
                 if (sinceDate) query.createdAt = { $gte: sinceDate };
 
                 total = await embedCollection.countDocuments(query);
-                const docs = await embedCollection.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray();
-                videos = docs.map(normalizeEmbed);
+                const docs = await embedCollection.find(query).sort({ createdAt: -1 }).limit(skip + limit).toArray();
+                videos = (await rankTag(docs.map(normalizeEmbed))).slice(skip, skip + limit);
 
             } else {
                 // No type specified — default to videos behaviour
@@ -219,9 +236,9 @@ router.get('/videos/tag/:tag', async (req, res) => {
                 const legacyKeys = new Set(legacyMapped.map(v => `${v.author || v.owner}/${v.permlink}`));
                 const uniqueEmbed = normalizedEmbed.filter(v => !legacyKeys.has(`${v.author}/${v.permlink}`));
 
-                const merged = [...legacyMapped, ...uniqueEmbed].sort((a, b) => new Date(b.created) - new Date(a.created));
+                const ranked = await rankTag([...legacyMapped, ...uniqueEmbed]);
                 total = legacyCount + uniqueEmbed.length;
-                videos = merged.slice(skip, skip + limit);
+                videos = ranked.slice(skip, skip + limit);
             }
         }
 
