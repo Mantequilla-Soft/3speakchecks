@@ -90,6 +90,25 @@ async function connectToMongo() {
         ensureSocialLinkIndexes(db)
             .then(() => console.log('Social-link indexes ensured'))
             .catch(err => console.error('Social-link index creation failed:', err.message));
+
+        // Indexes for the ranking / feed-personalization lookups (2026-07-09).
+        // Without these the interest-boost (subtitles-tags $or), retention
+        // aggregation and heatmap reads were COLLECTION SCANS on every feed request
+        // — heavy on the shared Mongo. Idempotent + background builds.
+        (async () => {
+            const wanted = [
+                ['subtitles-tags', { author: 1, permlink: 1 }],
+                ['view-durations', { owner: 1, permlink: 1 }],
+                ['view-durations', { updatedAt: 1 }],
+                ['view-heatmaps', { owner: 1, permlink: 1 }],
+                ['video-retention', { runAt: 1 }],
+            ];
+            for (const [coll, key] of wanted) {
+                try { await db.collection(coll).createIndex(key, { background: true }); }
+                catch (e) { console.warn(`[idx] ${coll} ${JSON.stringify(key)}: ${e.message}`); }
+            }
+            console.log('Ranking/feed indexes ensured');
+        })().catch(() => {});
     } catch (error) {
         console.error('Failed to connect to MongoDB:', error);
         process.exit(1);
