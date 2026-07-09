@@ -40,7 +40,11 @@ function replayIntensity(buckets) {
 async function run() {
   const startedAt = Date.now();
   const cutoff = new Date(startedAt - RETENTION_WINDOW_DAYS * 24 * 60 * 60 * 1000);
-  const client = new MongoClient(MONGODB_URI);
+  // Small pool: this worker runs one sequential aggregation + a heatmap read +
+  // chunked bulk writes — it never needs the default 100 connections, and a big
+  // burst every 5 min was adding pressure to the shared Mongo (pool saturation →
+  // ECONNREFUSED on the main service). Cap it hard.
+  const client = new MongoClient(MONGODB_URI, { maxPoolSize: 4, minPoolSize: 0, waitQueueTimeoutMS: 20000 });
   await client.connect();
   const db = client.db(DATABASE_NAME);
 

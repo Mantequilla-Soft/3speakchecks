@@ -66,7 +66,15 @@ async function ensureTextIndex(collectionName, config) {
 
 async function connectToMongo() {
     try {
-        const client = new MongoClient(MONGODB_URI);
+        // Cap the pool (was the driver default of 100). The shared Mongo was
+        // hitting its connection limit — 100 here + the retention worker's client
+        // was tipping it into ECONNREFUSED. 75 is ample for this feed API and
+        // leaves headroom for the other services on the same Mongo.
+        const client = new MongoClient(MONGODB_URI, {
+            maxPoolSize: parseInt(process.env.MONGO_MAX_POOL_SIZE, 10) || 75,
+            minPoolSize: 0,
+            waitQueueTimeoutMS: 20000,
+        });
         await client.connect();
         db = client.db(DATABASE_NAME);
         console.log('Connected to MongoDB successfully');
