@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
+const { feedAgeMatch } = require('../utils/feedAge');
 const { nsfwFilter, nsfwFilterTags, nsfwFilterHiveTags } = require('../utils/filters');
 
 // Helper: highlight matched terms in a string
@@ -213,6 +214,7 @@ router.get('/', async (req, res) => {
         if (wantType('video')) {
             searches.push(
                 db.collection('videos').find({
+                    ...feedAgeMatch('created'),
                     ...textQuery,
                     status: 'published',
                     publishFailed: { $ne: true },
@@ -243,6 +245,7 @@ router.get('/', async (req, res) => {
         if (wantType('video')) {
             searches.push(
                 db.collection('embed-video').find({
+                    ...feedAgeMatch('createdAt'),
                     ...textQuery,
                     status: 'published',
                     short: false,
@@ -276,6 +279,7 @@ router.get('/', async (req, res) => {
         if (wantType('short')) {
             searches.push(
                 db.collection('embed-video').find({
+                    ...feedAgeMatch('createdAt'),
                     ...textQuery,
                     status: 'published',
                     short: true,
@@ -408,12 +412,14 @@ router.get('/', async (req, res) => {
 
                     const [vids, embeds] = await Promise.all([
                         db.collection('videos').find({
+                            ...feedAgeMatch('created'),
                             $or: lookups,
                             status: 'published',
                             publishFailed: { $ne: true },
                             ...nsfwFilterTags(req)
                         }, { projection: { owner: 1, author: 1, permlink: 1, title: 1, created: 1, created_at: 1, createdAt: 1, duration: 1, tags_v2: 1, thumbnail: 1, images: 1, views: 1 } }).limit(50).toArray(),
                         db.collection('embed-video').find({
+                            ...feedAgeMatch('createdAt'),
                             $or: lookups.map(l => ({ owner: l.owner, permlink: l.permlink })),
                             status: 'published',
                             ...nsfwFilterHiveTags(req)

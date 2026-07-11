@@ -1,11 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
+const { feedAgeMatch } = require('../utils/feedAge');
 const { nsfwFilterHiveTags } = require('../utils/filters');
 const { HIDDEN_AUTHORS, SHORT_SORT_INTERVAL, REWARD_WEIGHT, RESHARE_WEIGHT, ENABLE_MONGO_WRITES } = require('../utils/config');
 const { fetchHiveRewards, fetchLivePageData, fetchFollowerCounts, hiveReputationToScore, mulberry32, getFollowingList, reputationCache } = require('../utils/hive');
 const { sortedShortsCache, SORTED_SHORTS_CACHE_TTL, getCachedViews, setCachedViews } = require('../utils/cache');
 const { INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTags, tagsMatchInterests } = require('../utils/interests');
+const { getUserFilters, applyUserFilters } = require('../utils/userFilters');
+const { wantsHideWatched } = require('../utils/feedRank');
+const { getWinners } = require('../utils/effectiveTags');
 const { applyRetention } = require('../utils/retentionRank');
 
 // Endpoint to get shorts feed (original)
@@ -171,23 +175,33 @@ router.get('/shorts/stories', async (req, res) => {
             return true;
         });
 
-        // If currentuser is provided, filter out shorts the user has already watched
+        const getHivePermlink = (s) => {
+            if (s.embed_url) {
+                const parts = s.embed_url.replace(/^@/, '').split('/');
+                if (parts.length === 2) return parts[1];
+            }
+            return s.permlink;
+        };
+
+        // Drop dismissed shorts / dismissed creators — ALWAYS, they aren't a toggle.
         let unwatchedShorts = filteredShorts;
         if (currentuser) {
+            const uf = await getUserFilters(db, currentuser);
+            unwatchedShorts = applyUserFilters(unwatchedShorts, uf,
+                (s) => ({ owner: s.owner, permlink: getHivePermlink(s) }));
+        }
+
+        // Then hide already-watched, but ONLY when that preference is on. The
+        // frontend now always sends ?currentuser= (so dismissals apply), so this
+        // must key off ?hidewatched= rather than the mere presence of currentuser.
+        if (currentuser && wantsHideWatched(req)) {
             const watchHistoryCollection = db.collection('watch_history');
-            const getHivePermlink = (s) => {
-                if (s.embed_url) {
-                    const parts = s.embed_url.replace(/^@/, '').split('/');
-                    if (parts.length === 2) return parts[1];
-                }
-                return s.permlink;
-            };
-            const idsToCheck = filteredShorts.map(s => `${currentuser}:${s.owner}:${getHivePermlink(s)}`);
+            const idsToCheck = unwatchedShorts.map(s => `${currentuser}:${s.owner}:${getHivePermlink(s)}`);
             const watchedEntries = await watchHistoryCollection
                 .find({ _id: { $in: idsToCheck } }, { projection: { _id: 1 } })
                 .toArray();
             const watchedSet = new Set(watchedEntries.map(w => w._id));
-            unwatchedShorts = filteredShorts.filter(s => !watchedSet.has(`${currentuser}:${s.owner}:${getHivePermlink(s)}`));
+            unwatchedShorts = unwatchedShorts.filter(s => !watchedSet.has(`${currentuser}:${s.owner}:${getHivePermlink(s)}`));
         }
 
         // Group by creator and count unseen shorts
@@ -393,8 +407,33 @@ router.get('/shortssorted', async (req, res) => {
         const interestSet = parseInterests(req);
         const interestsToken = interestSet.size ? [...interestSet].sort().join(',') : 'none';
 
-        // Check sorted list cache (keyed by seed+app+interests, stores only lightweight identifiers)
-        const cacheKey = `${seed}|${appFilter || 'all'}|${interestsToken}`;
+        // "My interests" feed (?onlyinterests=1): HARD-filter to shorts whose winning
+        // topic is one of the caller's interests, instead of merely boosting them the
+        // way Discover does. Retention still re-ranks whatever survives the filter.
+        // With no interests supplied there's nothing to filter on, so it's a no-op.
+        const onlyInterests = req.query.onlyinterests === '1' || req.query.onlyinterests === 'true';
+
+        const getHivePermlink = (s) => {
+            if (s.embed_url) {
+                const parts = s.embed_url.replace(/^@/, '').split('/');
+                if (parts.length === 2) return parts[1];
+            }
+            return s.permlink;
+        };
+        const hideWatched = !!currentuser && wantsHideWatched(req);
+
+        // Check sorted list cache. Keyed by seed+app+interests+mode, PLUS the user and
+        // the hide-watched flag — because the already-watched filter is now baked INTO
+        // the cached list (see below), so one user's list must never be served to
+        // another. The client's seed is stable for their session, so this is one entry
+        // per user-session, not per request.
+        const cacheKey = [
+            seed,
+            appFilter || 'all',
+            interestsToken,
+            onlyInterests ? 'only' : 'boost',
+            hideWatched ? `hw:${currentuser}` : 'all',
+        ].join('|');
         let sortedShorts;
         const cached = sortedShortsCache.get(cacheKey);
 
@@ -518,14 +557,37 @@ router.get('/shortssorted', async (req, res) => {
             const maxReward = Math.max(...filteredShorts.map(s => s.hive_reward || 0), 0.001);
             const maxReshares = Math.max(...filteredShorts.map(s => s.reshare_count || 0), 1);
 
-            // Interest weighting: pull transcription tags for the whole batch so
-            // we can boost shorts whose tags match the caller's interests.
-            const transcriptionTags = interestSet.size
-                ? await fetchTranscriptionTags(db, filteredShorts.map(s => ({ author: s.owner, permlink: s.permlink })))
-                : new Map();
+            // Interest weighting (WINNER-ONLY): resolve each short's single winning
+            // topic (viewer votes + auto tags) so we can boost shorts whose winner
+            // matches the caller's interests.
+            let shortWinners = new Map();
+            if (interestSet.size) {
+                const autoKey = (s) => ({ author: s.owner, permlink: s.permlink });
+                const hiveKey = (s) => {
+                    let hp = s.permlink;
+                    if (s.embed_url) {
+                        const parts = s.embed_url.replace(/^@/, '').split('/');
+                        if (parts.length === 2) hp = parts[1];
+                    }
+                    return { author: s.owner, permlink: hp };
+                };
+                shortWinners = await getWinners(db, filteredShorts, autoKey, hiveKey);
+            }
+
+            // "My interests" mode: keep ONLY shorts whose winning topic is an interest.
+            // (Discover keeps everything and merely multiplies matches by
+            // INTEREST_MULTIPLIER below.) A short with no resolved winning topic can't
+            // be matched to an interest, so it is excluded here by design.
+            let candidateShorts = filteredShorts;
+            if (onlyInterests && interestSet.size) {
+                candidateShorts = filteredShorts.filter((s) => {
+                    const winner = shortWinners.get(s);
+                    return !!winner && interestSet.has(winner);
+                });
+            }
 
             // Assign weighted sort scores
-            for (const short of filteredShorts) {
+            for (const short of candidateShorts) {
                 const normalizedReward = (short.hive_reward || 0) / maxReward;
                 const normalizedReshares = (short.reshare_count || 0) / maxReshares;
                 const randomComponent = rng();
@@ -539,21 +601,20 @@ router.get('/shortssorted', async (req, res) => {
 
                 short.sort_score = recencyBonus + normalizedReward * REWARD_WEIGHT + normalizedReshares * RESHARE_WEIGHT + randomComponent * randomWeight;
 
-                // Boost shorts whose tags (own hive tags + transcription tags)
-                // match the caller's interests.
+                // Boost shorts whose single winning topic matches the interests.
                 if (interestSet.size) {
-                    const own = normalizeTags(short.hive_tags);
-                    const tr = transcriptionTags.get(`${short.owner}/${short.permlink}`);
-                    if (tagsMatchInterests(own, tr, interestSet)) short.sort_score *= INTEREST_MULTIPLIER;
+                    const winner = shortWinners.get(short);
+                    if (winner) short.winner_tag = winner;
+                    if (winner && interestSet.has(winner)) short.sort_score *= INTEREST_MULTIPLIER;
                 }
             }
 
             // Retention re-rank (bounded multiplier from the cached video-retention;
             // shorts key by owner/permlink = the asset id, same as view-durations).
-            await applyRetention(db, filteredShorts, { scoreField: 'sort_score' });
+            await applyRetention(db, candidateShorts, { scoreField: 'sort_score' });
 
             // Sort by score descending
-            const scoreSorted = [...filteredShorts].sort((a, b) => b.sort_score - a.sort_score);
+            const scoreSorted = [...candidateShorts].sort((a, b) => b.sort_score - a.sort_score);
 
             // Remove consecutive shorts by the same author (keep first, skip until a different author appears)
             sortedShorts = [];
@@ -579,6 +640,30 @@ router.get('/shortssorted', async (req, res) => {
                 }
             }
 
+            // FREEZE the already-watched filter into the cached list.
+            //
+            // This must NOT be re-evaluated per request. The user watches shorts AS
+            // they swipe, so a live filter shrinks the list underneath them: page 2 is
+            // fetched with skip=(page-1)*limit against a list that is now shorter, so
+            // it lands PAST shorts they never saw. The feed "jumps over" one, and
+            // swiping back shows that skipped short instead of the real previous one.
+            //
+            // Frozen here, the list a user pages through stays put for their session
+            // (the cache key includes the user and their seed, which is now stable per
+            // page load): shorts watched in EARLIER sessions stay hidden, while ones
+            // watched right now keep their slot — so swiping back works.
+            if (hideWatched) {
+                const watchHistoryCollection = db.collection('watch_history');
+                const idsToCheck = sortedShorts.map(s => `${currentuser}:${s.owner}:${getHivePermlink(s)}`);
+                const watchedEntries = await watchHistoryCollection
+                    .find({ _id: { $in: idsToCheck } }, { projection: { _id: 1 } })
+                    .toArray();
+                const watchedSet = new Set(watchedEntries.map(w => w._id));
+                sortedShorts = sortedShorts.filter(
+                    (s) => !watchedSet.has(`${currentuser}:${s.owner}:${getHivePermlink(s)}`)
+                );
+            }
+
             // Cache the sorted list (evict expired entries if cache grows too large)
             if (sortedShortsCache.size >= 100) {
                 const now = Date.now();
@@ -589,24 +674,14 @@ router.get('/shortssorted', async (req, res) => {
             sortedShortsCache.set(cacheKey, { list: sortedShorts, timestamp: Date.now() });
         }
 
-        // If currentuser is provided, filter out shorts the user has already watched.
-        // Uses _id lookup ($in on primary key) — only checks the shorts in the current list,
-        // so performance is independent of how large the user's total watch history is.
+        // Dismissed shorts / dismissed creators stay LIVE (not frozen): they're an
+        // explicit user action and should take effect immediately. Unlike the watched
+        // filter they don't change while the user is scrolling, so they remove the same
+        // items from every page — a constant offset, not drift.
         if (currentuser) {
-            const watchHistoryCollection = db.collection('watch_history');
-            const getHivePermlink = (s) => {
-                if (s.embed_url) {
-                    const parts = s.embed_url.replace(/^@/, '').split('/');
-                    if (parts.length === 2) return parts[1];
-                }
-                return s.permlink;
-            };
-            const idsToCheck = sortedShorts.map(s => `${currentuser}:${s.owner}:${getHivePermlink(s)}`);
-            const watchedEntries = await watchHistoryCollection
-                .find({ _id: { $in: idsToCheck } }, { projection: { _id: 1 } })
-                .toArray();
-            const watchedSet = new Set(watchedEntries.map(w => w._id));
-            sortedShorts = sortedShorts.filter(s => !watchedSet.has(`${currentuser}:${s.owner}:${getHivePermlink(s)}`));
+            const uf = await getUserFilters(db, currentuser);
+            sortedShorts = applyUserFilters(sortedShorts, uf,
+                (s) => ({ owner: s.owner, permlink: getHivePermlink(s) }));
         }
 
         // Apply pagination to sorted results
