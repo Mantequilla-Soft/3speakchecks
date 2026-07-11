@@ -302,10 +302,21 @@ stay correct.
 
 ## Determinism
 
-All randomness comes from `mulberry32(seed)`, where `seed` is `?seed=` or a
-5-minute time bucket. Same seed → same ordering, which is what keeps pagination
-stable (an unseeded shuffle would duplicate/skip videos between page 1 and 2).
-The response echoes `seed` so a client can pin it across pages.
+All randomness comes from `mulberry32(seed)`, where `seed` is `?seed=` or, as a
+fallback, a 5-minute time bucket. Same seed → same ordering, which is what keeps
+pagination stable (an unseeded shuffle would duplicate/skip videos between page 1
+and 2). The response echoes `seed` so a client can pin it across pages.
+
+**The frontend now always sends a seed** (`utils/feedSeed.js`): ONE value per page
+load, shared by discover / interests / trending / shorts. It is deliberately module
+state — it survives SPA navigation (so the order is stable as the user moves around
+the app) and is regenerated only by a real browser refresh (or an explicit
+pull-to-refresh). It is NOT sessionStorage, which would survive a reload and so
+never change.
+
+Before that, the feeds sent no seed at all and fell back to the 5-minute bucket,
+which reshuffled the feed under the user every 5 minutes even if they never touched
+anything. The bucket now only applies to callers that supply no seed.
 
 ## Performance
 
@@ -345,3 +356,80 @@ Live: **~0.12s** vs trendingSorted's ~1.5s.
 | `DISCOVER_RESHARE_MAX_BOOST` | 2.0 | reshare cap |
 | `DISCOVER_JITTER` | 0.15 | ±15% seeded per-video jitter |
 | `DISCOVER_EXPLORE_EVERY` | 4 | every Nth slot = random pick (25%) |
+
+---
+
+# Age cutoff (`FEED_MAX_AGE_YEARS`)
+
+A large share of very old legacy videos no longer resolve (dead thumbnail hosts,
+unpinned/GC'd IPFS content), so surfacing them just renders broken cards. Every
+feed therefore excludes anything older than `FEED_MAX_AGE_YEARS` (default **6**;
+set to **0** to disable and serve the full archive).
+
+- Helper: `utils/feedAge.js` → `feedAgeMatch(field)` returns a Mongo `$gte`
+  condition (or `{}` when disabled), safe to spread into any query.
+- Date fields differ per collection: legacy `videos` = `created`, `embed-video` =
+  `createdAt`, `discover-pool` = `created`. All are BSON **Dates** — comparing
+  against an ISO *string* silently matches zero documents.
+- Applied in `utils/discoverPool.js` (the central one for discover / interests /
+  trendingSorted / shortssorted) plus `routes/{feeds,videos,search,shorts}.js`.
+- **The spread is injected FIRST in each query object, on purpose.** Several blocks
+  carry a stricter explicit `created` window (7-day trending, 30-day community
+  trending); placing the spread last would clobber those with the looser 6-year
+  bound.
+- Scope is **listings only**. A direct single-video lookup is deliberately NOT
+  bounded, so an old video still plays if you open its link — it just isn't listed.
+
+As of 2026-07: ~32k of ~387k legacy videos are >6y old; `embed-video` has none.
+
+---
+
+# Shorts (`GET /shortssorted`)
+
+Same ranking ingredients as the video feeds (recency bucket + reward + reshares +
+seeded random, then the retention re-rank), with two behaviours worth spelling out.
+
+## `?onlyinterests=1` — the "My interests" feed
+
+Discover *boosts* shorts whose winning topic is one of the caller's interests
+(`INTEREST_MULTIPLIER`). `onlyinterests=1` instead **hard-filters** to them: a short
+with no resolved winning topic cannot be matched to an interest and is excluded by
+design. Retention still re-ranks whatever survives.
+
+This feed is often short — a single topic simply doesn't have many recent shorts
+(e.g. `art` alone yields ~8) — so the client falls back to Discover when the viewer
+swipes past the last one.
+
+## The already-watched filter is FROZEN into the cached list
+
+This is a contract, not an implementation detail. `hidewatched` must **not** be
+re-evaluated per request: the viewer watches shorts *as they swipe*, so a live
+filter shrinks the list underneath them, and `skip = (page-1)*limit` then lands past
+shorts they never saw. The feed "jumps over" a short, and swiping back shows that
+skipped one instead of the real previous short.
+
+So the watched filter is applied once, inside the cached computation, and the cache
+key includes the user and their (now per-session) seed. The list a viewer pages
+through therefore stays put: shorts watched in *earlier* sessions stay hidden, while
+ones watched *right now* keep their slot, so back-swipe works.
+
+Dismissals ("not interested" / hidden creator) stay **live** — they're an explicit
+action that should apply immediately, and unlike watching they don't change while
+the user is scrolling, so they remove the same items from every page (a constant
+offset, not drift).
+
+---
+
+# Feed payloads (`utils/slimFeed.js`)
+
+Not ranking, but it lives on the same routes. Feed cards never read the post body,
+yet we serialised the entire article for every item — ~79% of a 50-item response
+(292KB raw → 42KB; ~94KB → ~9KB compressed).
+
+`slimFeed` strips `body` / `description` / `hive_body` at `res.json()` time. Two
+traps:
+
+- **Mount it on LIST routes only.** `/videodetails` and `/api/video` legitimately
+  return a body, and the videos router is mounted at `/`.
+- **Shorts keep `hive_body`** — it IS their visible caption, so stripping it blanks
+  every short's description.
