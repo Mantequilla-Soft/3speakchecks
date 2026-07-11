@@ -2,11 +2,16 @@
  * Watch-time retention cleanup.
  *
  * Deletes individual watch-time ROWS (view-durations sessions) once the ROW
- * itself is older than WATCH_RETENTION_DAYS (default 90 ≈ 3 months), by the row's
+ * itself is older than WATCH_RETENTION_DAYS (default 365 ≈ 1 year), by the row's
  * own `updatedAt` — NOT by the video's post date. So an old video that gets
  * watched again keeps its fresh rows and can re-enter the retention ranking; only
  * stale watch data ages out. Old view-sessions are pruned too, and a video's
  * "most replayed" heatmap is dropped only once it has NO remaining rows at all.
+ *
+ * NOTE: this is the *storage* window only. The retention worker separately
+ * aggregates just the last RETENTION_WINDOW_DAYS (90) of rows when scoring, so
+ * keeping a year of history changes no ranking — it preserves the raw data for
+ * creator stats, heatmaps and any future re-scoring.
  */
 const cron = require('node-cron');
 const { getDb } = require('../utils/db');
@@ -15,7 +20,7 @@ const { ENABLE_MONGO_WRITES } = require('../utils/config');
 const WATCH_LOG = process.env.WATCH_LOG_COLLECTION || 'view-durations';
 const WATCH_HEATMAP = process.env.WATCH_HEATMAP_COLLECTION || 'view-heatmaps';
 const WATCH_SESSION = process.env.WATCH_SESSION_COLLECTION || 'view-sessions';
-const RETENTION_DAYS = parseInt(process.env.WATCH_RETENTION_DAYS, 10) || 90;
+const RETENTION_DAYS = parseInt(process.env.WATCH_RETENTION_DAYS, 10) || 365;
 
 async function purgeOldWatchRecords() {
   if (!ENABLE_MONGO_WRITES) {

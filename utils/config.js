@@ -49,7 +49,10 @@ module.exports = {
     RETENTION_ENABLED: parseBool(process.env.RETENTION_ENABLED, true),
     RETENTION_INTERVAL_MIN: parseInt(process.env.RETENTION_INTERVAL_MIN) || 5,   // was 15 for trending; retention runs every 5 min
     RETENTION_COLLECTION: process.env.RETENTION_COLLECTION || 'video-retention',
-    RETENTION_WINDOW_DAYS: parseInt(process.env.RETENTION_WINDOW_DAYS) || 90,    // matches the watch-retention cleanup window
+    // How much watch history the SCORING aggregates. Independent of the storage
+    // window (WATCH_RETENTION_DAYS, 365) — we keep a year of raw rows but only
+    // score on recent behaviour.
+    RETENTION_WINDOW_DAYS: parseInt(process.env.RETENTION_WINDOW_DAYS) || 90,
     RETENTION_MIN_SESSION_SECONDS: parseFloat(process.env.RETENTION_MIN_SESSION_SECONDS) || 2, // drop junk/1-beat sessions
     RETENTION_COMPLETION_PCT: parseFloat(process.env.RETENTION_COMPLETION_PCT) || 70,          // watchedPct ≥ this = "finished"
     RETENTION_HOOK_FRAC: parseFloat(process.env.RETENTION_HOOK_FRAC) || 0.15,                  // got past the first 15% = "hooked"
@@ -67,6 +70,63 @@ module.exports = {
     // (hours) keeps "newest first" dominant so retention just reorders similar-age
     // videos. Long default (7 days) → the feed stays close to chronological.
     RETENTION_FOLLOW_HALFLIFE_H: parseFloat(process.env.RETENTION_FOLLOW_HALFLIFE_H ?? '168'),
+
+    // ─── Discover feed (/feeds/discover) ──────────────────────────────────────
+    // Deliberately BLIND to votes, views and rewards — it exists to surface what
+    // those signals bury. A background worker (services/discover.js, hourly) builds
+    // the candidate pool and precomputes
+    //     base = freshness × newBoost × reshareBoost × retention
+    // into DISCOVER_POOL_COLLECTION; the request path only adds interest × jitter,
+    // then interleaves random picks. See algo.md ("Discover feed").
+    DISCOVER_ENABLED: parseBool(process.env.DISCOVER_ENABLED, true),
+    DISCOVER_INTERVAL_MIN: parseInt(process.env.DISCOVER_INTERVAL_MIN) || 60,        // pool rebuild cadence (hourly)
+    DISCOVER_POOL_COLLECTION: process.env.DISCOVER_POOL_COLLECTION || 'discover-pool',
+    DISCOVER_POOL_CACHE_MS: parseInt(process.env.DISCOVER_POOL_CACHE_MS) || 5 * 60 * 1000, // in-process pool cache TTL
+
+    // Pool sources (unioned + deduped by the worker):
+    DISCOVER_WINDOW_DAYS: parseInt(process.env.DISCOVER_WINDOW_DAYS) || 14,          // (a) recent window
+    DISCOVER_CANDIDATE_LIMIT: parseInt(process.env.DISCOVER_CANDIDATE_LIMIT) || 400, // (a) per-collection cap, cut by RECENCY
+    // (b) random all-time, transcription-tagged. OVERSAMPLED on purpose: roughly
+    // half of `subtitles-tags` points at shorts / unlisted / deleted videos that no
+    // longer resolve to a published doc, so 2000 sampled ≈ 1000 that actually land.
+    DISCOVER_RANDOM_OLD_COUNT: parseInt(process.env.DISCOVER_RANDOM_OLD_COUNT) || 2000,
+    DISCOVER_RETENTION_ACTIVE_DAYS: parseInt(process.env.DISCOVER_RETENTION_ACTIVE_DAYS) || 14, // (c) had watch data recently
+    DISCOVER_POOL_LIMIT: parseInt(process.env.DISCOVER_POOL_LIMIT) || 4000,          // hard cap on the built pool
+
+    // Freshness: fresh uploads matter but must NOT dominate — the whole point of
+    // this feed is reviving older work. Deliberately the WEAKEST driver (~2.3x)
+    // so retention (~3.1x) and interest (2.5x) decide the ranking. Freshness hits
+    // its floor at ~3 days, after which a 4-day-old and a 4-year-old video are
+    // equal on age and are separated only by quality/interest/reshares.
+    DISCOVER_HALFLIFE_H: parseFloat(process.env.DISCOVER_HALFLIFE_H ?? '72'),        // freshness half-life (hours)
+    DISCOVER_FRESH_FLOOR: parseFloat(process.env.DISCOVER_FRESH_FLOOR ?? '0.65'),    // old-but-great stays competitive
+    DISCOVER_NEW_GRACE_H: parseFloat(process.env.DISCOVER_NEW_GRACE_H ?? '12'),      // "really fresh" window
+    DISCOVER_NEW_BOOST: parseFloat(process.env.DISCOVER_NEW_BOOST ?? '1.15'),        // modest lift, tapering to 1.0
+    DISCOVER_INTEREST_MULTIPLIER: parseFloat(process.env.DISCOVER_INTEREST_MULTIPLIER ?? '2.5'), // > global 2.0
+    // Retention is a PRIMARY driver here (trending only tilts it at 0.6). relQ is
+    // deliberately compressed near 1.0 by the Bayesian prior (live range ≈
+    // 0.63–1.24), so weight 1.0 would move a video only ~2x — a rounding error next
+    // to the other factors. 1.5 AMPLIFIES the spread to ≈0.44–1.37 (~3.1x).
+    DISCOVER_RETENTION_WEIGHT: parseFloat(process.env.DISCOVER_RETENTION_WEIGHT ?? '1.5'),
+    DISCOVER_RETENTION_MIN_MULT: parseFloat(process.env.DISCOVER_RETENTION_MIN_MULT ?? '0.4'),
+    DISCOVER_RETENTION_MAX_MULT: parseFloat(process.env.DISCOVER_RETENTION_MAX_MULT ?? '2.5'),
+    // Reshares: a real curation signal (someone put it on their own blog), but a
+    // popularity one — so log-damped and hard-capped so it can't dominate.
+    //   reshareBoost = min(1 + W·ln(1+n), CAP)
+    DISCOVER_RESHARE_WEIGHT: parseFloat(process.env.DISCOVER_RESHARE_WEIGHT ?? '0.25'),
+    DISCOVER_RESHARE_MAX_BOOST: parseFloat(process.env.DISCOVER_RESHARE_MAX_BOOST ?? '2.0'),
+    DISCOVER_JITTER: parseFloat(process.env.DISCOVER_JITTER ?? '0.15'),              // ±15% seeded per-video shuffle
+    DISCOVER_EXPLORE_EVERY: parseInt(process.env.DISCOVER_EXPLORE_EVERY) || 4,       // every Nth slot = random pick (25%)
+
+    // ─── Related videos (/feeds/related/:author/:permlink) ────────────────────
+    // Sidebar recommendations biased toward the CURRENT video's winning topic,
+    // the user's interests, and the same creator. See routes/feeds.js.
+    RELATED_TOPIC_MULT: parseFloat(process.env.RELATED_TOPIC_MULT ?? '3.0'),     // candidate shares current video's topic
+    RELATED_INTEREST_MULT: parseFloat(process.env.RELATED_INTEREST_MULT ?? '2.0'), // candidate's topic ∈ user interests
+    RELATED_CREATOR_MULT: parseFloat(process.env.RELATED_CREATOR_MULT ?? '2.5'), // same creator (recency already in base)
+    RELATED_CREATOR_POOL: parseInt(process.env.RELATED_CREATOR_POOL) || 12,      // how many recent same-creator videos to consider
+    RELATED_JITTER: parseFloat(process.env.RELATED_JITTER ?? '0.15'),
+
     COMMUNITY_SYNC_DELAY_H: parseInt(process.env.COMMUNITY_SYNC_DELAY_H) || 4,
     COMMUNITY_SYNC_INTERVAL_H: parseInt(process.env.COMMUNITY_SYNC_INTERVAL_H) || 4,
     PROFILE_SYNC_DELAY_H: parseInt(process.env.PROFILE_SYNC_DELAY_H) || 3,

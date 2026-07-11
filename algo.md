@@ -208,3 +208,140 @@ no-op instantly, without a code change.
 - **CTR / impressions** — deliberately *not* used: 3Speak content is embedded on
   other Hive frontends we can't measure impressions on, so a click-through rate
   computed only from our own surface would be misleading.
+
+---
+
+---
+
+# Discover feed (`GET /feeds/discover`)
+
+An independent ranking whose job is to surface what the popularity signals bury —
+and specifically to **keep giving old videos a shot**. It shares the retention
+data above but **ignores votes, views and rewards entirely**.
+
+Built by a background worker (`services/discover.js` → `discoverWorker.js`, hourly)
+into `discover-pool`; served by `routes/feeds.js` + `utils/discoverPool.js`. The
+math lives in `utils/discoverScore.js` (pure, no I/O).
+
+## TLDR
+
+```
+base           = freshness × newBoost × reshareBoost × retention    (precomputed hourly)
+discover_score = base × interest × jitter                           (per request)
+```
+then random picks from the lower half are interleaved into every 4th slot.
+
+## The pool (rebuilt hourly)
+
+A union of three sources, deduped by `owner/assetPermlink`:
+
+| Source | What |
+|---|---|
+| `recent` | everything published in the last `DISCOVER_WINDOW_DAYS` (14) |
+| `random` | `DISCOVER_RANDOM_OLD_COUNT` sampled from **all time** out of `subtitles-tags` (≥1 transcription tag). **Re-sampled every run** — this is the engine that bumps old videos |
+| `retention` | anything with `view-durations` rows in the last `DISCOVER_RETENTION_ACTIVE_DAYS` (14) — i.e. people are still watching it |
+
+The random sample is **oversampled ~2×**: roughly half of `subtitles-tags` points at
+shorts / unlisted / deleted videos that no longer resolve to a published doc, so
+2000 sampled ≈ 1000 that actually land. Live pool ≈ 1650 videos, oldest from 2019.
+
+Critically the pool is **never cut by engagement** — unlike trending, whose
+`base_score` cut happens before ranking, so a good video with few views can never
+even enter its candidate set.
+
+## The five factors
+
+**1. freshness** — half-life decay, floored. Deliberately the **weakest** driver
+(~1.77×): fresh uploads matter but must not dominate a discovery feed. It hits the
+floor at ~3 days, after which a 4-day-old and a 4-year-old video are equal on age
+and are separated only by quality, interest and reshares.
+```
+freshness = max(0.5 ^ (ageHours / DISCOVER_HALFLIFE_H), DISCOVER_FRESH_FLOOR)
+```
+
+**2. newBoost** — a modest lift for really fresh uploads so they get first traction
+before any retention data exists. Tapers **linearly** to 1.0 across the grace
+window (a hard cliff would drop a video ~43% the minute it crossed the boundary):
+```
+newBoost = 1 + (DISCOVER_NEW_BOOST − 1) · max(0, 1 − ageHours/DISCOVER_NEW_GRACE_H)
+```
+
+**3. reshareBoost** — a reshare is a real curation signal (someone put the video on
+their own blog), but it IS a popularity signal, so it's log-damped and hard-capped:
+```
+reshareBoost = min(1 + W · ln(1 + n), CAP)     n=1 → 1.17, n=5 → 1.45, n=100 → 2.0
+```
+
+**4. retention** — `× clamp(1 + W·(relQ−1), MIN, MAX)` from the retention worker.
+Here `W = 1.5`, **amplifying** the spread: `relQ` is compressed near 1.0 by the
+Bayesian prior (live range ≈ 0.63–1.24), so at `W=1.0` retention would move a video
+only ~2× — a rounding error next to the others. At 1.5 the spread is ≈0.44–1.37.
+A video with no retention record gets exactly `×1` — never a penalty.
+
+**5. interest** — `× DISCOVER_INTEREST_MULTIPLIER` (2.5, vs the global 2.0) when
+the video's merged own+transcription tags match `?interests=`. Applied per request
+(it's user-specific), against the `tags` array baked into each pool doc.
+
+Plus **jitter** — seeded `× [1−J, 1+J]` (J = 0.15) so the row breathes between loads.
+
+## Driver strength (the point of the tuning)
+
+```
+retention 3.1x  >  interest 2.5x  >  reshares 2.0x  >  freshness 1.77x
+```
+Freshness is intentionally last. A great old video **can** outrank a fresh one:
+`OLD + match + retention 1.244 + 3 reshares = 2.99` beats `fresh 0h + match = 2.88`.
+
+## Exploration slots
+
+After sorting and hide-watched, `interleaveExploration()` takes every
+`DISCOVER_EXPLORE_EVERY`-th (4th → 25% of the page) slot from a **seeded shuffle of
+the lower half** of the ranking; the rest come from the top half in score order.
+Every item appears exactly once — no dupes, no drops — so `total` and pagination
+stay correct.
+
+## Determinism
+
+All randomness comes from `mulberry32(seed)`, where `seed` is `?seed=` or a
+5-minute time bucket. Same seed → same ordering, which is what keeps pagination
+stable (an unseeded shuffle would duplicate/skip videos between page 1 and 2).
+The response echoes `seed` so a client can pin it across pages.
+
+## Performance
+
+The pool (~1650 small docs) is held in-process behind a `DISCOVER_POOL_CACHE_MS`
+TTL, and only the requested page is hydrated into full video docs. A request costs
+one `watch_history` lookup + one hydration query — no aggregation, no Hive RPC.
+Live: **~0.12s** vs trendingSorted's ~1.5s.
+
+## Debugging
+
+`?debug=1` preserves `discover_score`, `base`, `age_hours`, `freshness`,
+`new_boost`, `reshare_boost`, `reshares`, `retention_mult`, `retention_relq`,
+`interest_match` and `pool_src` in the response (stripped otherwise).
+
+## Configuration (env)
+
+| Var | Default | Meaning |
+|---|---|---|
+| `DISCOVER_ENABLED` | true | master switch for the pool worker |
+| `DISCOVER_INTERVAL_MIN` | 60 | pool rebuild cadence |
+| `DISCOVER_POOL_COLLECTION` | `discover-pool` | where the worker writes |
+| `DISCOVER_POOL_CACHE_MS` | 300000 | in-process pool cache TTL |
+| `DISCOVER_WINDOW_DAYS` | 14 | recent-source window |
+| `DISCOVER_CANDIDATE_LIMIT` | 400 | per-collection cap on the recent source |
+| `DISCOVER_RANDOM_OLD_COUNT` | 2000 | all-time random sample (≈1000 land) |
+| `DISCOVER_RETENTION_ACTIVE_DAYS` | 14 | "still being watched" window |
+| `DISCOVER_POOL_LIMIT` | 4000 | hard cap on pool size |
+| `DISCOVER_HALFLIFE_H` | 72 | freshness half-life (hours) |
+| `DISCOVER_FRESH_FLOOR` | 0.65 | minimum freshness (keeps old competitive) |
+| `DISCOVER_NEW_GRACE_H` | 12 | "really fresh" window |
+| `DISCOVER_NEW_BOOST` | 1.15 | lift at age 0, tapering to 1.0 |
+| `DISCOVER_INTEREST_MULTIPLIER` | 2.5 | interest-match multiplier |
+| `DISCOVER_RETENTION_WEIGHT` | 1.5 | amplifies the relQ spread |
+| `DISCOVER_RETENTION_MIN_MULT` | 0.4 | retention lower bound |
+| `DISCOVER_RETENTION_MAX_MULT` | 2.5 | retention upper bound |
+| `DISCOVER_RESHARE_WEIGHT` | 0.25 | log-damped reshare weight |
+| `DISCOVER_RESHARE_MAX_BOOST` | 2.0 | reshare cap |
+| `DISCOVER_JITTER` | 0.15 | ±15% seeded per-video jitter |
+| `DISCOVER_EXPLORE_EVERY` | 4 | every Nth slot = random pick (25%) |

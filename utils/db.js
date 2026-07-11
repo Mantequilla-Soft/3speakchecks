@@ -102,6 +102,12 @@ async function connectToMongo() {
                 ['view-durations', { updatedAt: 1 }],
                 ['view-heatmaps', { owner: 1, permlink: 1 }],
                 ['video-retention', { runAt: 1 }],
+                // Per-user feed suppression ("not interested" / hidden creators):
+                // read on every personalized feed request.
+                ['user-hidden-videos', { username: 1 }],
+                ['user-hidden-creators', { username: 1 }],
+                // Viewer-supplied tags — tallied per video via author+permlink.
+                ['viewer-tags', { author: 1, permlink: 1 }],
             ];
             for (const [coll, key] of wanted) {
                 try { await db.collection(coll).createIndex(key, { background: true }); }
