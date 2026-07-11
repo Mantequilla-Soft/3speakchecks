@@ -1,0 +1,47 @@
+/**
+ * Request-path access to the precomputed INTEREST pool (built alongside the
+ * discover pool by services/discoverWorker.js).
+ *
+ * Why a second pool instead of filtering the discover one:
+ * the discover pool is a ~2.7k UNIFORM sample of a ~104k tagged catalogue, so its
+ * topic mix just mirrors the catalogue. Filtering it down to a single topic
+ * starved the interests feed — `science` surfaced 29 of its 785 videos, i.e. a
+ * single page, and no amount of paging produced more.
+ *
+ * This pool is STRATIFIED: the worker samples up to INTEREST_POOL_PER_TAG videos
+ * for EACH topic, so every topic — niche ones included — has real depth. Entries
+ * without a resolved winning topic are never written here: they can't match an
+ * interest, so they'd be dead weight.
+ *
+ * Same shape as the discover pool, so discoverPool.hydrate() renders these too.
+ */
+const { INTEREST_POOL_COLLECTION, DISCOVER_POOL_CACHE_MS } = require('./config');
+const { feedAgeMatch } = require('./feedAge');
+
+let cache = { at: 0, docs: [] };
+
+/** Cached read of the whole interest pool. Returns [] if the worker hasn't run. */
+async function getInterestPool(db, { force = false } = {}) {
+  if (!force && cache.docs.length && Date.now() - cache.at < DISCOVER_POOL_CACHE_MS) {
+    return cache.docs;
+  }
+  try {
+    const docs = await db.collection(INTEREST_POOL_COLLECTION)
+      .find(feedAgeMatch('created'), {
+        projection: {
+          owner: 1, permlink: 1, assetPermlink: 1, source: 1, src: 1,
+          created: 1, tags: 1, winnerTag: 1, nsfw: 1, reshares: 1, relQ: 1,
+          retentionMult: 1, freshness: 1, newBoost: 1, reshareBoost: 1, base: 1,
+        },
+      }).toArray();
+    cache = { at: Date.now(), docs };
+    return docs;
+  } catch {
+    return cache.docs; // never let a pool read break the feed
+  }
+}
+
+/** Test/ops hook — drop the in-process cache (e.g. right after a worker run). */
+function invalidate() { cache = { at: 0, docs: [] }; }
+
+module.exports = { getInterestPool, invalidate };

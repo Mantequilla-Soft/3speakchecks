@@ -1,13 +1,339 @@
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
+const { feedAgeMatch } = require('../utils/feedAge');
 const { nsfwFilterTags, nsfwFilterHiveTags } = require('../utils/filters');
 const { HIDDEN_AUTHORS, TRENDING_CANDIDATE_LIMIT, TRENDING_VIEWS_WEIGHT, TRENDING_VOTES_WEIGHT, TRENDING_COMMENTS_WEIGHT, TRENDING_REWARD_WEIGHT, TRENDING_RESHARE_WEIGHT, RESHARE_WEIGHT } = require('../utils/config');
-const { fetchHiveRewards, fetchLivePageData } = require('../utils/hive');
+const { fetchHiveRewards, fetchLivePageData, mulberry32 } = require('../utils/hive');
 const { INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTags, tagsMatchInterests } = require('../utils/interests');
 const { applyRetention } = require('../utils/retentionRank');
-const { rankFeed } = require('../utils/feedRank');
+const { rankFeed, applyInterestBoost, filterForUser } = require('../utils/feedRank');
+const { getUserFilters, applyUserFilterQuery } = require('../utils/userFilters');
 const { RETENTION_FOLLOW_HALFLIFE_H } = require('../utils/config');
+const { DISCOVER_INTEREST_MULTIPLIER } = require('../utils/config');
+const {
+    RELATED_TOPIC_MULT, RELATED_INTEREST_MULT, RELATED_CREATOR_MULT,
+    RELATED_CREATOR_POOL, RELATED_JITTER,
+} = require('../utils/config');
+const { jitter, interleaveExploration, freshness, ageHours } = require('../utils/discoverScore');
+const { getPool, hydrate } = require('../utils/discoverPool');
+const { getInterestPool } = require('../utils/interestPool');
+const { getTranscriptionTags } = require('../utils/transcriptionTags');
+const { pickWinner, fetchViewerWeights } = require('../utils/effectiveTags');
+
+/**
+ * GET /feeds/interests — the "Interests" row / tab.
+ *
+ * Dedicated endpoint with its OWN stratified pool, rather than
+ * /feeds/discover?interestsOnly=1 filtering the discover pool. The discover pool
+ * is a ~2.7k UNIFORM sample of a ~104k tagged catalogue, so its topic mix mirrors
+ * the catalogue and a single-topic filter starved the feed: `science` surfaced 29
+ * of its 785 videos — one page, and paging produced nothing more.
+ *
+ * The interest pool samples up to INTEREST_POOL_PER_TAG per TOPIC, so every topic
+ * has depth. Everything in it already carries a winning topic, so the only work
+ * here is the interest match + seeded jitter, then the shared user filters.
+ *
+ * Query: ?page&limit&interests&currentuser&hidewatched&nsfw&seed&chrono
+ */
+router.get('/interests', async (req, res) => {
+    try {
+        const db = getDb();
+        const page = Math.max(parseInt(req.query.page) || 1, 1);
+        const limit = Math.min(Math.max(parseInt(req.query.limit) || 30, 1), 100);
+        const skip = (page - 1) * limit;
+
+        const interestSet = parseInterests(req);
+        // No interests → nothing to show. The tab only makes sense with them.
+        if (!interestSet.size) {
+            return res.json({ success: true, feed: 'interests', page, limit, total: 0, totalPages: 0, videos: [] });
+        }
+
+        const SEED_BUCKET_MS = 5 * 60 * 1000;
+        const seed = parseInt(req.query.seed) || Math.floor(Date.now() / SEED_BUCKET_MS);
+        const rng = mulberry32(seed);
+
+        const pool = await getInterestPool(db);
+        if (!pool.length) {
+            // Worker hasn't built it yet (fresh deploy). Empty, not an error.
+            return res.json({ success: true, feed: 'interests', page, limit, total: 0, totalPages: 0, seed, videos: [] });
+        }
+
+        const allowNsfw = req.query.nsfw === 'true';
+        const candidates = pool.filter((e) =>
+            (allowNsfw || !e.nsfw) && e.winnerTag && interestSet.has(e.winnerTag)
+        );
+
+        // `base` already carries freshness × newBoost × reshareBoost × retention.
+        // Every candidate matches an interest by definition, so there's no interest
+        // multiplier to apply here — just jitter so the row isn't frozen.
+        const chrono = req.query.chrono === '1' || req.query.chrono === 'true';
+        const scored = candidates.map((e) => ({
+            ...e,
+            interest_match: true,
+            discover_score: (Number(e.base) || 0) * jitter(rng()),
+        }));
+
+        if (chrono) {
+            scored.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
+        } else {
+            scored.sort((a, b) => b.discover_score - a.discover_score);
+        }
+
+        // Dismissals (always) + already-watched (when hidewatched=1).
+        const visible = await filterForUser(db, req, scored);
+        const pageEntries = visible.slice(skip, skip + limit);
+        const videos = await hydrate(db, pageEntries);
+        videos.forEach((v) => { delete v._pool; });
+
+        res.json({
+            success: true,
+            feed: 'interests',
+            page,
+            limit,
+            seed,
+            total: visible.length,
+            totalPages: Math.ceil(visible.length / limit),
+            interests: [...interestSet],
+            videos,
+        });
+    } catch (error) {
+        console.error('Error building interests feed:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+/**
+ * GET /feeds/discover — interest + retention driven discovery.
+ *
+ * Unlike trendingSorted this feed ignores votes, views and rewards entirely:
+ * those signals concentrate attention on what is already popular. It ranks a
+ * PRECOMPUTED pool (built hourly by services/discoverWorker.js) that unions the
+ * recent window, a fresh random slice of the transcription-tagged back catalogue,
+ * and anything still being watched — so old work keeps getting a shot.
+ *
+ *   discover_score = base(freshness × newBoost × reshareBoost × retention)
+ *                    × interest × jitter
+ *
+ * then random picks from the lower half are interleaved into every Nth slot.
+ * All randomness is seeded (?seed=, else a 5-min bucket) so pagination is stable.
+ * Query: ?page&limit&interests&currentuser&nsfw&seed&debug=1
+ */
+router.get('/discover', async (req, res) => {
+    try {
+        const db = getDb();
+        const page = Math.max(parseInt(req.query.page) || 1, 1);
+        const limit = Math.min(Math.max(parseInt(req.query.limit) || 30, 1), 100);
+        const skip = (page - 1) * limit;
+        const debug = req.query.debug === '1';
+
+        // Deterministic seed: explicit ?seed= wins, else a 5-minute bucket so the
+        // row is stable across a refresh but does rotate over time.
+        const SEED_BUCKET_MS = 5 * 60 * 1000;
+        const seed = parseInt(req.query.seed) || Math.floor(Date.now() / SEED_BUCKET_MS);
+        const rng = mulberry32(seed);
+
+        const pool = await getPool(db);
+        if (!pool.length) {
+            // Worker hasn't produced a pool yet (fresh deploy). Empty, not an error.
+            return res.json({ success: true, feed: 'discover', page, limit, total: 0, totalPages: 0, seed, videos: [] });
+        }
+
+        // NSFW is filtered here (not baked into the pool) because it's per-request.
+        const allowNsfw = req.query.nsfw === 'true';
+        let candidates = allowNsfw ? pool : pool.filter((e) => !e.nsfw);
+
+        const interestSet = parseInterests(req);
+
+        // "Interests" feed variant: ONLY videos whose winning topic is in the
+        // user's interests. The pool already mixes recent + retention-active + a
+        // random slice of the back catalogue, so filtering to interest-matches
+        // naturally yields interest videos re-ranked by retention with older ones
+        // sprinkled in. No interests → empty (the tab only makes sense with them).
+        const interestsOnly = req.query.interestsOnly === '1' || req.query.interestsOnly === 'true';
+        if (interestsOnly) {
+            if (!interestSet.size) {
+                return res.json({ success: true, feed: 'interests', page, limit, total: 0, totalPages: 0, seed, videos: [] });
+            }
+            candidates = candidates.filter((e) => e.winnerTag && interestSet.has(e.winnerTag));
+        }
+
+        // Per-user scoring: the pool already carries freshness × newBoost ×
+        // reshareBoost × retention in `base`, and the winning topic in `winnerTag`
+        // (viewer votes + auto tags, precomputed hourly). All that's left is the
+        // WINNER-ONLY interest match + jitter.
+        // `chrono=1` (algo-off / simple feed) bypasses all of that and just sorts
+        // newest-first — for interestsOnly it stays interest-filtered but chronological.
+        const chrono = req.query.chrono === '1' || req.query.chrono === 'true';
+        const scored = candidates.map((e) => {
+            const match = interestSet.size && !!e.winnerTag && interestSet.has(e.winnerTag);
+            const score = (Number(e.base) || 0)
+                * (match ? DISCOVER_INTEREST_MULTIPLIER : 1)
+                * jitter(rng());
+            return { ...e, interest_match: !!match, discover_score: score };
+        });
+
+        if (chrono) {
+            scored.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
+        } else {
+            scored.sort((a, b) => b.discover_score - a.discover_score);
+        }
+
+        // Drop dismissed ("not interested" / hidden creator) and — when the
+        // preference is on — already-watched, BEFORE pagination so pages stay full.
+        const visible = await filterForUser(db, req, scored);
+
+        // Sprinkle random discovery picks through the page (skipped in chrono mode).
+        const finalEntries = chrono ? visible : interleaveExploration(visible, rng);
+
+        const total = finalEntries.length;
+        const pageEntries = finalEntries.slice(skip, skip + limit);
+
+        // Only the page slice is hydrated into full video docs.
+        const videos = await hydrate(db, pageEntries);
+
+        videos.forEach((v) => {
+            const p = v._pool || {};
+            delete v._pool;
+            if (debug) {
+                v.discover_score = Math.round(p.discover_score * 100000) / 100000;
+                v.base = p.base;
+                v.freshness = p.freshness;
+                v.new_boost = p.newBoost;
+                v.reshare_boost = p.reshareBoost;
+                v.reshares = p.reshares;
+                v.retention_mult = p.retentionMult;
+                v.retention_relq = p.relQ;
+                v.interest_match = p.interest_match;
+                v.winnerTag = p.winnerTag;
+                v.pool_src = p.src;
+                v.age_hours = p.created ? Math.round(((Date.now() - new Date(p.created).getTime()) / 3600000) * 10) / 10 : null;
+            }
+        });
+
+        res.json({
+            success: true,
+            feed: interestsOnly ? 'interests' : 'discover',
+            page,
+            limit,
+            total,
+            totalPages: Math.ceil(total / limit),
+            seed,           // pass back so the client can pin it across pages
+            poolSize: pool.length,
+            videos
+        });
+    } catch (error) {
+        console.error('Error fetching discover feed:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+/**
+ * GET /feeds/related/:author/:permlink — sidebar recommendations for a watch page.
+ *
+ * Biased, in this order of pull:
+ *   - same TOPIC as the current video (its winner tag)         × RELATED_TOPIC_MULT
+ *   - the user's INTERESTS (candidate's winner ∈ ?interests=)  × RELATED_INTEREST_MULT
+ *   - same CREATOR (newest first — recency is already in base) × RELATED_CREATOR_MULT
+ * The multipliers STACK, so "same topic AND same creator" naturally ranks highest,
+ * and when the current topic isn't in the user's interests, interest-matching
+ * videos still get pulled in (sprinkled) via the interest multiplier.
+ * Query: ?limit&interests&currentuser&nsfw&seed
+ */
+router.get('/related/:author/:permlink', async (req, res) => {
+    try {
+        const db = getDb();
+        const author = String(req.params.author || '').trim().toLowerCase().replace(/^@/, '');
+        const permlink = String(req.params.permlink || '').trim();
+        const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 40);
+        const allowNsfw = req.query.nsfw === 'true';
+        const interestSet = parseInterests(req);
+        const SEED_BUCKET_MS = 5 * 60 * 1000;
+        const seed = parseInt(req.query.seed) || Math.floor(Date.now() / SEED_BUCKET_MS);
+        const rng = mulberry32(seed);
+
+        if (!author || !permlink) {
+            return res.status(400).json({ success: false, error: 'author and permlink are required' });
+        }
+
+        // 1. Winning topic of the CURRENT video (auto tags + viewer votes).
+        const [auto, vwMap] = await Promise.all([
+            getTranscriptionTags(db, author, permlink),
+            fetchViewerWeights(db, [{ author, permlink }]),
+        ]);
+        const currentTopic = pickWinner(auto.tags || [], vwMap.get(`${author}/${permlink}`) || {});
+
+        // 2. Pool candidates (already carry winnerTag + base). Exclude the current
+        //    video and NSFW (unless allowed).
+        const pool = await getPool(db);
+        const isCurrent = (e) => e.owner === author && e.permlink === permlink;
+        const candidates = new Map(); // "owner/permlink" -> pool-entry-shaped
+        for (const e of pool) {
+            if (isCurrent(e) || (!allowNsfw && e.nsfw)) continue;
+            candidates.set(`${e.owner}/${e.permlink}`, { ...e });
+        }
+
+        // 3. Supplement with the creator's most-recent videos (they may sit outside
+        //    the discover pool). Newest first → recency flows into the score via
+        //    freshness below. Shaped like pool entries so hydrate() can render them.
+        if (author) {
+            const [recentEmbed, recentLegacy] = await Promise.all([
+                db.collection('embed-video').find(
+                    { ...feedAgeMatch('createdAt'), owner: author, status: 'published', short: false, listed_on_3speak: true, hive_permlink: { $ne: null } },
+                    { projection: { owner: 1, permlink: 1, hive_permlink: 1, createdAt: 1, isNsfwContent: 1 } }
+                ).sort({ createdAt: -1 }).limit(RELATED_CREATOR_POOL).toArray(),
+                db.collection('videos').find(
+                    { ...feedAgeMatch('created'), owner: author, status: 'published', publishFailed: { $ne: true } },
+                    { projection: { owner: 1, permlink: 1, created: 1, isNsfwContent: 1 } }
+                ).sort({ created: -1 }).limit(RELATED_CREATOR_POOL).toArray(),
+            ]);
+            const addCreator = (owner, hivePermlink, assetPermlink, source, created, nsfw) => {
+                const key = `${owner}/${hivePermlink}`;
+                if (owner === author && hivePermlink === permlink) return;   // exclude current
+                if (!allowNsfw && nsfw) return;
+                if (!candidates.has(key)) {
+                    candidates.set(key, {
+                        owner, permlink: hivePermlink, assetPermlink, source,
+                        created, nsfw: !!nsfw, winnerTag: null, base: freshness(ageHours(created)),
+                    });
+                }
+            };
+            recentEmbed.forEach((e) => addCreator(e.owner, e.hive_permlink, e.permlink, 'embed', e.createdAt, e.isNsfwContent));
+            recentLegacy.forEach((v) => addCreator(v.owner, v.permlink, v.permlink, 'legacy', v.created, v.isNsfwContent));
+        }
+
+        // 4. Score with the stacking multipliers.
+        const scored = [...candidates.values()].map((e) => {
+            let m = 1;
+            if (currentTopic && e.winnerTag === currentTopic) m *= RELATED_TOPIC_MULT;
+            if (interestSet.size && e.winnerTag && interestSet.has(e.winnerTag)) m *= RELATED_INTEREST_MULT;
+            if (e.owner === author) m *= RELATED_CREATOR_MULT;
+            const score = (Number(e.base) || 0.01) * m * jitter(rng(), RELATED_JITTER);
+            return { ...e, _relScore: score };
+        });
+        scored.sort((a, b) => b._relScore - a._relScore);
+
+        // 5. Drop dismissed / already-watched, then take the page.
+        const visible = await filterForUser(db, req, scored);
+        const pageEntries = visible.slice(0, limit);
+        const videos = await hydrate(db, pageEntries);
+        videos.forEach((v) => { delete v._pool; });
+
+        res.json({
+            success: true,
+            feed: 'related',
+            author,
+            permlink,
+            currentTopic,
+            topicInInterests: !!(currentTopic && interestSet.has(currentTopic)),
+            total: visible.length,
+            videos,
+        });
+    } catch (error) {
+        console.error('Error fetching related feed:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
 
 // Endpoint to get recommended feed
 router.get('/recommended', async (req, res) => {
@@ -22,11 +348,16 @@ router.get('/recommended', async (req, res) => {
 
         // Query for recommended videos
         const query = {
+            ...feedAgeMatch('created'),
             recommended: true,
             status: 'published',
             owner: { $nin: HIDDEN_AUTHORS },
             ...nsfwFilterTags(req)
         };
+
+        // Exclude this user's dismissals at the QUERY level — this feed paginates in
+        // Mongo, so a post-fetch filter would give short pages and a wrong `total`.
+        applyUserFilterQuery(query, await getUserFilters(db, req.query.currentuser));
 
         // Get total count for pagination
         const total = await videosCollection.countDocuments(query);
@@ -72,6 +403,7 @@ router.get('/promoted', async (req, res) => {
         const now = new Date();
 
         const embedVideosRaw = await embedVideoCollection.find({
+            ...feedAgeMatch('createdAt'),
             status: 'published',
             short: false,
             listed_on_3speak: true,
@@ -127,6 +459,7 @@ router.get('/new', async (req, res) => {
 
         // Query for new content (exclude first uploads and trending)
         const query = {
+            ...feedAgeMatch('created'),
             status: 'published',
             owner: { $nin: HIDDEN_AUTHORS },
             firstUpload: { $ne: true },
@@ -139,6 +472,7 @@ router.get('/new', async (req, res) => {
         const [legacyVideos, embedVideosRaw] = await Promise.all([
             videosCollection.find(query).sort({ created: -1 }).limit(limit + skip).toArray(),
             embedVideoCollection.find({
+                ...feedAgeMatch('createdAt'),
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
@@ -185,8 +519,13 @@ router.get('/new', async (req, res) => {
         const uniqueEmbed = embedVideos.filter(ev => !legacyKeys.has(`${ev.author}/${ev.permlink}`));
 
         // Merge and sort by date descending
-        const allVideos = [...legacyWithDate, ...uniqueEmbed];
-        allVideos.sort((a, b) => b._sortDate - a._sortDate);
+        const merged = [...legacyWithDate, ...uniqueEmbed];
+        merged.sort((a, b) => b._sortDate - a._sortDate);
+
+        // This feed stays purely chronological — no interest/retention ranking — but
+        // explicit dismissals ("not interested" / hidden creator) must be honoured
+        // everywhere. Callers send ?currentuser=&hidewatched=0 to get exactly that.
+        const allVideos = await filterForUser(db, req, merged);
 
         const total = allVideos.length;
         const totalPages = Math.ceil(total / limit);
@@ -228,11 +567,16 @@ router.get('/trending', async (req, res) => {
 
         // Query for trending videos
         const query = {
+            ...feedAgeMatch('created'),
             trending: true,
             status: 'published',
             owner: { $nin: HIDDEN_AUTHORS },
             ...nsfwFilterTags(req)
         };
+
+        // Exclude this user's dismissals at the QUERY level — this feed paginates in
+        // Mongo, so a post-fetch filter would give short pages and a wrong `total`.
+        applyUserFilterQuery(query, await getUserFilters(db, req.query.currentuser));
 
         // Get total count for pagination
         const total = await videosCollection.countDocuments(query);
@@ -306,6 +650,7 @@ router.get('/trendingSorted', async (req, res) => {
             ]).toArray(),
             // Fetch published embed videos (non-shorts) from last 7 days with Hive links
             embedVideoCollection.find({
+                ...feedAgeMatch('createdAt'),
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
@@ -446,26 +791,10 @@ router.get('/trendingSorted', async (req, res) => {
             video.trending_score = (video.base_score || 0) + reshareCount * TRENDING_RESHARE_WEIGHT;
         }
 
-        // Interest weighting: multiply the score of videos whose tags (own hive
-        // tags + transcription tags) match the caller's ?interests=. No-op when
-        // no interests are supplied, so existing callers are unaffected.
-        const interestSet = parseInterests(req);
-        if (interestSet.size) {
-            const subKey = (v) => ({
-                author: v.owner,
-                permlink: v._source === 'embed' ? v._embedPermlink : v.permlink,
-            });
-            const transcription = await fetchTranscriptionTags(db, candidateVideos.map(subKey));
-            for (const video of candidateVideos) {
-                const { author, permlink } = subKey(video);
-                const own = normalizeTags(video.tags_v2 || video.tags);
-                const tr = transcription.get(`${author}/${permlink}`);
-                if (tagsMatchInterests(own, tr, interestSet)) {
-                    video.trending_score = (video.trending_score || 0) * INTEREST_MULTIPLIER;
-                    video.interest_match = true;
-                }
-            }
-        }
+        // Interest weighting (WINNER-ONLY): multiply the score of videos whose
+        // single winning topic (viewer votes + auto tags) matches the caller's
+        // ?interests=. No-op when no interests are supplied.
+        await applyInterestBoost(db, req, candidateVideos, undefined, 'trending_score');
 
         // Retention re-rank: multiply trending_score by each video's bounded
         // retention factor (cached in video-retention; no-op for videos without a
@@ -473,22 +802,18 @@ router.get('/trendingSorted', async (req, res) => {
         // already uses interests / watch-history. See algo.md.
         await applyRetention(db, candidateVideos, { scoreField: 'trending_score' });
 
-        // Sort by final score
-        candidateVideos.sort((a, b) => b.trending_score - a.trending_score);
-
-        // Hide videos the requesting user has already watched (server-side, before
-        // pagination, so pages stay full). Backwards compatible: only when
-        // ?currentuser= is supplied. watch_history _id = "user:owner:hivePermlink".
-        const currentuser = (req.query.currentuser || '').trim().toLowerCase();
-        let visibleVideos = candidateVideos;
-        if (currentuser) {
-            const wkey = (v) => `${v.owner}:${v.permlink}`;
-            const ids = candidateVideos.map((v) => `${currentuser}:${wkey(v)}`);
-            const watched = await db.collection('watch_history')
-                .find({ _id: { $in: ids } }, { projection: { _id: 1 } }).toArray();
-            const watchedSet = new Set(watched.map((w) => w._id));
-            visibleVideos = candidateVideos.filter((v) => !watchedSet.has(`${currentuser}:${wkey(v)}`));
+        // Sort by final score — or newest-first when algo is off (?chrono=1).
+        if (req.query.chrono === '1' || req.query.chrono === 'true') {
+            candidateVideos.sort((a, b) =>
+                new Date(b.created || b.created_at || 0) - new Date(a.created || a.created_at || 0));
+        } else {
+            candidateVideos.sort((a, b) => b.trending_score - a.trending_score);
         }
+
+        // Drop dismissed ("not interested" / hidden creator) always, and
+        // already-watched when the preference is on — server-side, before
+        // pagination so pages stay full. Only when ?currentuser= is supplied.
+        const visibleVideos = await filterForUser(db, req, candidateVideos);
 
         const total = visibleVideos.length;
         const totalPages = Math.ceil(total / limit);
@@ -530,6 +855,7 @@ router.get('/firstUploads', async (req, res) => {
 
         // Query for first time uploads (exclude trending)
         const query = {
+            ...feedAgeMatch('created'),
             firstUpload: true,
             status: 'published',
             owner: { $nin: HIDDEN_AUTHORS },
@@ -542,6 +868,7 @@ router.get('/firstUploads', async (req, res) => {
         const [legacyVideos, embedVideosRaw] = await Promise.all([
             videosCollection.find(query).sort({ created: -1 }).limit(limit + skip).toArray(),
             embedVideoCollection.find({
+                ...feedAgeMatch('createdAt'),
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
@@ -728,6 +1055,7 @@ router.get('/community/:id/new', async (req, res) => {
 
         const [legacyVideos, embedVideosRaw] = await Promise.all([
             videosCollection.find({
+                ...feedAgeMatch('created'),
                 status: 'published',
                 owner: { $nin: HIDDEN_AUTHORS },
                 publishFailed: { $ne: true },
@@ -735,6 +1063,7 @@ router.get('/community/:id/new', async (req, res) => {
                 ...nsfwFilterTags(req),
             }).sort({ created: -1 }).limit(limit + skip).toArray(),
             embedVideoCollection.find({
+                ...feedAgeMatch('createdAt'),
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
@@ -755,7 +1084,11 @@ router.get('/community/:id/new', async (req, res) => {
         const legacyKeys = new Set(legacyWithDate.map(v => `${v.author || v.owner}/${v.permlink}`));
         const uniqueEmbed = embedVideos.filter(ev => !legacyKeys.has(`${ev.author}/${ev.permlink}`));
 
-        const allVideos = [...legacyWithDate, ...uniqueEmbed].sort((a, b) => b._sortDate - a._sortDate);
+        const merged = [...legacyWithDate, ...uniqueEmbed].sort((a, b) => b._sortDate - a._sortDate);
+
+        // Chronological like /feeds/new — no ranking — but dismissals still apply.
+        const allVideos = await filterForUser(db, req, merged);
+
         const total = allVideos.length;
         const totalPages = Math.ceil(total / limit);
         const videos = allVideos.slice(skip, skip + limit);
@@ -803,6 +1136,7 @@ router.get('/community/:id/trending', async (req, res) => {
 
         const [legacyVideos, embedVideosRaw] = await Promise.all([
             videosCollection.find({
+                ...feedAgeMatch('created'),
                 status: 'published',
                 owner: { $nin: HIDDEN_AUTHORS },
                 publishFailed: { $ne: true },
@@ -811,6 +1145,7 @@ router.get('/community/:id/trending', async (req, res) => {
                 ...nsfwFilterTags(req),
             }).sort({ views: -1 }).limit(CANDIDATE_LIMIT).toArray(),
             embedVideoCollection.find({
+                ...feedAgeMatch('createdAt'),
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,

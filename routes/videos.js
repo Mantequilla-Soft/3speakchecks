@@ -1,12 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
+const { feedAgeMatch } = require('../utils/feedAge');
 const { nsfwFilter, nsfwFilterTags, nsfwFilterHiveTags, BANNED_FILTER } = require('../utils/filters');
 const { getFollowingList, hiveRpcBatch } = require('../utils/hive');
 const { getCachedViews, setCachedViews } = require('../utils/cache');
 const { validateApiKey } = require('../utils/middleware');
 const { ENABLE_MONGO_WRITES, RETENTION_FOLLOW_HALFLIFE_H } = require('../utils/config');
 const { rankFeed } = require('../utils/feedRank');
+const { getTranscriptionTags } = require('../utils/transcriptionTags');
 
 // Cache whether hive_tags_lower has been backfilled
 // Once true it stays true. If false, re-check periodically so a backfill
@@ -97,8 +99,8 @@ router.get('/videos/tag/:tag', async (req, res) => {
             return ranked;
         };
         if (tag.toLowerCase() === 'mantecurated') {
-            const legacyQuery = { mantecurated: true, status: 'published', ...nsfwFilter(req) };
-            const embedQuery = { mantecurated: true, status: 'published', ...nsfwFilterHiveTags(req) };
+            const legacyQuery = { mantecurated: true, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created') };
+            const embedQuery = { mantecurated: true, status: 'published', ...nsfwFilterHiveTags(req), ...feedAgeMatch('createdAt') };
             if (sinceDate) {
                 legacyQuery.created = { $gte: sinceDate };
                 embedQuery.createdAt = { $gte: sinceDate };
@@ -184,8 +186,8 @@ router.get('/videos/tag/:tag', async (req, res) => {
 
             if (type === 'videos') {
                 // Videos only: use DB-level pagination on legacy, small embed set
-                const legacyQuery = { tags_v2: tagLower, status: 'published', ...nsfwFilter(req) };
-                const embedQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower) };
+                const legacyQuery = { tags_v2: tagLower, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created') };
+                const embedQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...feedAgeMatch('createdAt') };
                 if (sinceDate) { legacyQuery.created = { $gte: sinceDate }; embedQuery.createdAt = { $gte: sinceDate }; }
 
                 const [legacyCount, embedDocs] = await Promise.all([
@@ -220,8 +222,8 @@ router.get('/videos/tag/:tag', async (req, res) => {
 
             } else {
                 // No type specified — default to videos behaviour
-                const legacyQuery = { tags_v2: tagLower, status: 'published', ...nsfwFilter(req) };
-                const embedQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower) };
+                const legacyQuery = { tags_v2: tagLower, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created') };
+                const embedQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...feedAgeMatch('createdAt') };
                 if (sinceDate) { legacyQuery.created = { $gte: sinceDate }; embedQuery.createdAt = { $gte: sinceDate }; }
 
                 const [legacyCount, embedDocs] = await Promise.all([
@@ -277,7 +279,7 @@ router.get('/videos/tag/:tag/counts', async (req, res) => {
         const embedCollection = db.collection('embed-video');
 
         if (tagLower === 'mantecurated') {
-            const legacyQuery = { mantecurated: true, status: 'published', ...nsfwFilter(req) };
+            const legacyQuery = { mantecurated: true, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created') };
             const embedBaseQuery = { mantecurated: true, status: 'published', ...nsfwFilterHiveTags(req) };
             if (sinceDate) {
                 legacyQuery.created = { $gte: sinceDate };
@@ -300,7 +302,7 @@ router.get('/videos/tag/:tag/counts', async (req, res) => {
         const embedTagMatch = buildEmbedTagMatch(tagLower, useLower);
         const isSnapsTag = tagLower === 'snaps';
 
-        const legacyQuery = { tags_v2: tagLower, status: 'published', ...nsfwFilter(req) };
+        const legacyQuery = { tags_v2: tagLower, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created') };
         const embedVideoQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower) };
         const shortsQuery = isSnapsTag
             ? { short: true, status: 'published', ...nsfwFilterHiveTags(req) }
@@ -357,27 +359,29 @@ router.get('/feed/:username', async (req, res) => {
         // `short: false` so shorts are excluded.
         let legacyQuery, embedQuery, feedType;
         if (followingList && followingList.length > 0) {
-            legacyQuery = { owner: { $in: followingList }, status: 'published', ...nsfwFilterTags(req) };
+            legacyQuery = { owner: { $in: followingList }, status: 'published', ...nsfwFilterTags(req), ...feedAgeMatch('created') };
             embedQuery = {
                 hive_author: { $in: followingList },
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
                 hive_permlink: { $ne: null },
-                ...nsfwFilterHiveTags(req)
+                ...nsfwFilterHiveTags(req),
+                ...feedAgeMatch('createdAt')
             };
             feedType = 'personalized';
             console.log(`Fetching feed for ${username}: ${followingList.length} following`);
         } else {
             // Fallback: all published top-level content (no following list)
-            legacyQuery = { status: 'published', ...nsfwFilterTags(req) };
+            legacyQuery = { status: 'published', ...nsfwFilterTags(req), ...feedAgeMatch('created') };
             embedQuery = {
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
                 hive_author: { $ne: null },
                 hive_permlink: { $ne: null },
-                ...nsfwFilterHiveTags(req)
+                ...nsfwFilterHiveTags(req),
+                ...feedAgeMatch('createdAt')
             };
             feedType = 'all';
             console.log(`Feed fallback for ${username}: showing all videos (no following list)`);
@@ -931,6 +935,27 @@ router.get('/videodetails/:author/:permlink', async (req, res) => {
     } catch (error) {
         console.error('Error fetching video details:', error);
         res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+/**
+ * GET /transcription-tags/:author/:permlink — the tags the transcription pipeline
+ * assigned to a video (hive→asset resolution handled in the shared util). Surfaced
+ * on the watch page for debugging the tagger. Missing tags are a normal, empty 200.
+ */
+router.get('/transcription-tags/:author/:permlink', async (req, res) => {
+    try {
+        const db = getDb();
+        const author = String(req.params.author || '').trim().toLowerCase().replace(/^@/, '');
+        const permlink = String(req.params.permlink || '').trim();
+        if (!author || !permlink) {
+            return res.status(400).json({ success: false, error: 'author and permlink are required' });
+        }
+        const r = await getTranscriptionTags(db, author, permlink);
+        res.json({ success: true, author, permlink, ...r });
+    } catch (error) {
+        console.error('Error fetching transcription tags:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
     }
 });
 

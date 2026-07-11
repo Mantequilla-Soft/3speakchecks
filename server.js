@@ -18,6 +18,7 @@ const { schedule: scheduleListenConsolidation } = require('./services/listenCons
 const { schedule: scheduleScheduledPosts } = require('./services/scheduledPosts');
 const { schedule: scheduleWatchRetention } = require('./services/watchRetention');
 const { scheduleRetention } = require('./services/retention');
+const { scheduleDiscover } = require('./services/discover');
 
 // Routes
 const healthRoutes = require('./routes/health');
@@ -33,6 +34,9 @@ const scheduledPostsRoutes = require('./routes/scheduledPosts');
 const communitiesRoutes = require('./routes/communities');
 const promoteRoutes = require('./routes/promote');
 const analyticsRoutes = require('./routes/analytics');
+const userFiltersRoutes = require('./routes/userFilters');
+const viewerTagsRoutes = require('./routes/viewerTags');
+const leaderboardRoutes = require('./routes/leaderboard');
 
 const app = express();
 
@@ -43,6 +47,16 @@ app.use(express.json());
 // Serve static files (XSL stylesheet for RSS feed viewer, etc.)
 app.use(express.static('public'));
 
+
+// Drop the full post `body`/`description` from feed LIST responses — cards never
+// read them and they were ~79% of the payload (94KB → 9KB brotli on a 50-item
+// feed). Mounted per-path, NOT globally: single-video detail routes
+// (/videodetails, /api/video) must keep returning a body. See utils/slimFeed.js.
+const { slimFeed, makeSlimFeed, SHORTS_HEAVY_FIELDS } = require('./utils/slimFeed');
+app.use('/feeds', slimFeed);                       // every /feeds/* route is a list
+app.use(['/feed', '/videos/tag'], slimFeed);       // list routes inside the videos router
+// Shorts keep `hive_body` — it's their visible caption, not dead weight.
+app.use(['/shorts', '/shortssorted'], makeSlimFeed(SHORTS_HEAVY_FIELDS));
 
 // Mount routes
 app.use('/', healthRoutes);
@@ -58,6 +72,9 @@ app.use('/verify', verifyRoutes);
 app.use('/scheduled-posts', scheduledPostsRoutes);
 app.use('/', communitiesRoutes);
 app.use('/', analyticsRoutes);
+app.use('/', userFiltersRoutes);
+app.use('/', viewerTagsRoutes);
+app.use('/', leaderboardRoutes);
 
 // Track whether heavy sync tasks are running
 let syncRunning = false;
@@ -181,6 +198,10 @@ async function startServer() {
     // Retention ranking: score every video from its watch-duration data in a
     // worker thread every RETENTION_INTERVAL_MIN; feeds multiply their score by it.
     scheduleRetention();
+
+    // Discover pool: union recent + a fresh random slice of the transcription-tagged
+    // back catalogue + still-watched videos, precomputing each one's base score.
+    scheduleDiscover();
 
     app.listen(PORT, () => {
         console.log(`Server is running on port ${PORT}`);
