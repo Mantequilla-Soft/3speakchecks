@@ -17,8 +17,91 @@ const {
 } = require('../utils/config');
 const { jitter, interleaveExploration, freshness, ageHours } = require('../utils/discoverScore');
 const { getPool, hydrate } = require('../utils/discoverPool');
+const { getInterestPool } = require('../utils/interestPool');
 const { getTranscriptionTags } = require('../utils/transcriptionTags');
 const { pickWinner, fetchViewerWeights } = require('../utils/effectiveTags');
+
+/**
+ * GET /feeds/interests — the "Interests" row / tab.
+ *
+ * Dedicated endpoint with its OWN stratified pool, rather than
+ * /feeds/discover?interestsOnly=1 filtering the discover pool. The discover pool
+ * is a ~2.7k UNIFORM sample of a ~104k tagged catalogue, so its topic mix mirrors
+ * the catalogue and a single-topic filter starved the feed: `science` surfaced 29
+ * of its 785 videos — one page, and paging produced nothing more.
+ *
+ * The interest pool samples up to INTEREST_POOL_PER_TAG per TOPIC, so every topic
+ * has depth. Everything in it already carries a winning topic, so the only work
+ * here is the interest match + seeded jitter, then the shared user filters.
+ *
+ * Query: ?page&limit&interests&currentuser&hidewatched&nsfw&seed&chrono
+ */
+router.get('/interests', async (req, res) => {
+    try {
+        const db = getDb();
+        const page = Math.max(parseInt(req.query.page) || 1, 1);
+        const limit = Math.min(Math.max(parseInt(req.query.limit) || 30, 1), 100);
+        const skip = (page - 1) * limit;
+
+        const interestSet = parseInterests(req);
+        // No interests → nothing to show. The tab only makes sense with them.
+        if (!interestSet.size) {
+            return res.json({ success: true, feed: 'interests', page, limit, total: 0, totalPages: 0, videos: [] });
+        }
+
+        const SEED_BUCKET_MS = 5 * 60 * 1000;
+        const seed = parseInt(req.query.seed) || Math.floor(Date.now() / SEED_BUCKET_MS);
+        const rng = mulberry32(seed);
+
+        const pool = await getInterestPool(db);
+        if (!pool.length) {
+            // Worker hasn't built it yet (fresh deploy). Empty, not an error.
+            return res.json({ success: true, feed: 'interests', page, limit, total: 0, totalPages: 0, seed, videos: [] });
+        }
+
+        const allowNsfw = req.query.nsfw === 'true';
+        const candidates = pool.filter((e) =>
+            (allowNsfw || !e.nsfw) && e.winnerTag && interestSet.has(e.winnerTag)
+        );
+
+        // `base` already carries freshness × newBoost × reshareBoost × retention.
+        // Every candidate matches an interest by definition, so there's no interest
+        // multiplier to apply here — just jitter so the row isn't frozen.
+        const chrono = req.query.chrono === '1' || req.query.chrono === 'true';
+        const scored = candidates.map((e) => ({
+            ...e,
+            interest_match: true,
+            discover_score: (Number(e.base) || 0) * jitter(rng()),
+        }));
+
+        if (chrono) {
+            scored.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
+        } else {
+            scored.sort((a, b) => b.discover_score - a.discover_score);
+        }
+
+        // Dismissals (always) + already-watched (when hidewatched=1).
+        const visible = await filterForUser(db, req, scored);
+        const pageEntries = visible.slice(skip, skip + limit);
+        const videos = await hydrate(db, pageEntries);
+        videos.forEach((v) => { delete v._pool; });
+
+        res.json({
+            success: true,
+            feed: 'interests',
+            page,
+            limit,
+            seed,
+            total: visible.length,
+            totalPages: Math.ceil(visible.length / limit),
+            interests: [...interestSet],
+            videos,
+        });
+    } catch (error) {
+        console.error('Error building interests feed:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
 
 /**
  * GET /feeds/discover — interest + retention driven discovery.

@@ -29,6 +29,7 @@ const {
   MONGODB_URI, DATABASE_NAME, HIDDEN_AUTHORS,
   DISCOVER_POOL_COLLECTION, DISCOVER_WINDOW_DAYS, DISCOVER_CANDIDATE_LIMIT,
   DISCOVER_RANDOM_OLD_COUNT, DISCOVER_RETENTION_ACTIVE_DAYS, DISCOVER_POOL_LIMIT,
+  INTEREST_POOL_COLLECTION, INTEREST_POOL_PER_TAG, INTEREST_POOL_LIMIT,
   DISCOVER_RETENTION_WEIGHT, DISCOVER_RETENTION_MIN_MULT, DISCOVER_RETENTION_MAX_MULT,
   RETENTION_COLLECTION,
 } = require('../utils/config');
@@ -36,6 +37,7 @@ const { ageHours, freshness, newBoost, reshareBoost } = require('../utils/discov
 const { retentionMultiplier } = require('../utils/retentionScore');
 const { normalizeTags } = require('../utils/interests');
 const { pickWinner } = require('../utils/effectiveTags');
+const { INTEREST_TAGS } = require('../utils/interestTags');
 
 const WATCH_LOG = process.env.WATCH_LOG_COLLECTION || 'view-durations';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -84,7 +86,7 @@ async function run() {
       if (!keys.has(id)) keys.set(id, { owner, asset, src });
     };
 
-    const [recentEmbed, recentLegacy, randomTagged, retentionActive] = await Promise.all([
+    const [recentEmbed, recentLegacy, randomTagged, retentionActive, topicSampled] = await Promise.all([
       db.collection('embed-video').find({
         status: 'published', short: false, listed_on_3speak: true,
         hive_author: { $nin: [null, ...HIDDEN_AUTHORS] },
@@ -115,14 +117,30 @@ async function run() {
         { $group: { _id: { owner: '$owner', permlink: '$permlink' } } },
         { $limit: DISCOVER_POOL_LIMIT },
       ], { allowDiskUse: true }).toArray(),
+
+      // (d) STRATIFIED per-topic sample — the interest pool's reason for existing.
+      // Source (b) is a UNIFORM sample, so its topic mix just mirrors the
+      // catalogue and niche topics stay starved (science surfaced 29 of its 785
+      // videos). Sampling per topic gives every topic real depth. `subtitles-tags.tags`
+      // is a single normalised topic string, so an equality match is exact.
+      Promise.all(INTEREST_TAGS.map((tag) =>
+        db.collection('subtitles-tags').aggregate([
+          { $match: { tags: tag } },
+          { $sample: { size: INTEREST_POOL_PER_TAG } },
+          { $project: { author: 1, permlink: 1 } },
+        ], { allowDiskUse: true }).toArray()
+      )).then((per) => per.flat()),
     ]);
 
     recentEmbed.forEach((d) => add(d.owner, d.permlink, 'recent'));
     recentLegacy.forEach((d) => add(d.owner, d.permlink, 'recent'));
     randomTagged.forEach((d) => add(d.author, d.permlink, 'random'));
     retentionActive.forEach((d) => add(d._id.owner, d._id.permlink, 'retention'));
+    // Tagged as its own src: these are for the INTEREST pool. Keeping them out of
+    // the discover pool leaves the discover feed's composition exactly as it was.
+    topicSampled.forEach((d) => add(d.author, d.permlink, 'topic'));
 
-    const srcCounts = { recent: 0, random: 0, retention: 0 };
+    const srcCounts = { recent: 0, random: 0, retention: 0, topic: 0 };
     for (const k of keys.values()) srcCounts[k.src] += 1;
 
     // ── 2. Resolve keys → real published video docs ───────────────────────────
@@ -191,6 +209,7 @@ async function run() {
       max: DISCOVER_RETENTION_MAX_MULT,
     };
     const ops = [];
+    const interestOps = [];
     let skipped = 0;
     for (const [id, k] of keys) {
       const ev = embedByKey.get(id);
@@ -222,34 +241,35 @@ async function run() {
       const rb = reshareBoost(reshares);
       const base = f * nb * rb * retMult;
 
-      ops.push({
-        updateOne: {
-          filter: { _id: id },
-          update: {
-            $set: {
-              owner: k.owner,
-              permlink: hivePermlink,        // what watch_history + the watch page use
-              assetPermlink: k.asset,        // what retention / transcription use
-              source,
-              src: k.src,
-              created: created ? new Date(created) : null,
-              tags,
-              winnerTag,                        // winner-only interest match key
-              nsfw: isNsfw(ev || lv, new Set(tags)),
-              reshares,
-              relQ: relQ == null ? null : relQ,
-              retentionMult: Math.round(retMult * 1000) / 1000,
-              freshness: Math.round(f * 1000) / 1000,
-              newBoost: Math.round(nb * 1000) / 1000,
-              reshareBoost: Math.round(rb * 1000) / 1000,
-              base: Math.round(base * 100000) / 100000,
-              runAt,
-            },
-          },
-          upsert: true,
-        },
-      });
-      if (ops.length >= DISCOVER_POOL_LIMIT) break;
+      const doc = {
+        owner: k.owner,
+        permlink: hivePermlink,        // what watch_history + the watch page use
+        assetPermlink: k.asset,        // what retention / transcription use
+        source,
+        src: k.src,
+        created: created ? new Date(created) : null,
+        tags,
+        winnerTag,                        // winner-only interest match key
+        nsfw: isNsfw(ev || lv, new Set(tags)),
+        reshares,
+        relQ: relQ == null ? null : relQ,
+        retentionMult: Math.round(retMult * 1000) / 1000,
+        freshness: Math.round(f * 1000) / 1000,
+        newBoost: Math.round(nb * 1000) / 1000,
+        reshareBoost: Math.round(rb * 1000) / 1000,
+        base: Math.round(base * 100000) / 100000,
+        runAt,
+      };
+      const upsert = { updateOne: { filter: { _id: id }, update: { $set: doc }, upsert: true } };
+
+      // DISCOVER pool: the original sources only. The topic-stratified sample is
+      // excluded so the discover feed's composition is unchanged by this work.
+      if (k.src !== 'topic' && ops.length < DISCOVER_POOL_LIMIT) ops.push(upsert);
+
+      // INTEREST pool: anything with a resolved winning topic - the topic sample
+      // plus whatever the other sources happened to tag. Untagged videos can never
+      // match an interest, so they'd be dead weight here.
+      if (winnerTag && interestOps.length < INTEREST_POOL_LIMIT) interestOps.push(upsert);
     }
 
     const coll = db.collection(DISCOVER_POOL_COLLECTION);
@@ -260,9 +280,17 @@ async function run() {
     // no longer published) so the pool never grows unbounded.
     const del = await coll.deleteMany({ runAt: { $lt: runAt } });
 
+    const icoll = db.collection(INTEREST_POOL_COLLECTION);
+    for (let i = 0; i < interestOps.length; i += 1000) {
+      await icoll.bulkWrite(interestOps.slice(i, i + 1000), { ordered: false });
+    }
+    const idel = await icoll.deleteMany({ runAt: { $lt: runAt } });
+
     await client.close();
     return {
       pool: ops.length,
+      interestPool: interestOps.length,
+      interestRemoved: idel.deletedCount || 0,
       sources: srcCounts,
       skipped,
       removed: del.deletedCount || 0,

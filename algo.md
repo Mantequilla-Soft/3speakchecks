@@ -433,3 +433,45 @@ traps:
   return a body, and the videos router is mounted at `/`.
 - **Shorts keep `hive_body`** — it IS their visible caption, so stripping it blanks
   every short's description.
+
+---
+
+# Interests feed (`GET /feeds/interests`) — its own stratified pool
+
+**Why it isn't just the discover feed with a filter.** It used to be
+(`/feeds/discover?interestsOnly=1`), and that starved it. The discover pool is a
+~2.7k **uniform** sample of a ~104k tagged catalogue, so its topic mix simply
+mirrors the catalogue. Filtering that down to one topic left almost nothing —
+`science` surfaced **29** of its 785 videos, i.e. a single page, and paging
+produced no more. Growing the discover pool wouldn't fix it either: a uniform
+sample scales every topic proportionally, so niche topics stay niche.
+
+The `interest-pool` is **stratified**: the worker samples up to
+`INTEREST_POOL_PER_TAG` (default 800) videos for **each** topic, so every topic has
+depth regardless of how rare it is in the catalogue.
+
+| topic | discover-pool (old) | interest-pool (new) |
+|---|---|---|
+| science | 29 → 1 page | 744 → 25 pages |
+| health | 33 → 2 pages | 731 → 25 pages |
+| art | 119 → 4 pages | 892 → 30 pages |
+| music | 878 → 30 pages | 1589 → 53 pages |
+
+Notes:
+
+- The topic-sampled candidates are written with `src: 'topic'` and are deliberately
+  **excluded from the discover pool**, so the discover feed's composition is exactly
+  what it was.
+- Only entries with a resolved `winnerTag` land in the interest pool — an untagged
+  video can never match an interest, so it would be dead weight.
+- `subtitles-tags.tags` is a single **normalised topic string** (not an array), so
+  the per-topic `$match` is an exact equality.
+- `tutorial` is not a transcription tag, so it gets no stratified sample; its
+  entries come only from viewer tags. That's a real ceiling, not a bug.
+- Request-time work is tiny: the pool is cached in-process, `base` already carries
+  freshness × newBoost × reshareBoost × retention, and every candidate matches by
+  definition — so there's no interest multiplier, just seeded jitter and the shared
+  user filters (dismissals + hide-watched).
+
+Config: `INTEREST_POOL_COLLECTION` (`interest-pool`), `INTEREST_POOL_PER_TAG` (800),
+`INTEREST_POOL_LIMIT` (20000).

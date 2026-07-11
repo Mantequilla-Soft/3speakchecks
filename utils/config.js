@@ -93,6 +93,16 @@ module.exports = {
     DISCOVER_RETENTION_ACTIVE_DAYS: parseInt(process.env.DISCOVER_RETENTION_ACTIVE_DAYS) || 14, // (c) had watch data recently
     DISCOVER_POOL_LIMIT: parseInt(process.env.DISCOVER_POOL_LIMIT) || 4000,          // hard cap on the built pool
 
+    // ── Interest pool (feeds the dedicated /feeds/interests endpoint) ──────────
+    // The discover pool is a ~2.7k UNIFORM sample of a ~104k tagged catalogue, so
+    // filtering it down to one topic starved the interests feed (science surfaced
+    // 29 of its 785 videos - a single page). This second pool is STRATIFIED: it
+    // samples up to INTEREST_POOL_PER_TAG videos for EACH topic, so every topic -
+    // niche ones included - has real depth to page through.
+    INTEREST_POOL_COLLECTION: process.env.INTEREST_POOL_COLLECTION || 'interest-pool',
+    INTEREST_POOL_PER_TAG: parseInt(process.env.INTEREST_POOL_PER_TAG) || 800,   // per-topic sample size
+    INTEREST_POOL_LIMIT: parseInt(process.env.INTEREST_POOL_LIMIT) || 20000,     // hard cap on the built pool
+
     // Freshness: fresh uploads matter but must NOT dominate — the whole point of
     // this feed is reviving older work. Deliberately the WEAKEST driver (~2.3x)
     // so retention (~3.1x) and interest (2.5x) decide the ranking. Freshness hits
