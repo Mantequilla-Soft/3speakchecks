@@ -3,7 +3,7 @@ const router = express.Router();
 const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
 const { nsfwFilterHiveTags } = require('../utils/filters');
-const { HIDDEN_AUTHORS, SHORT_SORT_INTERVAL, REWARD_WEIGHT, RESHARE_WEIGHT, ENABLE_MONGO_WRITES } = require('../utils/config');
+const { HIDDEN_AUTHORS, SHORT_SORT_INTERVAL, REWARD_WEIGHT, RESHARE_WEIGHT, ENABLE_MONGO_WRITES, RELATED_TOPIC_MULT } = require('../utils/config');
 const { fetchHiveRewards, fetchLivePageData, fetchFollowerCounts, hiveReputationToScore, mulberry32, getFollowingList, reputationCache } = require('../utils/hive');
 const { sortedShortsCache, SORTED_SHORTS_CACHE_TTL, getCachedViews, setCachedViews } = require('../utils/cache');
 const { INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTags, tagsMatchInterests } = require('../utils/interests');
@@ -417,6 +417,9 @@ router.get('/shortssorted', async (req, res) => {
         const followedBy = String(req.query.followedby || '').trim().toLowerCase().replace(/^@/, '');
         // New-content feed: newest first, no retention re-rank, no scoring.
         const chrono = req.query.chrono === '1' || req.query.chrono === 'true';
+        // Watch page: boost shorts sharing the current video's winning topic, so the
+        // shorts recommended beside a video are actually about the same thing.
+        const topic = String(req.query.topic || '').trim().toLowerCase();
 
         // A short's HIVE author (embed_url is "@author/permlink"); `owner` is the
         // uploader of the asset, which is usually but not always the same.
@@ -450,6 +453,7 @@ router.get('/shortssorted', async (req, res) => {
             hideWatched ? `hw:${currentuser}` : 'all',
             followedBy ? `follow:${followedBy}` : 'all',
             chrono ? 'chrono' : 'ranked',
+            topic ? `topic:${topic}` : 'all',
         ].join('|');
         let sortedShorts;
         const cached = sortedShortsCache.get(cacheKey);
@@ -578,7 +582,7 @@ router.get('/shortssorted', async (req, res) => {
             // topic (viewer votes + auto tags) so we can boost shorts whose winner
             // matches the caller's interests.
             let shortWinners = new Map();
-            if (interestSet.size) {
+            if (interestSet.size || topic) {
                 const autoKey = (s) => ({ author: s.owner, permlink: s.permlink });
                 const hiveKey = (s) => {
                     let hp = s.permlink;
@@ -630,10 +634,17 @@ router.get('/shortssorted', async (req, res) => {
                 short.sort_score = recencyBonus + normalizedReward * REWARD_WEIGHT + normalizedReshares * RESHARE_WEIGHT + randomComponent * randomWeight;
 
                 // Boost shorts whose single winning topic matches the interests.
-                if (interestSet.size) {
+                if (interestSet.size || topic) {
                     const winner = shortWinners.get(short);
                     if (winner) short.winner_tag = winner;
-                    if (winner && interestSet.has(winner)) short.sort_score *= INTEREST_MULTIPLIER;
+                    if (interestSet.size && winner && interestSet.has(winner)) {
+                        short.sort_score *= INTEREST_MULTIPLIER;
+                    }
+                    // Same topic as the video being watched. A BOOST, not a filter:
+                    // a narrow topic would otherwise leave the watch page with only a
+                    // handful of shorts (or none), and a partly-relevant rail beats an
+                    // empty one.
+                    if (topic && winner === topic) short.sort_score *= RELATED_TOPIC_MULT;
                 }
             }
 
@@ -667,7 +678,9 @@ router.get('/shortssorted', async (req, res) => {
                         hive_title: short.hive_title || '',
                         hive_body: short.hive_body || '',
                         hive_tags: short.hive_tags || [],
-                        reshare_count: short.reshare_count || 0
+                        reshare_count: short.reshare_count || 0,
+                        // Carried through the cache so the response can expose it.
+                        winner_tag: short.winner_tag || null
                     });
                     lastOwner = short.owner;
                 }
@@ -759,6 +772,8 @@ router.get('/shortssorted', async (req, res) => {
                     hive_author_reputation: data.author_reputation,
                     hive_followers: followers,
                     reshare_count: short.reshare_count || 0,
+                    // Resolved only when the request carries interests or a topic.
+                    winner_tag: short.winner_tag || null,
                     createdAt: short.createdAt,
                     thumbnail_url: short.thumbnail_url,
                     embed_url: short.embed_url,
