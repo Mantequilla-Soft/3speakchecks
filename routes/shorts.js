@@ -413,6 +413,21 @@ router.get('/shortssorted', async (req, res) => {
         // With no interests supplied there's nothing to filter on, so it's a no-op.
         const onlyInterests = req.query.onlyinterests === '1' || req.query.onlyinterests === 'true';
 
+        // Follow feed: only shorts from creators this user follows.
+        const followedBy = String(req.query.followedby || '').trim().toLowerCase().replace(/^@/, '');
+        // New-content feed: newest first, no retention re-rank, no scoring.
+        const chrono = req.query.chrono === '1' || req.query.chrono === 'true';
+
+        // A short's HIVE author (embed_url is "@author/permlink"); `owner` is the
+        // uploader of the asset, which is usually but not always the same.
+        const hiveAuthor = (s) => {
+            if (s.embed_url) {
+                const parts = s.embed_url.replace(/^@/, '').split('/');
+                if (parts.length === 2) return String(parts[0]).toLowerCase();
+            }
+            return String(s.owner || '').toLowerCase();
+        };
+
         const getHivePermlink = (s) => {
             if (s.embed_url) {
                 const parts = s.embed_url.replace(/^@/, '').split('/');
@@ -433,6 +448,8 @@ router.get('/shortssorted', async (req, res) => {
             interestsToken,
             onlyInterests ? 'only' : 'boost',
             hideWatched ? `hw:${currentuser}` : 'all',
+            followedBy ? `follow:${followedBy}` : 'all',
+            chrono ? 'chrono' : 'ranked',
         ].join('|');
         let sortedShorts;
         const cached = sortedShortsCache.get(cacheKey);
@@ -586,6 +603,17 @@ router.get('/shortssorted', async (req, res) => {
                 });
             }
 
+            // Follow feed: keep only shorts by creators this user follows. Matched on
+            // the HIVE author (embed_url), which is who the viewer actually follows —
+            // `owner` is the asset uploader and isn't always the same account.
+            if (followedBy) {
+                const following = await getFollowingList(followedBy);
+                const followSet = new Set((following || []).map((u) => String(u).toLowerCase()));
+                candidateShorts = followSet.size
+                    ? candidateShorts.filter((s) => followSet.has(hiveAuthor(s)))
+                    : [];
+            }
+
             // Assign weighted sort scores
             for (const short of candidateShorts) {
                 const normalizedReward = (short.hive_reward || 0) / maxReward;
@@ -611,10 +639,15 @@ router.get('/shortssorted', async (req, res) => {
 
             // Retention re-rank (bounded multiplier from the cached video-retention;
             // shorts key by owner/permlink = the asset id, same as view-durations).
-            await applyRetention(db, candidateShorts, { scoreField: 'sort_score' });
+            // `chrono` (the New-content rail) opts out entirely: newest-first, no
+            // retention, no reward/reshare/random scoring.
+            if (!chrono) {
+                await applyRetention(db, candidateShorts, { scoreField: 'sort_score' });
+            }
 
-            // Sort by score descending
-            const scoreSorted = [...candidateShorts].sort((a, b) => b.sort_score - a.sort_score);
+            const scoreSorted = chrono
+                ? [...candidateShorts].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+                : [...candidateShorts].sort((a, b) => b.sort_score - a.sort_score);
 
             // Remove consecutive shorts by the same author (keep first, skip until a different author appears)
             sortedShorts = [];
