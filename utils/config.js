@@ -104,12 +104,15 @@ module.exports = {
     INTEREST_POOL_LIMIT: parseInt(process.env.INTEREST_POOL_LIMIT) || 20000,     // hard cap on the built pool
 
     // Freshness: fresh uploads matter but must NOT dominate — the whole point of
-    // this feed is reviving older work. Deliberately the WEAKEST driver (~2.3x)
-    // so retention (~3.1x) and interest (2.5x) decide the ranking. Freshness hits
-    // its floor at ~3 days, after which a 4-day-old and a 4-year-old video are
-    // equal on age and are separated only by quality/interest/reshares.
+    // this feed is reviving older work. Still the WEAKEST driver, below retention
+    // (~3.1x) and interest (2.5x). freshness = max(0.5^(hrs/HALFLIFE), FLOOR), so
+    // the FLOOR *is* the fresh-vs-old spread: 1/FLOOR.
+    //   0.65 → 1.54x   |   0.43 → 2.33x  (= 1.5x more recency-biased)
+    // Raised the bias to 1.5x because the top of discover was carrying too many
+    // years-old videos. Freshness bottoms out at ~3.7 days, after which a 4-day-old
+    // and a 4-year-old are equal on age and separated only by quality/interest.
     DISCOVER_HALFLIFE_H: parseFloat(process.env.DISCOVER_HALFLIFE_H ?? '72'),        // freshness half-life (hours)
-    DISCOVER_FRESH_FLOOR: parseFloat(process.env.DISCOVER_FRESH_FLOOR ?? '0.65'),    // old-but-great stays competitive
+    DISCOVER_FRESH_FLOOR: parseFloat(process.env.DISCOVER_FRESH_FLOOR ?? '0.43'),    // old-but-great stays competitive
     DISCOVER_NEW_GRACE_H: parseFloat(process.env.DISCOVER_NEW_GRACE_H ?? '12'),      // "really fresh" window
     DISCOVER_NEW_BOOST: parseFloat(process.env.DISCOVER_NEW_BOOST ?? '1.15'),        // modest lift, tapering to 1.0
     DISCOVER_INTEREST_MULTIPLIER: parseFloat(process.env.DISCOVER_INTEREST_MULTIPLIER ?? '2.5'), // > global 2.0
