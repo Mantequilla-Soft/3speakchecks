@@ -251,13 +251,17 @@ even enter its candidate set.
 
 ## The five factors
 
-**1. freshness** — half-life decay, floored. Deliberately the **weakest** driver
-(~1.77×): fresh uploads matter but must not dominate a discovery feed. It hits the
-floor at ~3 days, after which a 4-day-old and a 4-year-old video are equal on age
-and are separated only by quality, interest and reshares.
+**1. freshness** — half-life decay, floored. Still the **weakest** driver (~2.68×):
+fresh uploads matter but must not dominate a discovery feed. It hits the floor at
+~3.7 days, after which a 4-day-old and a 4-year-old video are equal on age and are
+separated only by quality, interest and reshares.
 ```
 freshness = max(0.5 ^ (ageHours / DISCOVER_HALFLIFE_H), DISCOVER_FRESH_FLOOR)
 ```
+The FLOOR *is* the fresh-vs-old spread: `1 / FLOOR`. It was raised from 0.65 (1.54×)
+to **0.43 (2.33×)** — a 1.5× stronger recency bias — because the top of discover was
+carrying too many years-old videos. Measured over the top 24 across 3 seeds: videos
+older than a year went **22% → 13%**, under-30-days **72% → 79%**.
 
 **2. newBoost** — a modest lift for really fresh uploads so they get first traction
 before any retention data exists. Tapers **linearly** to 1.0 across the grace
@@ -287,10 +291,10 @@ Plus **jitter** — seeded `× [1−J, 1+J]` (J = 0.15) so the row breathes betw
 ## Driver strength (the point of the tuning)
 
 ```
-retention 3.1x  >  interest 2.5x  >  reshares 2.0x  >  freshness 1.77x
+retention 3.1x  >  freshness 2.68x  >  interest 2.5x  >  reshares 2.0x
 ```
-Freshness is intentionally last. A great old video **can** outrank a fresh one:
-`OLD + match + retention 1.244 + 3 reshares = 2.99` beats `fresh 0h + match = 2.88`.
+Freshness is no longer last, but it is still below retention — a great old video
+**can** outrank a fresh one, which is the whole point of a discovery feed.
 
 ## Exploration slots
 
@@ -345,7 +349,7 @@ Live: **~0.12s** vs trendingSorted's ~1.5s.
 | `DISCOVER_RETENTION_ACTIVE_DAYS` | 14 | "still being watched" window |
 | `DISCOVER_POOL_LIMIT` | 4000 | hard cap on pool size |
 | `DISCOVER_HALFLIFE_H` | 72 | freshness half-life (hours) |
-| `DISCOVER_FRESH_FLOOR` | 0.65 | minimum freshness (keeps old competitive) |
+| `DISCOVER_FRESH_FLOOR` | 0.43 | minimum freshness. `1/FLOOR` = the fresh-vs-old spread |
 | `DISCOVER_NEW_GRACE_H` | 12 | "really fresh" window |
 | `DISCOVER_NEW_BOOST` | 1.15 | lift at age 0, tapering to 1.0 |
 | `DISCOVER_INTEREST_MULTIPLIER` | 2.5 | interest-match multiplier |
@@ -399,6 +403,23 @@ design. Retention still re-ranks whatever survives.
 This feed is often short — a single topic simply doesn't have many recent shorts
 (e.g. `art` alone yields ~8) — so the client falls back to Discover when the viewer
 swipes past the last one.
+
+## `?topic=<tag>` — recommended shorts on the watch page
+
+The watch page interleaves a shorts rail into its recommendation list, and asks for
+shorts about the same thing as the video being watched. It does **not** cost an extra
+lookup: `/feeds/related` already returns `currentTopic` (the winning topic it resolved
+for that video), and the client passes it straight back as `?topic=`.
+
+This is a **boost** (`RELATED_TOPIC_MULT`, ×3.0 — the same constant `/feeds/related`
+uses for videos), never a filter. A narrow topic has very few shorts, and a hard
+filter would leave the rail empty or half-full; a partly-relevant rail beats no rail.
+Measured at `limit=12`: `topic=music` returns 7/12 on-topic vs 1/12 unweighted, and
+`topic=gaming` — a thin topic — still returns a **full** rail with 2/12 on-topic
+rather than collapsing.
+
+`winner_tag` is carried through the sort cache onto each short in the response, so the
+resolved topic is visible to the client (and to `?debug`).
 
 ## The already-watched filter is FROZEN into the cached list
 
