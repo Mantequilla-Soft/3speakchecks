@@ -66,7 +66,7 @@ const listRequests = (db) => db.collection('gdpr-requests')
       const daysLeft = Math.ceil((r.dueAt - Date.now()) / 86400000);
       const flag = daysLeft < 7 ? '  <-- DUE SOON' : '';
       console.log(`${r.ref}  ${r.type.padEnd(6)}  @${r.username.padEnd(16)}  ${r.contact.padEnd(28)}  due in ${daysLeft}d${flag}`);
-      if (!r.mailed) console.log('        (never emailed — the mail API was not configured or failed)');
+      if (!r.notified) console.log('        (not yet announced by the Discord bot)');
     }
   });
 

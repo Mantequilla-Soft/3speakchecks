@@ -2,25 +2,24 @@
  * GDPR data-subject requests — "send me my data" (Art. 15) and "delete my data"
  * (Art. 17), submitted from the About / Contact tab in the app's settings.
  *
- *   POST /gdpr-request        → record a request, notify the privacy inbox
+ *   POST /gdpr-request        → record a request in Mongo
  *   GET  /gdpr-request/scope  → what we hold that is tied to a user (drives the UI copy)
+ *
+ * This endpoint ONLY records the request to the `gdpr-requests` collection. It sends
+ * no email and no chat message itself — notification is handled out-of-band by a
+ * separate Discord bot that watches the collection (see the handoff notes at the
+ * bottom of this file). Each new row is written with `notified: false` for that bot
+ * to poll and flip.
  *
  * Two things this endpoint deliberately does NOT do:
  *
- *   1. It does not delete anything. A request is RECORDED and a human fulfils it.
- *      A self-service delete button that fires straight at the database is how you
- *      erase the wrong account from an unauthenticated POST. The law gives us one
- *      month (Art. 12(3)) — that is ample for a human to action it.
+ *   1. It does not delete anything. A request is RECORDED and a human fulfils it via
+ *      scripts/gdpr.cjs. A self-service delete button that fires straight at the
+ *      database is how you erase the wrong account from an unauthenticated POST. The
+ *      law gives us one month (Art. 12(3)) — ample for a human to action it.
  *   2. It does not claim to touch the blockchain. Posts, comments, votes and
- *      viewer-tags are broadcast to Hive by the USER'S OWN KEYS. We are a
- *      front-end reading a public ledger; we cannot unpublish from it, and saying
- *      otherwise in a confirmation email would be a lie. The response copy says so.
- *
- * Mail goes out over an HTTP email API (Resend by default — no SMTP server to run).
- * If no API key is configured the request is still durably stored and the endpoint
- * still returns success: losing the request would be far worse than losing the
- * notification. `mailed: false` on the stored row flags the ones a human must go
- * looking for.
+ *      viewer-tags are broadcast to Hive by the USER'S OWN KEYS. We are a front-end
+ *      reading a public ledger; we cannot unpublish from it, and the UI says so.
  */
 const express = require('express');
 const router = express.Router();
@@ -31,15 +30,6 @@ const COLLECTION = 'gdpr-requests';
 const HIVE_RE = /^[a-z][a-z0-9.-]{2,15}$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const TYPES = new Set(['export', 'delete']);
-
-const MAIL_API_URL = process.env.GDPR_MAIL_API_URL || 'https://api.resend.com/emails';
-const MAIL_API_KEY = process.env.GDPR_MAIL_API_KEY || '';
-// TEMPORARY (2026-07-14): tibfox is the interim data-protection contact. Move this
-// to a monitored role address (privacy@…) rather than a person — a data-subject
-// request must not sit unread because one individual is on holiday, and the one-month
-// Art. 12(3) clock runs regardless. Override with GDPR_MAIL_FROM / GDPR_MAIL_TO.
-const MAIL_FROM = process.env.GDPR_MAIL_FROM || 'tibfox@3speak.tv';
-const MAIL_TO = process.env.GDPR_MAIL_TO || 'tibfox@3speak.tv';
 
 // Rate limit: a data-subject request is a once-in-a-blue-moon action. This exists
 // to stop someone hammering the endpoint to spam the privacy inbox, not to gate
@@ -69,35 +59,6 @@ const DATA_SCOPE = [
 router.get('/gdpr-request/scope', (_req, res) => {
   res.json({ success: true, scope: DATA_SCOPE });
 });
-
-async function notify(row) {
-  if (!MAIL_API_KEY) return false;
-  const lines = [
-    `Type:     ${row.type === 'export' ? 'DATA EXPORT (Art. 15)' : 'DELETION (Art. 17)'}`,
-    `Hive account: ${row.username}`,
-    `Reply to: ${row.contact}`,
-    `Received: ${row.createdAt.toISOString()}`,
-    `Due by:   ${row.dueAt.toISOString()}  (one month, Art. 12(3))`,
-    `Ref:      ${row.ref}`,
-    '',
-    'Message:',
-    row.message || '(none)',
-  ].join('\n');
-
-  const resp = await fetch(MAIL_API_URL, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${MAIL_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      from: MAIL_FROM,
-      to: [MAIL_TO],
-      reply_to: row.contact,
-      subject: `[GDPR ${row.type}] @${row.username} — due ${row.dueAt.toISOString().slice(0, 10)}`,
-      text: lines,
-    }),
-  });
-  if (!resp.ok) throw new Error(`mail api ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
-  return true;
-}
 
 // POST /gdpr-request  body: { username, type: 'export'|'delete', contact, message? }
 router.post('/gdpr-request', async (req, res) => {
@@ -134,21 +95,12 @@ router.post('/gdpr-request', async (req, res) => {
       // Art. 12(3): one month to respond. Stored so it can be sorted/alerted on
       // rather than living in someone's head.
       dueAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000),
-      mailed: false,
+      // For the external Discord bot: it polls for `notified: false`, pings the
+      // channel, then flips this to true. We never notify from here.
+      notified: false,
     };
 
     await coll.insertOne(row);
-
-    // Store first, notify second. A mail failure must never lose the request —
-    // ignoring a data-subject request is among the most complained-about things
-    // there is, and "our email broke" is not a defence.
-    let mailed = false;
-    try {
-      mailed = await notify(row);
-      if (mailed) await coll.updateOne({ ref: row.ref }, { $set: { mailed: true } });
-    } catch (err) {
-      console.error(`[gdpr] request ${row.ref} stored but NOT emailed:`, err.message);
-    }
 
     res.json({
       success: true,
