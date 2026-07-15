@@ -360,9 +360,9 @@ router.get('/:username.xml', async (req, res) => {
             );
         }
 
-        // Check if author is banned
+        // Check if author is banned or hidden — either takes the channel off the feed.
         const creator = await creatorsCollection.findOne({ username });
-        if (creator && creator.banned === true) {
+        if (creator && (creator.banned === true || creator.hidden === true)) {
             res.setHeader('Content-Type', 'application/xml; charset=utf-8');
             return res.send(
                 '<?xml version="1.0" encoding="UTF-8"?>' +

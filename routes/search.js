@@ -4,6 +4,7 @@ const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
 const { unavailableMatch } = require('../utils/unavailable');
 const { nsfwFilter, nsfwFilterTags, nsfwFilterHiveTags } = require('../utils/filters');
+const { hiddenListSync } = require('../utils/hiddenCreators');
 
 // Helper: highlight matched terms in a string
 function highlightMatches(text, terms) {
@@ -37,13 +38,13 @@ router.get('/suggest', async (req, res) => {
                 {
                     hive_title: containsRegex,
                     status: 'published',
-                    hive_author: { $type: 'string' },
+                    hive_author: { $type: 'string', $nin: hiddenListSync() },
                     hive_permlink: { $type: 'string' },
                 },
                 { projection: { hive_title: 1, hive_author: 1, owner: 1, hive_permlink: 1, _id: 0 } }
             ).limit(5).toArray(),
             db.collection('hiveprofiles').find(
-                { $or: [{ username: prefixRegex }, { display_name: containsRegex }] },
+                { username: { $nin: hiddenListSync() }, $or: [{ username: prefixRegex }, { display_name: containsRegex }] },
                 { projection: { username: 1, display_name: 1, profile_image: 1, _id: 0 } }
             ).limit(5).toArray(),
             db.collection('videos').find(
@@ -219,6 +220,7 @@ router.get('/', async (req, res) => {
                     ...textQuery,
                     status: 'published',
                     publishFailed: { $ne: true },
+                    owner: { $nin: hiddenListSync() },
                     ...nsfwFilterTags(req),
                     ...videoExtraFilters()
                 }, { projection: { score: { $meta: 'textScore' }, owner: 1, author: 1, permlink: 1, title: 1, created: 1, created_at: 1, createdAt: 1, duration: 1, tags_v2: 1, thumbnail: 1, images: 1, views: 1 } })
@@ -251,7 +253,7 @@ router.get('/', async (req, res) => {
                     status: 'published',
                     short: false,
                     listed_on_3speak: true,
-                    hive_author: { $ne: null },
+                    hive_author: { $ne: null, $nin: hiddenListSync() },
                     hive_permlink: { $ne: null },
                     ...nsfwFilterHiveTags(req),
                     ...embedExtraFilters()
@@ -286,6 +288,7 @@ router.get('/', async (req, res) => {
                     short: true,
                     processed: true,
                     embed_url: { $exists: true, $ne: null },
+                    hive_author: { $nin: hiddenListSync() },
                     ...nsfwFilterHiveTags(req),
                     ...embedExtraFilters()
                 }, { projection: { score: { $meta: 'textScore' }, owner: 1, hive_author: 1, permlink: 1, hive_title: 1, embed_title: 1, originalFilename: 1, createdAt: 1, duration: 1, hive_tags: 1, thumbnail_url: 1, embed_url: 1, views: 1, short: 1 } })
@@ -315,6 +318,7 @@ router.get('/', async (req, res) => {
             searches.push(
                 db.collection('embed-audio').find({
                     ...textQuery,
+                    owner: { $nin: hiddenListSync() },
                     ...nsfwFilter(req),
                     ...audioExtraFilters()
                 }, { projection: { score: { $meta: 'textScore' }, owner: 1, permlink: 1, title: 1, originalFilename: 1, createdAt: 1, duration: 1, tags: 1 } })
@@ -357,7 +361,7 @@ router.get('/', async (req, res) => {
         if (wantType('user')) {
             searches.push(
                 db.collection('hiveprofiles').find(
-                    textQuery,
+                    { ...textQuery, username: { $nin: hiddenListSync() } },
                     { projection: { score: { $meta: 'textScore' }, username: 1, display_name: 1, about: 1, location: 1, profile_image: 1, cover_image: 1 } }
                 )
                 .sort(scoreSort).limit(maxPerCollection).toArray()
@@ -417,12 +421,14 @@ router.get('/', async (req, res) => {
                             $or: lookups,
                             status: 'published',
                             publishFailed: { $ne: true },
+                            owner: { $nin: hiddenListSync() },
                             ...nsfwFilterTags(req)
                         }, { projection: { owner: 1, author: 1, permlink: 1, title: 1, created: 1, created_at: 1, createdAt: 1, duration: 1, tags_v2: 1, thumbnail: 1, images: 1, views: 1 } }).limit(50).toArray(),
                         db.collection('embed-video').find({
                             ...feedAgeMatch('createdAt'), ...unavailableMatch(),
                             $or: lookups.map(l => ({ owner: l.owner, permlink: l.permlink })),
                             status: 'published',
+                            hive_author: { $nin: hiddenListSync() },
                             ...nsfwFilterHiveTags(req)
                         }, { projection: { owner: 1, hive_author: 1, hive_permlink: 1, permlink: 1, hive_title: 1, embed_title: 1, originalFilename: 1, createdAt: 1, duration: 1, hive_tags: 1, thumbnail_url: 1, embed_url: 1, views: 1, short: 1 } }).limit(50).toArray()
                     ]);

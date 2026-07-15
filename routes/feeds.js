@@ -4,6 +4,7 @@ const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
 const { unavailableMatch } = require('../utils/unavailable');
 const { nsfwFilterTags, nsfwFilterHiveTags } = require('../utils/filters');
+const { hiddenListSync } = require('../utils/hiddenCreators');
 const { HIDDEN_AUTHORS, TRENDING_CANDIDATE_LIMIT, TRENDING_VIEWS_WEIGHT, TRENDING_VOTES_WEIGHT, TRENDING_COMMENTS_WEIGHT, TRENDING_REWARD_WEIGHT, TRENDING_RESHARE_WEIGHT, RESHARE_WEIGHT } = require('../utils/config');
 const { fetchHiveRewards, fetchLivePageData, mulberry32 } = require('../utils/hive');
 const { INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTags, tagsMatchInterests } = require('../utils/interests');
@@ -372,7 +373,7 @@ router.get('/recommended', async (req, res) => {
             ...feedAgeMatch('created'), ...unavailableMatch(),
             recommended: true,
             status: 'published',
-            owner: { $nin: HIDDEN_AUTHORS },
+            owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
             ...nsfwFilterTags(req)
         };
 
@@ -429,7 +430,7 @@ router.get('/promoted', async (req, res) => {
             short: false,
             listed_on_3speak: true,
             promotedUntil: { $gt: now },
-            hive_author: { $nin: [null, ...HIDDEN_AUTHORS] },
+            hive_author: { $nin: [null, ...HIDDEN_AUTHORS, ...hiddenListSync()] },
             hive_permlink: { $ne: null },
             ...nsfwFilterHiveTags(req)
         }).sort({ promotedUntil: 1 }).limit(limit).toArray();
@@ -482,7 +483,7 @@ router.get('/new', async (req, res) => {
         const query = {
             ...feedAgeMatch('created'), ...unavailableMatch(),
             status: 'published',
-            owner: { $nin: HIDDEN_AUTHORS },
+            owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
             firstUpload: { $ne: true },
             trending: { $ne: true },
             publishFailed: { $ne: true },
@@ -497,7 +498,7 @@ router.get('/new', async (req, res) => {
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
-                hive_author: { $nin: [null, ...HIDDEN_AUTHORS] },
+                hive_author: { $nin: [null, ...HIDDEN_AUTHORS, ...hiddenListSync()] },
                 hive_permlink: { $ne: null },
                 ...nsfwFilterHiveTags(req)
             }).sort({ createdAt: -1 }).limit(limit + skip).toArray()
@@ -591,7 +592,7 @@ router.get('/trending', async (req, res) => {
             ...feedAgeMatch('created'), ...unavailableMatch(),
             trending: true,
             status: 'published',
-            owner: { $nin: HIDDEN_AUTHORS },
+            owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
             ...nsfwFilterTags(req)
         };
 
@@ -649,7 +650,7 @@ router.get('/trendingSorted', async (req, res) => {
                 {
                     $match: {
                         status: 'published',
-                        owner: { $nin: HIDDEN_AUTHORS },
+                        owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
                         publishFailed: { $ne: true },
                         created: { $gte: sevenDaysAgo },
                         ...nsfwFilterTags(req)
@@ -884,7 +885,7 @@ router.get('/firstUploads', async (req, res) => {
             ...feedAgeMatch('created'), ...unavailableMatch(),
             firstUpload: true,
             status: 'published',
-            owner: { $nin: HIDDEN_AUTHORS },
+            owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
             trending: { $ne: true },
             publishFailed: { $ne: true },
             ...nsfwFilterTags(req)
@@ -1083,7 +1084,7 @@ router.get('/community/:id/new', async (req, res) => {
             videosCollection.find({
                 ...feedAgeMatch('created'), ...unavailableMatch(),
                 status: 'published',
-                owner: { $nin: HIDDEN_AUTHORS },
+                owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
                 publishFailed: { $ne: true },
                 community: communityId,
                 ...nsfwFilterTags(req),
@@ -1093,7 +1094,7 @@ router.get('/community/:id/new', async (req, res) => {
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
-                hive_author: { $nin: [null, ...HIDDEN_AUTHORS] },
+                hive_author: { $nin: [null, ...HIDDEN_AUTHORS, ...hiddenListSync()] },
                 hive_permlink: { $ne: null },
                 ...nsfwFilterHiveTags(req),
                 ...communityMatchClause(communityId),
@@ -1164,7 +1165,7 @@ router.get('/community/:id/trending', async (req, res) => {
             videosCollection.find({
                 ...feedAgeMatch('created'), ...unavailableMatch(),
                 status: 'published',
-                owner: { $nin: HIDDEN_AUTHORS },
+                owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
                 publishFailed: { $ne: true },
                 community: communityId,
                 created: { $gte: windowStart },
@@ -1175,7 +1176,7 @@ router.get('/community/:id/trending', async (req, res) => {
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
-                hive_author: { $nin: [null, ...HIDDEN_AUTHORS] },
+                hive_author: { $nin: [null, ...HIDDEN_AUTHORS, ...hiddenListSync()] },
                 hive_permlink: { $ne: null },
                 createdAt: { $gte: windowStart },
                 ...nsfwFilterHiveTags(req),

@@ -44,6 +44,7 @@ const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/cur
 const { normalizeTags } = require('../utils/interests');
 const { pickWinner } = require('../utils/effectiveTags');
 const { INTEREST_TAGS } = require('../utils/interestTags');
+const { getHiddenSet } = require('../utils/hiddenCreators');
 
 const WATCH_LOG = process.env.WATCH_LOG_COLLECTION || 'view-durations';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -82,6 +83,12 @@ async function run() {
 
     const recentCutoff = new Date(now - DISCOVER_WINDOW_DAYS * DAY_MS);
     const activeCutoff = new Date(now - DISCOVER_RETENTION_ACTIVE_DAYS * DAY_MS);
+
+    // Hidden (moderation) creators — loaded fresh for this run (worker is a new
+    // thread each time). Their videos never enter the precomputed pool. Same
+    // owner-vs-hive_author caveat as HIDDEN_AUTHORS, so we check both below.
+    const hiddenSet = await getHiddenSet(db);
+    const isHiddenCreator = (name) => !!name && hiddenSet.has(String(name).toLowerCase());
 
     // ── 1. Collect candidate keys (owner + ASSET permlink) from the 3 sources ──
     const keys = new Map(); // "owner/asset" -> { owner, asset, src }
@@ -230,6 +237,8 @@ async function run() {
       if ((ev || lv).unavailable === true) { skipped += 1; continue; }
       // An embed's hive_author can differ from its owner — check both.
       if (isHiddenAuthor(k.owner) || (ev && isHiddenAuthor(ev.hive_author))) { skipped += 1; continue; }
+      // Moderation-hidden creators (contentcreators.hidden) — same both-keys check.
+      if (isHiddenCreator(k.owner) || (ev && isHiddenCreator(ev.hive_author))) { skipped += 1; continue; }
 
       const source = ev ? 'embed' : 'legacy';
       const hivePermlink = ev ? ev.hive_permlink : lv.permlink;

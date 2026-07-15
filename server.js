@@ -3,7 +3,7 @@ const cors = require('cors');
 const cron = require('node-cron');
 
 const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H } = require('./utils/config');
-const { connectToMongo } = require('./utils/db');
+const { connectToMongo, getDb } = require('./utils/db');
 const { calculateAndFlagTrendingVideos } = require('./services/trending');
 const { syncHiveCommunities } = require('./services/communitySync');
 const { syncHiveProfiles } = require('./services/profileSync');
@@ -38,6 +38,7 @@ const userFiltersRoutes = require('./routes/userFilters');
 const viewerTagsRoutes = require('./routes/viewerTags');
 const leaderboardRoutes = require('./routes/leaderboard');
 const gdprRoutes = require('./routes/gdpr');
+const gdprAdminRoutes = require('./routes/gdprAdmin');
 
 const app = express();
 
@@ -74,6 +75,7 @@ app.use('/scheduled-posts', scheduledPostsRoutes);
 app.use('/', communitiesRoutes);
 app.use('/', analyticsRoutes);
 app.use('/', gdprRoutes);
+app.use('/gdpr-admin', gdprAdminRoutes);
 app.use('/', userFiltersRoutes);
 app.use('/', viewerTagsRoutes);
 app.use('/', leaderboardRoutes);
@@ -84,6 +86,30 @@ let syncRunning = false;
 // Start server
 async function startServer() {
     await connectToMongo();
+
+    // Warm the hidden-creators set on boot so the very first feed/search/watch
+    // request is already filtered (the sync accessors otherwise warm lazily on the
+    // first hit, leaving a sub-second fail-open window after a restart).
+    require('./utils/hiddenCreators').getHiddenSet().catch(() => {});
+
+    // GDPR request retention. A closed request still holds the requester's email +
+    // message. We keep it a short window after fulfilment (audit / appeal) then
+    // delete it — otherwise, for someone whose data we just ERASED, we'd be sitting
+    // on their contact details again. Daily at 04:45.
+    const GDPR_REQUEST_RETENTION_DAYS = parseInt(process.env.GDPR_REQUEST_RETENTION_DAYS, 10) || 30;
+    const purgeClosedGdprRequests = async () => {
+        try {
+            const cutoff = new Date(Date.now() - GDPR_REQUEST_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+            const res = await getDb().collection('gdpr-requests')
+                .deleteMany({ status: 'done', closedAt: { $lt: cutoff } });
+            if (res.deletedCount) console.log(`[gdpr] purged ${res.deletedCount} closed request(s) older than ${GDPR_REQUEST_RETENTION_DAYS}d`);
+        } catch (e) {
+            console.error('[gdpr] closed-request retention cleanup failed:', e.message);
+        }
+    };
+    purgeClosedGdprRequests(); // once on boot, then daily
+    cron.schedule('45 4 * * *', purgeClosedGdprRequests);
+    console.log(`GDPR closed-request retention: delete ${GDPR_REQUEST_RETENTION_DAYS}d after close (daily 04:45)`);
 
     // Start change stream watcher to keep hive_tags_lower in sync
     startTagSyncWatcher();

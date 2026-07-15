@@ -10,32 +10,36 @@
 const { DISCOVER_POOL_COLLECTION, DISCOVER_POOL_CACHE_MS } = require('./config');
 const { feedAgeMatch } = require('./feedAge');
 const { unavailableMatch } = require('./unavailable');
+const { filterHiddenDocs } = require('./hiddenCreators');
 
 let cache = { at: 0, docs: [] };
 
 /** Cached read of the whole pool. Returns [] if the worker hasn't run yet. */
 async function getPool(db, { force = false } = {}) {
-  if (!force && cache.docs.length && Date.now() - cache.at < DISCOVER_POOL_CACHE_MS) {
-    return cache.docs;
+  let docs = cache.docs;
+  if (force || !cache.docs.length || Date.now() - cache.at >= DISCOVER_POOL_CACHE_MS) {
+    try {
+      // Drop pool entries past the global age cutoff (very old legacy videos often
+      // no longer resolve). Filtered on read, so changing FEED_MAX_AGE_YEARS takes
+      // effect on the next pool refresh without rebuilding the pool.
+      docs = await db.collection(DISCOVER_POOL_COLLECTION)
+        .find({ ...feedAgeMatch('created'), ...unavailableMatch() }, {
+          projection: {
+            owner: 1, author: 1, permlink: 1, assetPermlink: 1, source: 1, src: 1,
+            created: 1, tags: 1, winnerTag: 1, nsfw: 1, relQ: 1,
+            reshares: 1, saves: 1, viewerTags: 1, curationBoost: 1,
+            retentionMult: 1, retentionViewers: 1, freshness: 1, newBoost: 1, base: 1,
+          },
+        }).toArray();
+      cache = { at: Date.now(), docs };
+    } catch {
+      docs = cache.docs; // never let a pool read break the feed
+    }
   }
-  try {
-    // Drop pool entries past the global age cutoff (very old legacy videos often
-    // no longer resolve). Filtered on read, so changing FEED_MAX_AGE_YEARS takes
-    // effect on the next pool refresh without rebuilding the pool.
-    const docs = await db.collection(DISCOVER_POOL_COLLECTION)
-      .find({ ...feedAgeMatch('created'), ...unavailableMatch() }, {
-        projection: {
-          owner: 1, author: 1, permlink: 1, assetPermlink: 1, source: 1, src: 1,
-          created: 1, tags: 1, winnerTag: 1, nsfw: 1, relQ: 1,
-          reshares: 1, saves: 1, viewerTags: 1, curationBoost: 1,
-          retentionMult: 1, retentionViewers: 1, freshness: 1, newBoost: 1, base: 1,
-        },
-      }).toArray();
-    cache = { at: Date.now(), docs };
-    return docs;
-  } catch {
-    return cache.docs; // never let a pool read break the feed
-  }
+  // Exclude moderation-hidden creators on read: the pool only rebuilds hourly, but a
+  // newly-hidden creator should vanish within the hidden-set TTL (~5 min). No-op (same
+  // array) when nothing is hidden.
+  return filterHiddenDocs(db, docs);
 }
 
 /**

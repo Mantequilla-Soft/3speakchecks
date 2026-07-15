@@ -27,6 +27,13 @@ const { ENABLE_MONGO_WRITES } = require('./config');
 
 const UNAVAILABLE_COLLECTION = 'video-unavailable';
 
+// A PUBLISHED upload at least this old has certainly finished encoding, so "no
+// manifest CID" means its stream is permanently gone / never migrated — not "still
+// processing". Deliberately very generous (5 months) so only the ancient pre-video_v2
+// archive is ever touched. Only such settled videos are shadow-banned for having no
+// stream; uploaded/encoding/pinning docs are never status:'published', so safe too.
+const NO_CID_MIN_AGE_MS = Math.max(0, Number(process.env.UNAVAILABLE_NOCID_MIN_AGE_DAYS || 150)) * 24 * 60 * 60 * 1000;
+
 /**
  * Mongo condition to spread into a feed query, exactly like feedAgeMatch:
  *   { status: 'published', ...feedAgeMatch('created'), ...unavailableMatch() }
@@ -122,14 +129,40 @@ async function confirmAndBan(db, { owner, permlink, reportedBy, reportedUrl }) {
   if (!doc) return { banned: false, reason: 'unknown-video' };
   if (doc.unavailable === true) return { banned: true, reason: 'already-banned' };
 
+  const source = coll === embeds ? 'embed' : 'legacy';
   const cid = extractCid(doc);
-  if (!cid) return { banned: false, reason: 'no-cid' };
+
+  // No manifest CID at all → no playable stream, EVER. For a settled published upload
+  // that's a permanent dead end (old pre-video_v2/IPFS archive, or lost encode output)
+  // — hide it from feeds exactly like a confirmed-gone one. Guarded hard so a still-
+  // processing upload can't be caught: it must be status:'published' AND old enough
+  // (NO_CID_MIN_AGE_MS) that encoding is certainly finished. verifyGone would have
+  // nothing to fetch here, so we decide from our own doc.
+  if (!cid) {
+    const createdMs = doc.created ? new Date(doc.created).getTime() : 0;
+    const oldEnough = createdMs > 0 && (Date.now() - createdMs) >= NO_CID_MIN_AGE_MS;
+    if (doc.status !== 'published' || !oldEnough) return { banned: false, reason: 'no-cid' };
+    if (!ENABLE_MONGO_WRITES) return { banned: false, reason: 'writes-disabled' };
+    await writeBan(db, coll, doc, { owner, permlink, cid: null, source, reason: 'no-stream', reportedBy, reportedUrl });
+    console.log(`[unavailable] shadow-banned ${owner}/${permlink} — no playable stream (published, no manifest CID)`);
+    return { banned: true, reason: 'no-stream' };
+  }
 
   const { gone, results } = await verifyGone(cid);
   if (!gone) return { banned: false, reason: 'still-reachable', results };
 
   if (!ENABLE_MONGO_WRITES) return { banned: false, reason: 'writes-disabled', results };
 
+  await writeBan(db, coll, doc, { owner, permlink, cid, source, reason: 'confirmed-gone', reportedBy, reportedUrl, results });
+  return { banned: true, reason: 'confirmed-gone', cid, results };
+}
+
+/**
+ * Write the shadow-ban: flag the source doc, upsert the audit row, and evict the
+ * video from the precomputed pools (rebuilt on a cron, so they'd otherwise keep
+ * surfacing it until the next rebuild). Shared by both ban reasons.
+ */
+async function writeBan(db, coll, doc, { owner, permlink, cid, source, reason, reportedBy, reportedUrl, results }) {
   const now = new Date();
   await coll.updateOne(
     { _id: doc._id },
@@ -141,26 +174,23 @@ async function confirmAndBan(db, { owner, permlink, reportedBy, reportedUrl }) {
       $set: {
         owner,
         permlink,
-        cid,
-        source: coll === embeds ? 'embed' : 'legacy',
+        cid: cid || null,
+        source,
+        reason,
         reportedBy: reportedBy || null,
         reportedUrl: reportedUrl || null,
-        gateways: results,
+        gateways: results || null,
         checkedAt: now,
       },
     },
     { upsert: true },
   );
 
-  // The precomputed pools are rebuilt on a cron, so a banned video would otherwise
-  // keep surfacing from them until the next rebuild. Evict it now.
   const evict = { $or: [{ owner, permlink }, { owner, assetPermlink: permlink }] };
   await Promise.all([
     db.collection('discover-pool').deleteMany(evict).catch(() => {}),
     db.collection('interest-pool').deleteMany(evict).catch(() => {}),
   ]);
-
-  return { banned: true, reason: 'confirmed-gone', cid, results };
 }
 
 /** How many videos are currently shadow-banned (for /video/unavailable-stats). */

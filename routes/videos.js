@@ -4,6 +4,7 @@ const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
 const { confirmAndBan, unavailableCount, unavailableMatch } = require('../utils/unavailable');
 const { nsfwFilter, nsfwFilterTags, nsfwFilterHiveTags, BANNED_FILTER } = require('../utils/filters');
+const { hiddenListSync, isHiddenSync } = require('../utils/hiddenCreators');
 const { getFollowingList, hiveRpcBatch } = require('../utils/hive');
 const { getCachedViews, setCachedViews } = require('../utils/cache');
 const { validateApiKey } = require('../utils/middleware');
@@ -46,12 +47,13 @@ function buildEmbedTagMatch(tagLower, useLowerField) {
 function buildEmbedFilter(req, tagLower, useLowerField) {
     const nsfw = nsfwFilterHiveTags(req);
     const tagMatch = buildEmbedTagMatch(tagLower, useLowerField);
+    const hideOwners = { hive_author: { $nin: hiddenListSync() } }; // drop hidden creators
 
     if (!useLowerField && nsfw.hive_tags) {
         const { hive_tags: nsfwHiveTags, ...rest } = nsfw;
-        return { ...rest, $and: [{ hive_tags: nsfwHiveTags }, tagMatch] };
+        return { ...rest, ...hideOwners, $and: [{ hive_tags: nsfwHiveTags }, tagMatch] };
     }
-    return { ...nsfw, ...tagMatch };
+    return { ...nsfw, ...hideOwners, ...tagMatch };
 }
 
 // Endpoint to get videos by tag
@@ -100,7 +102,7 @@ router.get('/videos/tag/:tag', async (req, res) => {
             return ranked;
         };
         if (tag.toLowerCase() === 'mantecurated') {
-            const legacyQuery = { mantecurated: true, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
+            const legacyQuery = { mantecurated: true, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
             const embedQuery = { mantecurated: true, status: 'published', ...nsfwFilterHiveTags(req), ...feedAgeMatch('createdAt'), ...unavailableMatch() };
             if (sinceDate) {
                 legacyQuery.created = { $gte: sinceDate };
@@ -187,7 +189,7 @@ router.get('/videos/tag/:tag', async (req, res) => {
 
             if (type === 'videos') {
                 // Videos only: use DB-level pagination on legacy, small embed set
-                const legacyQuery = { tags_v2: tagLower, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
+                const legacyQuery = { tags_v2: tagLower, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
                 const embedQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...feedAgeMatch('createdAt'), ...unavailableMatch() };
                 if (sinceDate) { legacyQuery.created = { $gte: sinceDate }; embedQuery.createdAt = { $gte: sinceDate }; }
 
@@ -213,7 +215,7 @@ router.get('/videos/tag/:tag', async (req, res) => {
                 // Shorts only: DB-level pagination on embed-video
                 const shortsNsfw = nsfwFilterHiveTags(req);
                 const query = isSnapsTag
-                    ? { short: true, status: 'published', ...shortsNsfw }
+                    ? { short: true, status: 'published', hive_author: { $nin: hiddenListSync() }, ...shortsNsfw }
                     : { short: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower) };
                 if (sinceDate) query.createdAt = { $gte: sinceDate };
 
@@ -223,7 +225,7 @@ router.get('/videos/tag/:tag', async (req, res) => {
 
             } else {
                 // No type specified — default to videos behaviour
-                const legacyQuery = { tags_v2: tagLower, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
+                const legacyQuery = { tags_v2: tagLower, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
                 const embedQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...feedAgeMatch('createdAt'), ...unavailableMatch() };
                 if (sinceDate) { legacyQuery.created = { $gte: sinceDate }; embedQuery.createdAt = { $gte: sinceDate }; }
 
@@ -280,7 +282,7 @@ router.get('/videos/tag/:tag/counts', async (req, res) => {
         const embedCollection = db.collection('embed-video');
 
         if (tagLower === 'mantecurated') {
-            const legacyQuery = { mantecurated: true, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
+            const legacyQuery = { mantecurated: true, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
             const embedBaseQuery = { mantecurated: true, status: 'published', ...nsfwFilterHiveTags(req) };
             if (sinceDate) {
                 legacyQuery.created = { $gte: sinceDate };
@@ -303,7 +305,7 @@ router.get('/videos/tag/:tag/counts', async (req, res) => {
         const embedTagMatch = buildEmbedTagMatch(tagLower, useLower);
         const isSnapsTag = tagLower === 'snaps';
 
-        const legacyQuery = { tags_v2: tagLower, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
+        const legacyQuery = { tags_v2: tagLower, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
         const embedVideoQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower) };
         const shortsQuery = isSnapsTag
             ? { short: true, status: 'published', ...nsfwFilterHiveTags(req) }
@@ -360,9 +362,9 @@ router.get('/feed/:username', async (req, res) => {
         // `short: false` so shorts are excluded.
         let legacyQuery, embedQuery, feedType;
         if (followingList && followingList.length > 0) {
-            legacyQuery = { owner: { $in: followingList }, status: 'published', ...nsfwFilterTags(req), ...feedAgeMatch('created'), ...unavailableMatch() };
+            legacyQuery = { owner: { $in: followingList, $nin: hiddenListSync() }, status: 'published', ...nsfwFilterTags(req), ...feedAgeMatch('created'), ...unavailableMatch() };
             embedQuery = {
-                hive_author: { $in: followingList },
+                hive_author: { $in: followingList, $nin: hiddenListSync() },
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
@@ -374,12 +376,12 @@ router.get('/feed/:username', async (req, res) => {
             console.log(`Fetching feed for ${username}: ${followingList.length} following`);
         } else {
             // Fallback: all published top-level content (no following list)
-            legacyQuery = { status: 'published', ...nsfwFilterTags(req), ...feedAgeMatch('created'), ...unavailableMatch() };
+            legacyQuery = { owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilterTags(req), ...feedAgeMatch('created'), ...unavailableMatch() };
             embedQuery = {
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
-                hive_author: { $ne: null },
+                hive_author: { $ne: null, $nin: hiddenListSync() },
                 hive_permlink: { $ne: null },
                 ...nsfwFilterHiveTags(req),
                 ...feedAgeMatch('createdAt'), ...unavailableMatch()
@@ -910,6 +912,13 @@ router.get('/videodetails/:author/:permlink', async (req, res) => {
             return res.status(400).json({ error: 'Author and permlink are required' });
         }
 
+        // Hard-block a hidden creator's watch page: their content is off the platform,
+        // so even a direct link resolves to "not available" rather than playing. The
+        // `hidden` flag lets the frontend show its dedicated state.
+        if (isHiddenSync(author)) {
+            return res.status(404).json({ error: 'This video is not available', hidden: true });
+        }
+
         const video = await db.collection('videos').findOne(
             { owner: author, permlink, ...BANNED_FILTER }
         ) || await db.collection('embed-video').findOne(
@@ -921,6 +930,12 @@ router.get('/videodetails/:author/:permlink', async (req, res) => {
                 ...BANNED_FILTER,
             }
         );
+
+        // The embed's hive_author can differ from the URL `author` (owner) — block on
+        // the resolved owner/hive_author too.
+        if (video && (isHiddenSync(video.owner) || isHiddenSync(video.hive_author))) {
+            return res.status(404).json({ error: 'This video is not available', hidden: true });
+        }
 
         if (!video) {
             return res.status(404).json({ error: 'Video not found' });
