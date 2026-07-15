@@ -2,8 +2,9 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
+const { unavailableMatch } = require('../utils/unavailable');
 const { nsfwFilterHiveTags } = require('../utils/filters');
-const { HIDDEN_AUTHORS, SHORT_SORT_INTERVAL, REWARD_WEIGHT, RESHARE_WEIGHT, ENABLE_MONGO_WRITES, RELATED_TOPIC_MULT } = require('../utils/config');
+const { HIDDEN_AUTHORS, SHORT_SORT_INTERVAL, REWARD_WEIGHT, RESHARE_WEIGHT, ENABLE_MONGO_WRITES, RELATED_TOPIC_MULT, SHORTS_WINDOW_DAYS, SHORTS_FOLLOW_WINDOW_DAYS } = require('../utils/config');
 const { fetchHiveRewards, fetchLivePageData, fetchFollowerCounts, hiveReputationToScore, mulberry32, getFollowingList, reputationCache } = require('../utils/hive');
 const { sortedShortsCache, SORTED_SHORTS_CACHE_TTL, getCachedViews, setCachedViews } = require('../utils/cache');
 const { INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTags, tagsMatchInterests } = require('../utils/interests');
@@ -11,6 +12,8 @@ const { getUserFilters, applyUserFilters } = require('../utils/userFilters');
 const { wantsHideWatched } = require('../utils/feedRank');
 const { getWinners } = require('../utils/effectiveTags');
 const { applyRetention } = require('../utils/retentionRank');
+const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
+const { getFollowSet, applyFollowBoost } = require('../utils/followBoost');
 
 // Endpoint to get shorts feed (original)
 router.get('/shorts', async (req, res) => {
@@ -37,6 +40,7 @@ router.get('/shorts', async (req, res) => {
             embed_url: { $exists: true, $ne: null },
             createdAt: { $gte: sevenDaysAgo },
             owner: { $nin: HIDDEN_AUTHORS },
+            ...unavailableMatch(),
             ...nsfwFilterHiveTags(req)
         };
 
@@ -142,6 +146,7 @@ router.get('/shorts/stories', async (req, res) => {
             embed_url: { $exists: true, $ne: null },
             createdAt: { $gte: sevenDaysAgo },
             owner: { $nin: HIDDEN_AUTHORS },
+            ...unavailableMatch(),
             ...nsfwFilterHiveTags(req)
         };
 
@@ -440,17 +445,20 @@ router.get('/shortssorted', async (req, res) => {
         };
         const hideWatched = !!currentuser && wantsHideWatched(req);
 
-        // Check sorted list cache. Keyed by seed+app+interests+mode, PLUS the user and
-        // the hide-watched flag — because the already-watched filter is now baked INTO
-        // the cached list (see below), so one user's list must never be served to
-        // another. The client's seed is stable for their session, so this is one entry
-        // per user-session, not per request.
+        // Check sorted list cache. Keyed by seed+app+interests+mode, PLUS the user —
+        // because the already-watched filter is baked INTO the cached list (see below)
+        // and the FOLLOW BOOST is per-user, so one user's list must never be served to
+        // another. `user:` is keyed on its own rather than folded into `hw:`: a caller
+        // with hidewatched=0 still gets a follow-boosted list, and that list is still
+        // theirs alone. The client's seed is stable for their session, so this is one
+        // entry per user-session, not per request.
         const cacheKey = [
             seed,
             appFilter || 'all',
             interestsToken,
             onlyInterests ? 'only' : 'boost',
-            hideWatched ? `hw:${currentuser}` : 'all',
+            currentuser ? `user:${currentuser}` : 'anon',
+            hideWatched ? 'hw' : 'nohw',
             followedBy ? `follow:${followedBy}` : 'all',
             chrono ? 'chrono' : 'ranked',
             topic ? `topic:${topic}` : 'all',
@@ -466,9 +474,13 @@ router.get('/shortssorted', async (req, res) => {
             // Query the embed-video collection
             const embedVideoCollection = db.collection('embed-video');
 
-            // Build query for published shorts from last 14 days
-            const fourteenDaysAgo = new Date();
-            fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 14);
+            // Build query for published shorts inside the candidate window. The follow
+            // feed gets a LONGER window: it filters the pool down to one user's
+            // following list further below, and the global 14-day window leaves most
+            // users with too few shorts to fill even a single rail (see
+            // SHORTS_FOLLOW_WINDOW_DAYS).
+            const windowDays = followedBy ? SHORTS_FOLLOW_WINDOW_DAYS : SHORTS_WINDOW_DAYS;
+            const windowStart = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
 
             const query = {
                 short: true,
@@ -476,7 +488,7 @@ router.get('/shortssorted', async (req, res) => {
                 processed: true,
                 listed_on_3speak: { $ne: false }, // hide unlisted shorts (matches the video feeds)
                 embed_url: { $exists: true, $ne: null },
-                createdAt: { $gte: fourteenDaysAgo },
+                createdAt: { $gte: windowStart },
                 owner: { $nin: HIDDEN_AUTHORS },
                 ...nsfwFilterHiveTags(req)
             };
@@ -537,34 +549,19 @@ router.get('/shortssorted', async (req, res) => {
                 filteredShorts.push(short);
             }
 
-            // Fetch reshare counts for all filtered shorts in one aggregation query
-            const reshareCountMap = new Map();
-            const reshareOrConditions = filteredShorts
-                .filter(s => s.embed_url)
-                .map(s => {
-                    const parts = s.embed_url.replace(/^@/, '').split('/');
-                    return { author: parts[0], permlink: parts[1] };
-                });
+            // All three manual votes (reshares / playlist saves / viewer tags) come from
+            // the one cached curation map — keyed by HIVE author+permlink, which for a
+            // short lives in embed_url. This replaces a per-request `reshares`
+            // aggregation that was redundant (the map already holds the collection) and
+            // counted ROWS including an author's reshares of their OWN short.
+            const curationCounts = await getCurationCounts(db);
+            const curationOf = (s) => curationCounts.get(keyOf(hiveAuthor(s), getHivePermlink(s))) || EMPTY;
 
-            if (reshareOrConditions.length > 0) {
-                const resharesCollection = db.collection('reshares');
-                const reshareCounts = await resharesCollection.aggregate([
-                    { $match: { $or: reshareOrConditions } },
-                    { $group: { _id: { author: "$author", permlink: "$permlink" }, count: { $sum: 1 } } }
-                ]).toArray();
-                for (const rc of reshareCounts) {
-                    reshareCountMap.set(`${rc._id.author}/${rc._id.permlink}`, rc.count);
-                }
-            }
-
-            // Attach reshare counts to shorts
             for (const short of filteredShorts) {
-                if (short.embed_url) {
-                    const parts = short.embed_url.replace(/^@/, '').split('/');
-                    short.reshare_count = reshareCountMap.get(`${parts[0]}/${parts[1]}`) || 0;
-                } else {
-                    short.reshare_count = 0;
-                }
+                const counts = curationOf(short);
+                short.reshare_count = counts.reshares;
+                short.saves = counts.saves;
+                short.viewer_tags = counts.tags;
             }
 
             // Weighted random score sorting
@@ -633,6 +630,11 @@ router.get('/shortssorted', async (req, res) => {
 
                 short.sort_score = recencyBonus + normalizedReward * REWARD_WEIGHT + normalizedReshares * RESHARE_WEIGHT + randomComponent * randomWeight;
 
+                // Curation: playlist saves + viewer tags. Reshares are zero-weighted —
+                // they're already in the additive term above (RESHARE_WEIGHT), and
+                // paying for the same act twice would double-dip.
+                short.sort_score *= curationBoost(curationOf(short), { reshareWeight: 0 });
+
                 // Boost shorts whose single winning topic matches the interests.
                 if (interestSet.size || topic) {
                     const winner = shortWinners.get(short);
@@ -647,6 +649,23 @@ router.get('/shortssorted', async (req, res) => {
                     if (topic && winner === topic) short.sort_score *= RELATED_TOPIC_MULT;
                 }
             }
+
+            // Creators the caller follows rank higher. Matched on the HIVE author —
+            // who the viewer actually follows. This is a BOOST; `?followedby=` above
+            // is the hard filter, and the two are independent.
+            //
+            // Unlike the other feeds, shorts FREEZES its ranking into a 15-minute cache.
+            // A cold follow-set miss (getFollowSet warms in the background rather than
+            // blocking) would therefore bake an unboosted list in for the user's whole
+            // session — the seed is stable, so nothing would recompute it. So we track
+            // the miss and skip writing the cache, letting the next request (a moment
+            // later, with the set warm) build the real list.
+            const followSet = getFollowSet(currentuser);
+            const followSetPending = !!currentuser && followSet === null;
+            applyFollowBoost(candidateShorts, followSet, {
+                scoreField: 'sort_score',
+                authorOf: hiveAuthor,
+            });
 
             // Retention re-rank (bounded multiplier from the cached video-retention;
             // shorts key by owner/permlink = the asset id, same as view-durations).
@@ -679,6 +698,8 @@ router.get('/shortssorted', async (req, res) => {
                         hive_body: short.hive_body || '',
                         hive_tags: short.hive_tags || [],
                         reshare_count: short.reshare_count || 0,
+                        saves: short.saves || 0,
+                        viewer_tags: short.viewer_tags || 0,
                         // Carried through the cache so the response can expose it.
                         winner_tag: short.winner_tag || null
                     });
@@ -717,7 +738,11 @@ router.get('/shortssorted', async (req, res) => {
                     if (now - v.timestamp >= SORTED_SHORTS_CACHE_TTL) sortedShortsCache.delete(k);
                 }
             }
-            sortedShortsCache.set(cacheKey, { list: sortedShorts, timestamp: Date.now() });
+            // Don't freeze a list that's missing its follow boost (see followSetPending)
+            // — 15 minutes is far too long to serve a ranking we already know is wrong.
+            if (!followSetPending) {
+                sortedShortsCache.set(cacheKey, { list: sortedShorts, timestamp: Date.now() });
+            }
         }
 
         // Dismissed shorts / dismissed creators stay LIVE (not frozen): they're an

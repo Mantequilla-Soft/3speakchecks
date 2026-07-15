@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
+const { unavailableMatch } = require('../utils/unavailable');
 const { nsfwFilterTags, nsfwFilterHiveTags } = require('../utils/filters');
 const { HIDDEN_AUTHORS, TRENDING_CANDIDATE_LIMIT, TRENDING_VIEWS_WEIGHT, TRENDING_VOTES_WEIGHT, TRENDING_COMMENTS_WEIGHT, TRENDING_REWARD_WEIGHT, TRENDING_RESHARE_WEIGHT, RESHARE_WEIGHT } = require('../utils/config');
 const { fetchHiveRewards, fetchLivePageData, mulberry32 } = require('../utils/hive');
@@ -16,6 +17,8 @@ const {
     RELATED_CREATOR_POOL, RELATED_JITTER,
 } = require('../utils/config');
 const { jitter, interleaveExploration, freshness, ageHours } = require('../utils/discoverScore');
+const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
+const { getFollowSetForReq, applyFollowBoost } = require('../utils/followBoost');
 const { getPool, hydrate } = require('../utils/discoverPool');
 const { getInterestPool } = require('../utils/interestPool');
 const { getTranscriptionTags } = require('../utils/transcriptionTags');
@@ -64,15 +67,17 @@ router.get('/interests', async (req, res) => {
             (allowNsfw || !e.nsfw) && e.winnerTag && interestSet.has(e.winnerTag)
         );
 
-        // `base` already carries freshness × newBoost × reshareBoost × retention.
+        // `base` already carries freshness × newBoost × curationBoost × retention.
         // Every candidate matches an interest by definition, so there's no interest
-        // multiplier to apply here — just jitter so the row isn't frozen.
+        // multiplier to apply here — just the follow boost and jitter.
         const chrono = req.query.chrono === '1' || req.query.chrono === 'true';
+        const followSet = getFollowSetForReq(req);
         const scored = candidates.map((e) => ({
             ...e,
             interest_match: true,
             discover_score: (Number(e.base) || 0) * jitter(rng()),
         }));
+        applyFollowBoost(scored, followSet, { scoreField: 'discover_score' });
 
         if (chrono) {
             scored.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
@@ -159,12 +164,13 @@ router.get('/discover', async (req, res) => {
         }
 
         // Per-user scoring: the pool already carries freshness × newBoost ×
-        // reshareBoost × retention in `base`, and the winning topic in `winnerTag`
+        // curationBoost × retention in `base`, and the winning topic in `winnerTag`
         // (viewer votes + auto tags, precomputed hourly). All that's left is the
-        // WINNER-ONLY interest match + jitter.
+        // WINNER-ONLY interest match, the follow boost and jitter.
         // `chrono=1` (algo-off / simple feed) bypasses all of that and just sorts
         // newest-first — for interestsOnly it stays interest-filtered but chronological.
         const chrono = req.query.chrono === '1' || req.query.chrono === 'true';
+        const followSet = getFollowSetForReq(req);
         const scored = candidates.map((e) => {
             const match = interestSet.size && !!e.winnerTag && interestSet.has(e.winnerTag);
             const score = (Number(e.base) || 0)
@@ -172,6 +178,9 @@ router.get('/discover', async (req, res) => {
                 * jitter(rng());
             return { ...e, interest_match: !!match, discover_score: score };
         });
+        // Creators you follow rank higher here too — discover is still discovery, so
+        // this only tilts (×1.6, below the 2.5 interest multiplier), never filters.
+        applyFollowBoost(scored, followSet, { scoreField: 'discover_score' });
 
         if (chrono) {
             scored.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
@@ -200,10 +209,14 @@ router.get('/discover', async (req, res) => {
                 v.base = p.base;
                 v.freshness = p.freshness;
                 v.new_boost = p.newBoost;
-                v.reshare_boost = p.reshareBoost;
+                v.curation_boost = p.curationBoost;
                 v.reshares = p.reshares;
+                v.saves = p.saves;
+                v.viewer_tags = p.viewerTags;
+                v.follow_match = !!p.follow_match;
                 v.retention_mult = p.retentionMult;
                 v.retention_relq = p.relQ;
+                v.retention_viewers = p.retentionViewers;
                 v.interest_match = p.interest_match;
                 v.winnerTag = p.winnerTag;
                 v.pool_src = p.src;
@@ -279,11 +292,11 @@ router.get('/related/:author/:permlink', async (req, res) => {
         if (author) {
             const [recentEmbed, recentLegacy] = await Promise.all([
                 db.collection('embed-video').find(
-                    { ...feedAgeMatch('createdAt'), owner: author, status: 'published', short: false, listed_on_3speak: true, hive_permlink: { $ne: null } },
+                    { ...feedAgeMatch('createdAt'), ...unavailableMatch(), owner: author, status: 'published', short: false, listed_on_3speak: true, hive_permlink: { $ne: null } },
                     { projection: { owner: 1, permlink: 1, hive_permlink: 1, createdAt: 1, isNsfwContent: 1 } }
                 ).sort({ createdAt: -1 }).limit(RELATED_CREATOR_POOL).toArray(),
                 db.collection('videos').find(
-                    { ...feedAgeMatch('created'), owner: author, status: 'published', publishFailed: { $ne: true } },
+                    { ...feedAgeMatch('created'), ...unavailableMatch(), owner: author, status: 'published', publishFailed: { $ne: true } },
                     { projection: { owner: 1, permlink: 1, created: 1, isNsfwContent: 1 } }
                 ).sort({ created: -1 }).limit(RELATED_CREATOR_POOL).toArray(),
             ]);
@@ -293,7 +306,13 @@ router.get('/related/:author/:permlink', async (req, res) => {
                 if (!allowNsfw && nsfw) return;
                 if (!candidates.has(key)) {
                     candidates.set(key, {
-                        owner, permlink: hivePermlink, assetPermlink, source,
+                        owner,
+                        // Both supplement queries filter on `owner: author`, so this is
+                        // always the current video's Hive author. Set it explicitly so the
+                        // follow boost matches on `author` like it does for pool entries,
+                        // rather than leaning on owner-equals-author holding here.
+                        author,
+                        permlink: hivePermlink, assetPermlink, source,
                         created, nsfw: !!nsfw, winnerTag: null, base: freshness(ageHours(created)),
                     });
                 }
@@ -303,6 +322,7 @@ router.get('/related/:author/:permlink', async (req, res) => {
         }
 
         // 4. Score with the stacking multipliers.
+        const followSet = getFollowSetForReq(req);
         const scored = [...candidates.values()].map((e) => {
             let m = 1;
             if (currentTopic && e.winnerTag === currentTopic) m *= RELATED_TOPIC_MULT;
@@ -311,6 +331,7 @@ router.get('/related/:author/:permlink', async (req, res) => {
             const score = (Number(e.base) || 0.01) * m * jitter(rng(), RELATED_JITTER);
             return { ...e, _relScore: score };
         });
+        applyFollowBoost(scored, followSet, { scoreField: '_relScore' });
         scored.sort((a, b) => b._relScore - a._relScore);
 
         // 5. Drop dismissed / already-watched, then take the page.
@@ -348,7 +369,7 @@ router.get('/recommended', async (req, res) => {
 
         // Query for recommended videos
         const query = {
-            ...feedAgeMatch('created'),
+            ...feedAgeMatch('created'), ...unavailableMatch(),
             recommended: true,
             status: 'published',
             owner: { $nin: HIDDEN_AUTHORS },
@@ -403,7 +424,7 @@ router.get('/promoted', async (req, res) => {
         const now = new Date();
 
         const embedVideosRaw = await embedVideoCollection.find({
-            ...feedAgeMatch('createdAt'),
+            ...feedAgeMatch('createdAt'), ...unavailableMatch(),
             status: 'published',
             short: false,
             listed_on_3speak: true,
@@ -459,7 +480,7 @@ router.get('/new', async (req, res) => {
 
         // Query for new content (exclude first uploads and trending)
         const query = {
-            ...feedAgeMatch('created'),
+            ...feedAgeMatch('created'), ...unavailableMatch(),
             status: 'published',
             owner: { $nin: HIDDEN_AUTHORS },
             firstUpload: { $ne: true },
@@ -472,7 +493,7 @@ router.get('/new', async (req, res) => {
         const [legacyVideos, embedVideosRaw] = await Promise.all([
             videosCollection.find(query).sort({ created: -1 }).limit(limit + skip).toArray(),
             embedVideoCollection.find({
-                ...feedAgeMatch('createdAt'),
+                ...feedAgeMatch('createdAt'), ...unavailableMatch(),
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
@@ -567,7 +588,7 @@ router.get('/trending', async (req, res) => {
 
         // Query for trending videos
         const query = {
-            ...feedAgeMatch('created'),
+            ...feedAgeMatch('created'), ...unavailableMatch(),
             trending: true,
             status: 'published',
             owner: { $nin: HIDDEN_AUTHORS },
@@ -650,7 +671,7 @@ router.get('/trendingSorted', async (req, res) => {
             ]).toArray(),
             // Fetch published embed videos (non-shorts) from last 7 days with Hive links
             embedVideoCollection.find({
-                ...feedAgeMatch('createdAt'),
+                ...feedAgeMatch('createdAt'), ...unavailableMatch(),
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
@@ -757,44 +778,44 @@ router.get('/trendingSorted', async (req, res) => {
             hivePermlinkMap.set(`${ev.owner}/${ev._embedPermlink || ev.permlink}`, { author: ev.author, permlink: ev.permlink });
         }
 
-        // Fetch reshare counts for all candidates
-        const reshareCountMap = new Map();
-        const reshareOrConditions = candidateVideos
-            .map(v => {
-                // For embed candidates, use author/permlink directly (already Hive permlinks)
-                if (v._source === 'embed') return { author: v.author, permlink: v.permlink };
-                return hivePermlinkMap.get(`${v.owner}/${v.permlink}`);
-            })
-            .filter(Boolean);
+        // The HIVE identity of a candidate — what reshares / playlist saves / viewer
+        // tags are all keyed by. Legacy videos post under their own owner/permlink,
+        // so that's the fallback when there's no embed doc to map through. (The old
+        // reshare lookup dropped candidates that missed the map, which is why a
+        // reshared legacy video with no embed doc used to score 0 reshares.)
+        const hiveKeyOf = (v) => (v._source === 'embed'
+            ? { author: v.author, permlink: v.permlink }
+            : (hivePermlinkMap.get(`${v.owner}/${v.permlink}`) || { author: v.owner, permlink: v.permlink }));
 
-        if (reshareOrConditions.length > 0) {
-            const resharesCollection = db.collection('reshares');
-            const reshareCounts = await resharesCollection.aggregate([
-                { $match: { $or: reshareOrConditions } },
-                { $group: { _id: { author: "$author", permlink: "$permlink" }, count: { $sum: 1 } } }
-            ]).toArray();
-            for (const rc of reshareCounts) {
-                reshareCountMap.set(`${rc._id.author}/${rc._id.permlink}`, rc.count);
-            }
-        }
-
-        // Compute final trending score including reshares
+        // ALL THREE manual votes come from the one cached curation map (utils/curation.js).
+        // This used to be a per-request `reshares` aggregation, which was both redundant
+        // (the map already holds the whole collection) and semantically different: it
+        // counted ROWS and included an author's reshares of their OWN video — the exact
+        // lever the curation map's self-exclusion exists to close. One source, one meaning.
+        const curationCounts = await getCurationCounts(db);
         for (const video of candidateVideos) {
-            let hivePl;
-            if (video._source === 'embed') {
-                hivePl = { author: video.author, permlink: video.permlink };
-            } else {
-                hivePl = hivePermlinkMap.get(`${video.owner}/${video.permlink}`);
-            }
-            const reshareCount = hivePl ? (reshareCountMap.get(`${hivePl.author}/${hivePl.permlink}`) || 0) : 0;
-            video.reshare_count = reshareCount;
-            video.trending_score = (video.base_score || 0) + reshareCount * TRENDING_RESHARE_WEIGHT;
+            const hivePl = hiveKeyOf(video);
+            const counts = curationCounts.get(keyOf(hivePl.author, hivePl.permlink)) || EMPTY;
+
+            video.reshare_count = counts.reshares;
+            video.saves = counts.saves;
+            video.viewer_tags = counts.tags;
+
+            // Reshares stay ADDITIVE here (TRENDING_RESHARE_WEIGHT is tuned in .env), so
+            // they are zero-weighted in the multiplicative boost below — paying for the
+            // same act twice would double-dip.
+            video.trending_score = (video.base_score || 0) + counts.reshares * TRENDING_RESHARE_WEIGHT;
+            video.trending_score *= curationBoost(counts, { reshareWeight: 0 });
         }
 
         // Interest weighting (WINNER-ONLY): multiply the score of videos whose
         // single winning topic (viewer votes + auto tags) matches the caller's
         // ?interests=. No-op when no interests are supplied.
         await applyInterestBoost(db, req, candidateVideos, undefined, 'trending_score');
+
+        // Creators the caller follows rank higher (×FOLLOW_BOOST). A tilt, not a
+        // filter — trending must stay trending, not turn into a follow feed.
+        applyFollowBoost(candidateVideos, getFollowSetForReq(req), { scoreField: 'trending_score' });
 
         // Retention re-rank: multiply trending_score by each video's bounded
         // retention factor (cached in video-retention; no-op for videos without a
@@ -819,8 +840,13 @@ router.get('/trendingSorted', async (req, res) => {
         const totalPages = Math.ceil(total / limit);
         const videos = visibleVideos.slice(skip, skip + limit);
 
-        // Clean up internal fields
-        videos.forEach(v => { delete v._source; delete v._embedPermlink; delete v.retention_mult; delete v.retention_relq; delete v.interest_match; });
+        // Clean up internal fields (the raw counts — reshare_count / saves /
+        // viewer_tags — stay: they're facts about the video, not scoring internals).
+        videos.forEach(v => {
+            delete v._source; delete v._embedPermlink;
+            delete v.retention_mult; delete v.retention_relq; delete v.retention_viewers;
+            delete v.interest_match; delete v.follow_match;
+        });
 
         res.json({
             success: true,
@@ -855,7 +881,7 @@ router.get('/firstUploads', async (req, res) => {
 
         // Query for first time uploads (exclude trending)
         const query = {
-            ...feedAgeMatch('created'),
+            ...feedAgeMatch('created'), ...unavailableMatch(),
             firstUpload: true,
             status: 'published',
             owner: { $nin: HIDDEN_AUTHORS },
@@ -868,7 +894,7 @@ router.get('/firstUploads', async (req, res) => {
         const [legacyVideos, embedVideosRaw] = await Promise.all([
             videosCollection.find(query).sort({ created: -1 }).limit(limit + skip).toArray(),
             embedVideoCollection.find({
-                ...feedAgeMatch('createdAt'),
+                ...feedAgeMatch('createdAt'), ...unavailableMatch(),
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
@@ -1055,7 +1081,7 @@ router.get('/community/:id/new', async (req, res) => {
 
         const [legacyVideos, embedVideosRaw] = await Promise.all([
             videosCollection.find({
-                ...feedAgeMatch('created'),
+                ...feedAgeMatch('created'), ...unavailableMatch(),
                 status: 'published',
                 owner: { $nin: HIDDEN_AUTHORS },
                 publishFailed: { $ne: true },
@@ -1063,7 +1089,7 @@ router.get('/community/:id/new', async (req, res) => {
                 ...nsfwFilterTags(req),
             }).sort({ created: -1 }).limit(limit + skip).toArray(),
             embedVideoCollection.find({
-                ...feedAgeMatch('createdAt'),
+                ...feedAgeMatch('createdAt'), ...unavailableMatch(),
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
@@ -1136,7 +1162,7 @@ router.get('/community/:id/trending', async (req, res) => {
 
         const [legacyVideos, embedVideosRaw] = await Promise.all([
             videosCollection.find({
-                ...feedAgeMatch('created'),
+                ...feedAgeMatch('created'), ...unavailableMatch(),
                 status: 'published',
                 owner: { $nin: HIDDEN_AUTHORS },
                 publishFailed: { $ne: true },
@@ -1145,7 +1171,7 @@ router.get('/community/:id/trending', async (req, res) => {
                 ...nsfwFilterTags(req),
             }).sort({ views: -1 }).limit(CANDIDATE_LIMIT).toArray(),
             embedVideoCollection.find({
-                ...feedAgeMatch('createdAt'),
+                ...feedAgeMatch('createdAt'), ...unavailableMatch(),
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,

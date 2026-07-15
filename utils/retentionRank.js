@@ -40,24 +40,28 @@ async function applyRetention(db, videos, opts = {}) {
   const keys = [...new Set(videos.map(keyFn).filter(Boolean))];
   if (!keys.length) return 0;
 
-  let scoreMap = new Map();
+  // `viewers` is projected alongside the score because the DEMOTION side of the
+  // multiplier is gated on it — without it every low-relQ video would be treated as
+  // "no evidence" and never demoted at all. See retentionMultiplier().
+  let recMap = new Map();
   try {
     const docs = await db.collection(RETENTION_COLLECTION)
-      .find({ _id: { $in: keys } }, { projection: { score: 1 } }).toArray();
-    scoreMap = new Map(docs.map((d) => [d._id, d.score]));
+      .find({ _id: { $in: keys } }, { projection: { score: 1, viewers: 1 } }).toArray();
+    recMap = new Map(docs.map((d) => [d._id, d]));
   } catch {
     return 0; // never let ranking break a feed — fall back to the existing order
   }
-  if (!scoreMap.size) return 0;
+  if (!recMap.size) return 0;
 
   let matched = 0;
   for (const v of videos) {
     const key = keyFn(v);
-    const relQ = key != null ? scoreMap.get(key) : undefined;
-    if (relQ == null) { v.retention_mult = 1; continue; }
+    const rec = key != null ? recMap.get(key) : undefined;
+    if (!rec || rec.score == null) { v.retention_mult = 1; continue; }
     matched += 1;
-    const mult = retentionMultiplier(relQ, opts.multOpts);
-    v.retention_relq = relQ;
+    const mult = retentionMultiplier(rec.score, { ...opts.multOpts, viewers: rec.viewers });
+    v.retention_relq = rec.score;
+    v.retention_viewers = rec.viewers ?? null;
     v.retention_mult = Math.round(mult * 1000) / 1000;
     v[scoreField] = (Number(v[scoreField]) || 0) * mult;
   }

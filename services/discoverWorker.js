@@ -15,11 +15,16 @@
  *
  * For each pool entry it precomputes the user-independent part of the score:
  *
- *   base = freshness × newBoost × reshareBoost × retentionMult
+ *   base = freshness × newBoost × curationBoost × retentionMult
+ *
+ * `curationBoost` (utils/curation.js) is the manual-vote layer: reshares + playlist
+ * saves (incl. Watch Later) + viewer tags, log-damped and capped. It SUBSUMES the
+ * old reshareBoost — reshares are still in it at exactly their old weight, they just
+ * no longer stand alone.
  *
  * The request path (utils/discoverPool.js + routes/feeds.js) then only applies the
- * per-user part — interest multiplier, seeded jitter, hide-watched, exploration
- * interleave — which is cheap and needs no aggregation.
+ * per-user part — interest multiplier, follow boost, seeded jitter, hide-watched,
+ * exploration interleave — which is cheap and needs no aggregation.
  *
  * See algo.md ("Discover feed").
  */
@@ -33,8 +38,9 @@ const {
   DISCOVER_RETENTION_WEIGHT, DISCOVER_RETENTION_MIN_MULT, DISCOVER_RETENTION_MAX_MULT,
   RETENTION_COLLECTION,
 } = require('../utils/config');
-const { ageHours, freshness, newBoost, reshareBoost } = require('../utils/discoverScore');
+const { ageHours, freshness, newBoost } = require('../utils/discoverScore');
 const { retentionMultiplier } = require('../utils/retentionScore');
+const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
 const { normalizeTags } = require('../utils/interests');
 const { pickWinner } = require('../utils/effectiveTags');
 const { INTEREST_TAGS } = require('../utils/interestTags');
@@ -89,6 +95,7 @@ async function run() {
     const [recentEmbed, recentLegacy, randomTagged, retentionActive, topicSampled] = await Promise.all([
       db.collection('embed-video').find({
         status: 'published', short: false, listed_on_3speak: true,
+        unavailable: { $ne: true },
         hive_author: { $nin: [null, ...HIDDEN_AUTHORS] },
         owner: { $nin: HIDDEN_AUTHORS },
         hive_permlink: { $ne: null },
@@ -98,6 +105,7 @@ async function run() {
 
       db.collection('videos').find({
         status: 'published', publishFailed: { $ne: true },
+        unavailable: { $ne: true },
         owner: { $nin: HIDDEN_AUTHORS },
         created: { $gte: recentCutoff },
       }, { projection: { owner: 1, permlink: 1 } })
@@ -147,11 +155,12 @@ async function run() {
     // embed-video is small enough to hold in memory keyed by owner/permlink.
     const embedAll = await db.collection('embed-video').find({
       status: 'published', short: false, listed_on_3speak: true,
+      unavailable: { $ne: true },
       hive_author: { $ne: null }, hive_permlink: { $ne: null },
     }, {
       projection: {
         owner: 1, permlink: 1, hive_author: 1, hive_permlink: 1, hive_tags: 1,
-        createdAt: 1, isNsfwContent: 1, banned: 1, duration: 1,
+        createdAt: 1, isNsfwContent: 1, banned: 1, unavailable: 1, duration: 1,
       },
     }).toArray();
     const embedByKey = new Map(embedAll.map((d) => [`${d.owner}/${d.permlink}`, d]));
@@ -163,7 +172,7 @@ async function run() {
     }
     const legacyDocs = await findChunked(db.collection('videos'), legacyConds, {
       owner: 1, permlink: 1, created: 1, tags: 1, tags_v2: 1,
-      isNsfwContent: 1, banned: 1, duration: 1, status: 1, publishFailed: 1,
+      isNsfwContent: 1, banned: 1, unavailable: 1, duration: 1, status: 1, publishFailed: 1,
     });
     const legacyByKey = new Map(
       legacyDocs
@@ -171,12 +180,18 @@ async function run() {
         .map((d) => [`${d.owner}/${d.permlink}`, d])
     );
 
-    // ── 3. Side data: transcription tags, reshare counts, retention, viewer tags.
-    // All four collections are small; load them whole rather than N lookups.
-    const [subtitleDocs, reshareDocs, retentionDocs, viewerTagDocs] = await Promise.all([
+    // ── 3. Side data: transcription tags, curation counts, retention, viewer tags.
+    // All of these collections are small; load them whole rather than N lookups.
+    // `curation` = distinct-actor counts of reshares + playlist saves + viewer tags,
+    // self-curation already excluded (utils/curation.js).
+    const [subtitleDocs, curation, retentionDocs, viewerTagDocs] = await Promise.all([
       db.collection('subtitles-tags').find({}, { projection: { author: 1, permlink: 1, tags: 1 } }).toArray(),
-      db.collection('reshares').find({}, { projection: { author: 1, permlink: 1 } }).toArray(),
-      db.collection(RETENTION_COLLECTION).find({}, { projection: { score: 1 } }).toArray(),
+      // force: this worker is a fresh thread each run — take the live counts, not a
+      // TTL-cached map that happens to be empty on a cold start.
+      getCurationCounts(db, { force: true }),
+      // `viewers` gates the retention DEMOTION — without it a low-relQ video reads as
+      // "no evidence" and is never demoted. See retentionMultiplier().
+      db.collection(RETENTION_COLLECTION).find({}, { projection: { score: 1, viewers: 1 } }).toArray(),
       db.collection('viewer-tags').find({}, { projection: { author: 1, permlink: 1, 'viewer-tag': 1, weight: 1 } }).toArray(),
     ]);
     // subtitles-tags.tags is a COMMA STRING ("tech,news") in RELEVANCE ORDER.
@@ -187,12 +202,7 @@ async function run() {
     const autoOrderedByKey = new Map(
       subtitleDocs.map((d) => [`${d.author}/${d.permlink}`, splitOrdered(d.tags)])     // ordered (winner calc)
     );
-    const reshareCount = new Map();
-    for (const r of reshareDocs) {
-      const id = `${r.author}/${r.permlink}`;      // reshares are keyed by HIVE permlink
-      reshareCount.set(id, (reshareCount.get(id) || 0) + 1);
-    }
-    const relQByKey = new Map(retentionDocs.map((d) => [d._id, d.score]));
+    const retByKey = new Map(retentionDocs.map((d) => [d._id, d]));
     // Viewer votes keyed by HIVE author/permlink -> { tag: summed weight }.
     const viewerWeightsByHive = new Map();
     for (const d of viewerTagDocs) {
@@ -216,6 +226,8 @@ async function run() {
       const lv = ev ? null : legacyByKey.get(id);
       if (!ev && !lv) { skipped += 1; continue; }          // unpublished / gone
       if ((ev || lv).banned === true) { skipped += 1; continue; }
+      // Media confirmed gone (404 on every gateway) — never pool a dead video.
+      if ((ev || lv).unavailable === true) { skipped += 1; continue; }
       // An embed's hive_author can differ from its owner — check both.
       if (isHiddenAuthor(k.owner) || (ev && isHiddenAuthor(ev.hive_author))) { skipped += 1; continue; }
 
@@ -232,17 +244,22 @@ async function run() {
       const winnerTag = pickWinner(autoOrderedByKey.get(id) || [], viewerWeights);
 
       const hrs = ageHours(created, now);
-      const reshares = reshareCount.get(`${ev ? ev.hive_author : lv.owner}/${hivePermlink}`) || 0;
-      const relQ = relQByKey.get(id);
-      const retMult = relQ == null ? 1 : retentionMultiplier(relQ, multOpts);
+      // Curation (reshares / saves / tags) is keyed by HIVE author+permlink — the
+      // same key the reshares collection, the playlists service and viewer-tags use.
+      const counts = curation.get(keyOf(hiveAuthor, hivePermlink)) || EMPTY;
+      const ret = retByKey.get(id);
+      const retMult = !ret || ret.score == null
+        ? 1
+        : retentionMultiplier(ret.score, { ...multOpts, viewers: ret.viewers });
 
       const f = freshness(hrs);
       const nb = newBoost(hrs);
-      const rb = reshareBoost(reshares);
-      const base = f * nb * rb * retMult;
+      const cb = curationBoost(counts);
+      const base = f * nb * cb * retMult;
 
       const doc = {
         owner: k.owner,
+        author: hiveAuthor,            // HIVE author — who a viewer actually follows
         permlink: hivePermlink,        // what watch_history + the watch page use
         assetPermlink: k.asset,        // what retention / transcription use
         source,
@@ -251,12 +268,15 @@ async function run() {
         tags,
         winnerTag,                        // winner-only interest match key
         nsfw: isNsfw(ev || lv, new Set(tags)),
-        reshares,
-        relQ: relQ == null ? null : relQ,
+        reshares: counts.reshares,
+        saves: counts.saves,
+        viewerTags: counts.tags,
+        relQ: ret && ret.score != null ? ret.score : null,
+        retentionViewers: ret ? (ret.viewers ?? null) : null,
         retentionMult: Math.round(retMult * 1000) / 1000,
         freshness: Math.round(f * 1000) / 1000,
         newBoost: Math.round(nb * 1000) / 1000,
-        reshareBoost: Math.round(rb * 1000) / 1000,
+        curationBoost: Math.round(cb * 1000) / 1000,
         base: Math.round(base * 100000) / 100000,
         runAt,
       };
