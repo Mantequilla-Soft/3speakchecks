@@ -192,19 +192,24 @@ async function ensureListenIndexes(db) {
     }
 }
 
-// Real client IP — checker sits behind nginx which sets X-Real-IP /
-// X-Forwarded-For. Fall back to the socket address for direct hits.
-function clientIp(req) {
-    const xri = req.headers['x-real-ip'];
-    if (xri) return String(xri).trim();
-    const xff = req.headers['x-forwarded-for'];
-    if (xff) return String(xff).split(',')[0].trim();
-    return req.socket?.remoteAddress || req.ip || 'unknown';
-}
-
-function sessionToken(sid, permlink, ip) {
+// Binds the heartbeat token to the session, NOT to the listener's IP.
+//
+// The IP used to be in this HMAC, which forced us to keep it on the session row to
+// re-derive the token on each beat. It is gone (2026-07-14), and nothing of value
+// went with it:
+//
+//   • The listen LOG's `ip` was never read by anything. audioPayouts.js and
+//     listenConsolidation.js pay out on username/permlink/owner/payable/ppl/
+//     createdAt, and the double-credit guard is a username+permlink time window.
+//     It was a write-only column — pure liability on the one collection tied to
+//     real money AND to a real Hive identity.
+//   • The anti-forge defence is untouched: `sid` is 16 random bytes, the secret is
+//     per-process, and credit is still only the wall-clock gap the SERVER measures
+//     between beats, clamped by MAX_BEAT_CREDIT_MS. An IP never stopped a forger —
+//     they use their own.
+function sessionToken(sid, permlink) {
     return crypto.createHmac('sha256', SESSION_SECRET)
-        .update(`${sid}.${permlink}.${ip}`).digest('hex');
+        .update(`${sid}.${permlink}`).digest('hex');
 }
 function tokenMatches(a, b) {
     if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
@@ -251,7 +256,6 @@ router.post('/play-start', async (req, res) => {
         }
 
         const sid = crypto.randomBytes(16).toString('hex');
-        const ip = clientIp(req);
         const durationMs = Math.round(duration * 1000);
         const now = new Date();
 
@@ -261,7 +265,6 @@ router.post('/play-start', async (req, res) => {
             owner: track.owner || null,
             post_permlink: track.post_permlink || null,
             durationMs,
-            ip,
             username,            // null → session can never be credited
             paid: !!username,
             accumulatedMs: 0,
@@ -274,7 +277,7 @@ router.post('/play-start', async (req, res) => {
 
         res.json({
             sid,
-            token: sessionToken(sid, permlink, ip),
+            token: sessionToken(sid, permlink),
             beatSeconds: BEAT_SECONDS,
             threshold: LISTEN_THRESHOLD,
             payable: !!username,
@@ -314,9 +317,12 @@ router.post('/play-beat', async (req, res) => {
         const s = await sessions.findOne({ sid });
         if (!s) return res.status(410).json({ error: 'no_session' });
 
-        // Token is bound to the session's permlink + the IP seen at start —
-        // a sid alone can't be replayed against another track.
-        if (!tokenMatches(token, sessionToken(sid, s.permlink, s.ip))) {
+        // Token is bound to the session's permlink — a sid alone can't be replayed
+        // against another track. No transition shim is needed for the dropped IP
+        // binding: SESSION_SECRET is per-process, so a restart already invalidates
+        // every in-flight session's token no matter what it was HMAC'd over. The
+        // client just reopens the session (sessions are shorter than one track).
+        if (!tokenMatches(token, sessionToken(sid, s.permlink))) {
             return res.status(403).json({ error: 'bad_token' });
         }
         if (s.credited) {
@@ -350,7 +356,6 @@ router.post('/play-beat', async (req, res) => {
                 }, { projection: { _id: 1 } });
                 if (!dupe) {
                     await log.insertOne({
-                        ip: s.ip,
                         username: s.username,
                         permlink: s.permlink,
                         owner: s.owner,

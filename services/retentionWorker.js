@@ -17,7 +17,7 @@ const { MongoClient } = require('mongodb');
 const {
   MONGODB_URI, DATABASE_NAME,
   RETENTION_COLLECTION, RETENTION_WINDOW_DAYS, RETENTION_MIN_SESSION_SECONDS,
-  RETENTION_COMPLETION_PCT, RETENTION_HOOK_FRAC,
+  RETENTION_COMPLETION_PCT, RETENTION_ENGAGED_PCT, RETENTION_HOOK_FRAC,
 } = require('../utils/config');
 const {
   durationBand, rawQuality, bayesShrink, relativeQuality,
@@ -63,6 +63,10 @@ async function run() {
         viewers: { $addToSet: { $ifNull: ['$viewerId', '$ip'] } }, // distinct viewers = confidence (viewerId; IP for legacy rows)
         sumPct: { $sum: { $ifNull: ['$watchedPct', 0] } },
         completed: { $sum: { $cond: [{ $gte: [{ $ifNull: ['$watchedPct', 0] }, RETENTION_COMPLETION_PCT] }, 1, 0] } },
+        // The LOW bar — "watched a meaningful chunk", not "finished". Credits the
+        // sessions that land between a bounce and a completion instead of scoring
+        // them as failures. See rawQuality() in utils/retentionScore.js.
+        engaged: { $sum: { $cond: [{ $gte: [{ $ifNull: ['$watchedPct', 0] }, RETENTION_ENGAGED_PCT] }, 1, 0] } },
         hooked: { $sum: { $cond: [{ $gte: [
           { $cond: [{ $gt: [{ $ifNull: ['$videoDuration', 0] }, 0] },
             { $divide: [{ $ifNull: ['$maxPosition', 0] }, '$videoDuration'] }, 0] },
@@ -75,6 +79,7 @@ async function run() {
         sessions: 1, viewers: { $size: '$viewers' },
         avgPct: { $cond: [{ $gt: ['$sessions', 0] }, { $divide: ['$sumPct', '$sessions'] }, 0] },
         completionRate: { $cond: [{ $gt: ['$sessions', 0] }, { $divide: ['$completed', '$sessions'] }, 0] },
+        engagedRate: { $cond: [{ $gt: ['$sessions', 0] }, { $divide: ['$engaged', '$sessions'] }, 0] },
         hookRate: { $cond: [{ $gt: ['$sessions', 0] }, { $divide: ['$hooked', '$sessions'] }, 0] },
         avgContentSec: { $cond: [{ $gt: ['$sessions', 0] }, { $divide: ['$sumContentSec', '$sessions'] }, 0] },
         duration: 1,
@@ -121,6 +126,7 @@ async function run() {
             viewers: r.viewers, sessions: r.sessions,
             avgWatchedPct: Math.round(r.avgPct * 10) / 10,
             completionRate: Math.round(r.completionRate * 1000) / 1000,
+            engagedRate: Math.round(r.engagedRate * 1000) / 1000,
             hookRate: Math.round(r.hookRate * 1000) / 1000,
             avgContentSeconds: Math.round(r.avgContentSec),
             replayIntensity: Math.round(r.replayIntensity * 100) / 100,

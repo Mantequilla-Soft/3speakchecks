@@ -57,19 +57,56 @@ module.exports = {
     RETENTION_COMPLETION_PCT: parseFloat(process.env.RETENTION_COMPLETION_PCT) || 70,          // watchedPct ≥ this = "finished"
     RETENTION_HOOK_FRAC: parseFloat(process.env.RETENTION_HOOK_FRAC) || 0.15,                  // got past the first 15% = "hooked"
     RETENTION_BAYES_M: parseFloat(process.env.RETENTION_BAYES_M) || 30,          // Bayesian prior strength (≈ viewers needed to trust the raw score)
-    // rawQuality weights (renormalized): unique-coverage %, finish rate, hook rate, replay.
+    // "Watched a meaningful chunk" — a MUCH lower bar than finishing. With the data
+    // we actually have, a video people watch a third of the way through is evidence
+    // of value, and demanding RETENTION_COMPLETION_PCT (70) before crediting any of
+    // it threw that evidence away. See algo.md ("Partial watch time is a signal").
+    RETENTION_ENGAGED_PCT: parseFloat(process.env.RETENTION_ENGAGED_PCT ?? '30'),
+    // rawQuality weights (renormalized): unique-coverage %, finish rate, engaged rate, hook rate, replay.
     RETENTION_W_PCT: parseFloat(process.env.RETENTION_W_PCT ?? '0.5'),
     RETENTION_W_COMPLETION: parseFloat(process.env.RETENTION_W_COMPLETION ?? '0.3'),
+    RETENTION_W_ENGAGED: parseFloat(process.env.RETENTION_W_ENGAGED ?? '0.25'),
     RETENTION_W_HOOK: parseFloat(process.env.RETENTION_W_HOOK ?? '0.2'),
     RETENTION_W_REPLAY: parseFloat(process.env.RETENTION_W_REPLAY ?? '0.1'),
     // Feed multiplier: score *= clamp(1 + WEIGHT*(relQ-1), MIN_MULT, MAX_MULT).
     RETENTION_WEIGHT: parseFloat(process.env.RETENTION_WEIGHT ?? '0.6'),
     RETENTION_MIN_MULT: parseFloat(process.env.RETENTION_MIN_MULT ?? '0.5'),
     RETENTION_MAX_MULT: parseFloat(process.env.RETENTION_MAX_MULT ?? '2'),
+    // ── The demotion side needs EVIDENCE (algo.md, "Why a demotion needs evidence")
+    // relQ is normalized against the BAND MEAN, which a handful of high-retention
+    // videos drag upward — so the typical video lands just under 1.0 and, at the old
+    // symmetric multiplier, got demoted BELOW a video with no watch data at all
+    // (which scores exactly ×1). Measured on live data: 650 of 1044 scored videos
+    // (62%) sat below ×1, and 633 of those had ≤1 distinct viewer. Having a little
+    // data was a net penalty — the exact opposite of what the signal is for.
+    //
+    // So the downside is now gated twice:
+    //   confidence = clamp((viewers − MIN) / (FULL − MIN), 0, 1)
+    //   shortfall  = max(0, (1 − relQ) − PENALTY_DEADBAND)   → noise near 1.0 is free
+    //   mult       = 1 − WEIGHT · confidence · shortfall
+    //
+    // MIN is a HARD floor, not a soft ramp: at or below MIN distinct viewers we have
+    // no evidence at all, so retention can only BOOST, never demote. One person
+    // bouncing off a video is not a verdict, and under a smooth ramp it still cost a
+    // bad-scoring video ~14% — which is the very inversion this is meant to remove.
+    // 633 of the 1044 live scored videos have ≤1 viewer; all of them are now safe.
+    // The UPSIDE is untouched and ungated: a good video is boosted from viewer one.
+    RETENTION_PENALTY_MIN_VIEWERS: parseFloat(process.env.RETENTION_PENALTY_MIN_VIEWERS ?? '3'),
+    RETENTION_PENALTY_FULL_VIEWERS: parseFloat(process.env.RETENTION_PENALTY_FULL_VIEWERS ?? '10'),
+    RETENTION_PENALTY_DEADBAND: parseFloat(process.env.RETENTION_PENALTY_DEADBAND ?? '0.1'),
     // Follow feed is chronological — retention only nudges. A recency half-life
     // (hours) keeps "newest first" dominant so retention just reorders similar-age
     // videos. Long default (7 days) → the feed stays close to chronological.
     RETENTION_FOLLOW_HALFLIFE_H: parseFloat(process.env.RETENTION_FOLLOW_HALFLIFE_H ?? '168'),
+
+    // ─── Shorts candidate window (/shortssorted) ──────────────────────────────
+    // The default 14-day window is sized for the GLOBAL pool, where two weeks is
+    // already hundreds of shorts. A follow feed (?followedby=) draws from one
+    // user's following list, so the same window can leave a handful or none — the
+    // rails then can't fill a row and silently don't render. Give the follow feed
+    // a much longer window so the pool is a real feed rather than a remainder.
+    SHORTS_WINDOW_DAYS: parseFloat(process.env.SHORTS_WINDOW_DAYS ?? '14'),
+    SHORTS_FOLLOW_WINDOW_DAYS: parseFloat(process.env.SHORTS_FOLLOW_WINDOW_DAYS ?? '60'),
 
     // ─── Discover feed (/feeds/discover) ──────────────────────────────────────
     // Deliberately BLIND to votes, views and rewards — it exists to surface what
@@ -123,13 +160,41 @@ module.exports = {
     DISCOVER_RETENTION_WEIGHT: parseFloat(process.env.DISCOVER_RETENTION_WEIGHT ?? '1.5'),
     DISCOVER_RETENTION_MIN_MULT: parseFloat(process.env.DISCOVER_RETENTION_MIN_MULT ?? '0.4'),
     DISCOVER_RETENTION_MAX_MULT: parseFloat(process.env.DISCOVER_RETENTION_MAX_MULT ?? '2.5'),
-    // Reshares: a real curation signal (someone put it on their own blog), but a
-    // popularity one — so log-damped and hard-capped so it can't dominate.
-    //   reshareBoost = min(1 + W·ln(1+n), CAP)
-    DISCOVER_RESHARE_WEIGHT: parseFloat(process.env.DISCOVER_RESHARE_WEIGHT ?? '0.25'),
-    DISCOVER_RESHARE_MAX_BOOST: parseFloat(process.env.DISCOVER_RESHARE_MAX_BOOST ?? '2.0'),
     DISCOVER_JITTER: parseFloat(process.env.DISCOVER_JITTER ?? '0.15'),              // ±15% seeded per-video shuffle
     DISCOVER_EXPLORE_EVERY: parseInt(process.env.DISCOVER_EXPLORE_EVERY) || 4,       // every Nth slot = random pick (25%)
+
+    // ─── Curation signals: the MANUAL votes (utils/curation.js) ───────────────
+    // Three deliberate human acts, as opposed to the passive signals (views, watch
+    // time) and the on-chain ones (votes, rewards):
+    //   reshare — put the video on their own blog        (public endorsement)
+    //   save    — added it to a playlist / Watch Later   (intent to come back)
+    //   tag     — labelled its topic in the vote dialog  (a curation vote)
+    // All three are sparse and high-precision, so the boost is log-damped and
+    // hard-capped — one save must LIFT a video, never run away with the feed.
+    //   curationBoost = min(CAP, 1 + Wr·ln(1+reshares) + Ws·ln(1+saves) + Wt·ln(1+tags))
+    // At n=1 each: reshare +17%, save +21%, tag +14%; all three ≈ +52%.
+    CURATION_ENABLED: parseBool(process.env.CURATION_ENABLED, true),
+    // The counts are held in-process as one small map (226 curated videos live) and
+    // refreshed on a TTL — the per-request $or lookup it replaces cost ~370ms.
+    CURATION_CACHE_MS: parseInt(process.env.CURATION_CACHE_MS) || 5 * 60 * 1000,
+    // Reshares kept their historic weight (was DISCOVER_RESHARE_WEIGHT) so the
+    // discover feed's existing tuning is unchanged by the other two arriving.
+    CURATION_RESHARE_WEIGHT: parseFloat(process.env.CURATION_RESHARE_WEIGHT ?? process.env.DISCOVER_RESHARE_WEIGHT ?? '0.25'),
+    CURATION_SAVE_WEIGHT: parseFloat(process.env.CURATION_SAVE_WEIGHT ?? '0.3'),
+    CURATION_TAG_WEIGHT: parseFloat(process.env.CURATION_TAG_WEIGHT ?? '0.2'),
+    CURATION_MAX_BOOST: parseFloat(process.env.CURATION_MAX_BOOST ?? process.env.DISCOVER_RESHARE_MAX_BOOST ?? '2.5'),
+
+    // ─── Follow boost (utils/followBoost.js) ─────────────────────────────────
+    // Videos by creators the caller follows rank higher in EVERY feed, not just the
+    // dedicated follow feed. Deliberately below the interest multiplier (2.0 global
+    // / 2.5 discover): following someone says "show me more of them", not "show me
+    // only them" — discover must not collapse into a follow feed.
+    FOLLOW_BOOST: parseFloat(process.env.FOLLOW_BOOST ?? '1.6'),
+    FOLLOW_BOOST_TTL_MS: parseInt(process.env.FOLLOW_BOOST_TTL_MS) || 10 * 60 * 1000,
+    // Hard cap on the follow-set LRU. `?currentuser=` is unauthenticated and each miss
+    // allocates a Set of up to several thousand usernames, so an uncapped map is an
+    // unauthenticated memory leak. 5k concurrent logged-in browsers is far past real.
+    FOLLOW_BOOST_MAX_USERS: parseInt(process.env.FOLLOW_BOOST_MAX_USERS) || 5000,
 
     // ─── Related videos (/feeds/related/:author/:permlink) ────────────────────
     // Sidebar recommendations biased toward the CURRENT video's winning topic,

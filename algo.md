@@ -14,18 +14,23 @@ gives it a **quality score**. The idea is dead simple:
 > **Videos that people actually watch through get shown more. Videos people click
 > off get shown less.**
 
-To be fair about it, we do four sensible things:
+To be fair about it, we do five sensible things:
 
 1. **We measure real watching, not clicks.** Every video gets a score from how far
    people got through it — how much of it they watched, whether they finished,
    whether they made it past the intro, and whether any moments got rewatched.
-2. **We compare like-for-like.** A 30-second clip will always be "watched to the
+2. **Watching half of something still counts.** Not finishing a video isn't the same
+   as bouncing off it. A video that holds people to the halfway mark scores between
+   a bounce and a finish, instead of being lumped in with the bounces.
+3. **We compare like-for-like.** A 30-second clip will always be "watched to the
    end" more than a 25-minute documentary. So a video is only ever compared to
    **other videos of a similar length**, never across the board.
-3. **We don't trust tiny numbers.** One person watching one video to 100% doesn't
-   make it great. A video needs a decent number of **different viewers** before we
-   trust its score; until then it sits at "average" and rides the normal signals.
-4. **It only nudges, never takes over.** Retention *tilts* the existing ranking up
+4. **Being watched can never hurt you.** Pushing a video *down* needs real evidence —
+   several different viewers, and a score clearly below its peers. Until then the
+   score can only lift it. Otherwise a video with one curious viewer would rank below
+   a video nobody has ever opened, which is exactly backwards (and is precisely what
+   the ranking used to do — see *Why a demotion needs evidence*).
+5. **It only nudges, never takes over.** Retention *tilts* the existing ranking up
    or down within sensible limits — it doesn't throw away views, votes, freshness
    or the interests you picked.
 
@@ -64,6 +69,7 @@ Grouping by `owner/permlink` (dropping junk sessions shorter than
 - `viewers` = count of **distinct IPs** (not sessions)
 - `avgPct` = mean `watchedPct`
 - `completionRate` = fraction of sessions with `watchedPct ≥ RETENTION_COMPLETION_PCT` (default 70)
+- `engagedRate` = fraction of sessions with `watchedPct ≥ RETENTION_ENGAGED_PCT` (default 30 — *watched a meaningful chunk*, see below)
 - `hookRate` = fraction of sessions with `maxPosition / videoDuration ≥ RETENTION_HOOK_FRAC` (default 0.15 — got past the first 15%)
 - `avgContentSeconds` = mean speed-corrected watch time
 - `duration` = the video length
@@ -75,16 +81,35 @@ And from `view-heatmaps`:
 
 ### Step 2 — raw quality ∈ [0, 1]
 
-A weighted blend of the four normalized signals (weights renormalized to sum to 1):
+A weighted blend of the five normalized signals (weights renormalized to sum to 1):
 
 ```
 raw = ( Wpct·(avgPct/100)
       + Wcompletion·completionRate
+      + Wengaged·engagedRate
       + Whook·hookRate
-      + Wreplay·clamp((replayIntensity − 1) / 2, 0, 1) ) / (Wpct+Wcompletion+Whook+Wreplay)
+      + Wreplay·clamp((replayIntensity − 1) / 2, 0, 1) ) / ΣW
 ```
 
-Defaults: `Wpct=0.5, Wcompletion=0.3, Whook=0.2, Wreplay=0.1`.
+Defaults: `Wpct=0.5, Wcompletion=0.3, Wengaged=0.25, Whook=0.2, Wreplay=0.1`.
+
+#### Partial watch time is a signal, not a failed completion
+
+`engagedRate` is the low bar (30%), and it exists because the high bar was throwing
+away real evidence.
+
+In an ideal world a half-watched video isn't "good", and we shouldn't pretend it is.
+But 70% is a hard line, and on the live data the sessions landing between 30% and 70%
+— **13% of all sessions** — counted for nothing except their contribution to `avgPct`.
+The watch distribution is sharply bimodal (25% of sessions bounce under 5%, 32% finish
+above 90%), so the middle is exactly where the *discriminating* evidence lives, and it
+was the part we scored as a failure.
+
+With a dataset this thin we would rather credit partial watch time as value than demand
+a completion rate almost nothing clears. Laddering the two bars means a video that holds
+people halfway scores *between* a bounce and a finish — which is precisely what it is.
+A video people actually finish still beats it, because `completionRate` is still there
+and still weighted higher.
 
 ### Step 3 — Bayesian shrinkage (confidence)
 
@@ -124,15 +149,70 @@ relQ = clamp( q / bandMean_q , 0.2 , 3 )
 
 ### Step 5 — the bounded feed multiplier
 
-Feeds multiply their existing score by:
+**Upside** — ungated. A video people watch through is boosted from its first viewer:
 
 ```
 mult = clamp( 1 + RETENTION_WEIGHT·(relQ − 1) , RETENTION_MIN_MULT , RETENTION_MAX_MULT )
 ```
 
 Defaults: `WEIGHT=0.6`, `MIN_MULT=0.5`, `MAX_MULT=2`. So an average video (`relQ=1`)
-is unchanged (`×1`); a great one is boosted up to `×2`; a poor one damped to `×0.5`.
-Bounded on purpose — retention **tilts** the ranking, it never dominates it.
+is unchanged (`×1`) and a great one is boosted up to `×2`. Bounded on purpose —
+retention **tilts** the ranking, it never dominates it.
+
+**Downside** — gated on evidence. See below; this is the part that was wrong.
+
+### Why a demotion needs evidence
+
+The demotion side used to be the mirror image of the boost, and that quietly inverted
+the whole signal.
+
+`relQ` is `q` divided by the **mean `q` of its duration band** — and that mean is dragged
+upward by the handful of genuinely great videos in the band. So *the typical video lands
+a little under 1.0*. Meanwhile a video with **no watch data at all** gets a multiplier of
+exactly `×1`, because we have nothing to say about it.
+
+Put those together and the ranking said: **a video that one person watched to 90% ranks
+below an identical video nobody has ever opened.** Having a little data was a net penalty.
+Measured on the live table when this was found:
+
+| | |
+|---|---|
+| scored videos | 1044 |
+| demoted below `×1` | **650 (62%)** |
+| …of which had ≤1 distinct viewer | **633** |
+| videos with >30 viewers | 3 |
+
+So the downside is now gated twice, and both gates only touch `relQ < 1`:
+
+```
+confidence = clamp( (viewers − PENALTY_MIN_VIEWERS) / (PENALTY_FULL_VIEWERS − PENALTY_MIN_VIEWERS), 0, 1 )
+shortfall  = max( 0, (1 − relQ) − PENALTY_DEADBAND )
+mult       = clamp( 1 − RETENTION_WEIGHT · confidence · shortfall, MIN_MULT, MAX_MULT )
+```
+
+- `PENALTY_MIN_VIEWERS` (3) is a **hard floor, not the start of a ramp**. At or below it,
+  confidence is exactly `0` and retention can only *boost*. One person bouncing off a
+  video is not a verdict. (A soft ramp from zero was tried first and still cost a
+  badly-scoring 1-viewer video ~14% — the same inversion wearing a smaller hat.)
+- `PENALTY_DEADBAND` (0.1) makes the noise band just under 1.0 free, so the ordinary
+  below-the-band-mean video is left alone no matter how many viewers it has.
+- An **unknown** viewer count never demotes: a caller that can't say how much evidence
+  there is doesn't get to punish on it. (`viewers` is therefore projected alongside
+  `score` everywhere the multiplier is used — `utils/retentionRank.js` and the pool worker.)
+
+Replayed over the live table, discover-side (`W=1.5`):
+
+| | old | new |
+|---|---|---|
+| demoted below ×1 | 674 (64.6%) | **20 (1.9%)** |
+| boosted above ×1 | 364 | **364** *(untouched)* |
+| rescued from an unjustified demotion | — | **654** |
+| worst video with real evidence (relQ 0.415, 54 viewers) | ×0.400 | **×0.400** *(still floored)* |
+
+A genuinely bad video with real viewers still sinks exactly as hard as it did. What stops
+happening is punishing a video for the crime of having been watched once. As watch data
+grows, more videos cross the evidence floor and the demotion machinery arms itself —
+without anyone re-tuning it.
 
 ### Where it's applied
 
@@ -186,14 +266,168 @@ behaviour.
 | `RETENTION_MIN_SESSION_SECONDS` | `2` | drop junk sessions below this |
 | `RETENTION_COMPLETION_PCT` | `70` | `watchedPct` ≥ this = "finished" |
 | `RETENTION_HOOK_FRAC` | `0.15` | got past this fraction = "hooked" |
+| `RETENTION_ENGAGED_PCT` | `30` | `watchedPct` ≥ this = "watched a meaningful chunk" |
 | `RETENTION_BAYES_M` | `30` | prior strength (higher = more cautious) |
-| `RETENTION_W_PCT / _COMPLETION / _HOOK / _REPLAY` | `0.5 / 0.3 / 0.2 / 0.1` | raw-quality weights |
+| `RETENTION_W_PCT / _COMPLETION / _ENGAGED / _HOOK / _REPLAY` | `0.5 / 0.3 / 0.25 / 0.2 / 0.1` | raw-quality weights |
 | `RETENTION_WEIGHT` | `0.6` | how hard retention tilts a feed |
 | `RETENTION_MIN_MULT / _MAX_MULT` | `0.5 / 2` | multiplier clamp |
+| `RETENTION_PENALTY_MIN_VIEWERS` | `3` | at/below this many distinct viewers, retention can only BOOST |
+| `RETENTION_PENALTY_FULL_VIEWERS` | `10` | full demotion weight from here up |
+| `RETENTION_PENALTY_DEADBAND` | `0.1` | how far below `relQ=1` is free |
 | `RETENTION_FOLLOW_HALFLIFE_H` | `168` | recency half-life for the follow feed |
 
 Set `RETENTION_WEIGHT=0` (or `RETENTION_ENABLED=false`) to make the whole thing a
-no-op instantly, without a code change.
+no-op instantly, without a code change. To disable **only** the demotion side, set
+`RETENTION_PENALTY_MIN_VIEWERS` absurdly high — retention becomes boost-only.
+
+---
+
+# Curation signals — the manual votes (`utils/curation.js`)
+
+Everything else in the ranking is either **passive** (views, watch time) or **on-chain**
+(upvotes, rewards). These three are a person deliberately doing something about one video:
+
+| Signal | The act | Source |
+|---|---|---|
+| `reshares` | put it on their own blog | `reshares` |
+| `saves` | added it to a playlist / **Watch Later** | `playlists.items` |
+| `tags` | labelled its topic alongside their upvote | `viewer-tags` |
+
+These are **3Speak reshares, not Hive reblogs** — the `reshares` collection is written by
+the playlists service when a user hits Reshare in the app.
+
+All three are keyed by **Hive author/permlink**, and all three are **distinct-actor**
+counts: adding one video to three of your own playlists is still one person caring.
+
+```
+curationBoost = min(CAP, 1 + Wr·ln(1+reshares) + Ws·ln(1+saves) + Wt·ln(1+tags))
+```
+
+At one of each: reshare +17%, save +21%, tag +14%; all three together ≈ +52%. Log-damped
+and hard-capped because these signals are **sparse and high-precision** — live, only 226
+videos carry any curation at all and the top distinct-actor count is **2**. A single act
+must lift a video without letting one motivated person mint a #1 slot.
+
+### Self-curation does not count — and this is load-bearing
+
+An author resharing / saving / tagging their own video is not a signal, it's a lever.
+Those rows are dropped in the aggregation, and that is not a nicety:
+
+> **476** videos sit in some playlist. Only **15** sit in a playlist belonging to someone
+> other than their author.
+
+3Speak playlists are overwhelmingly creators collecting their *own* videos into albums and
+series. Counting self-saves would have let any creator lift their entire back catalogue by
+~21% by making one playlist of it. After the exclusion: 134 videos with a reshare, 87 with
+a viewer tag, 15 with a save.
+
+Watch Later needs no special case — it *is* a playlist (a private one named "Watch Later"),
+and a global distinct-saver count is exactly what makes the signal count for **other**
+viewers rather than only the person who saved it.
+
+### Where it applies, and the double-counting trap
+
+| Feed | How reshares are scored | Curation adds |
+|---|---|---|
+| Discover / Interests | inside `curationBoost` (all three) | reshares + saves + tags |
+| Trending (`/feeds/trendingSorted`) | **additively**, `TRENDING_RESHARE_WEIGHT` | saves + tags only (`reshareWeight: 0`) |
+| Shorts (`/shortssorted`) | **additively**, `RESHARE_WEIGHT` | saves + tags only (`reshareWeight: 0`) |
+
+Trending and shorts already had a tuned additive reshare term. Folding reshares into their
+multiplicative curation boost as well would pay twice for the same act, so the reshare
+weight is explicitly zeroed there. Discover has no additive term, so it takes all three.
+
+**All three feeds now read the reshare COUNT from the same curation map.** Trending and
+shorts each used to run their own per-request `reshares` aggregation, which was redundant
+(the map already holds the whole collection) and, worse, *semantically different*: it counted
+**rows**, including an author's reshares of **their own** video — the exact lever the map's
+self-exclusion exists to close. One source, one meaning. Two consequences worth knowing:
+
+- **Self-reshares no longer buy trending score.** Videos whose reshares were their author's
+  will lose that additive term.
+- **Reshared legacy videos now count at all.** The old lookup silently dropped any candidate
+  missing from the embed-permlink map (`.filter(Boolean)`), so a pure-legacy video — no embed
+  doc — scored 0 reshares no matter how many people reshared it.
+
+**Legacy playlists are not counted.** The old app wrote `playlists.list` as an array of
+`videos._id` ObjectId refs — a schema nothing writes any more (951 historic items). Teaching
+the ranking a second, differently-shaped join for a frozen signal isn't worth it; if those
+saves are wanted, backfill them into `items`.
+
+### Performance
+
+The three collections are tiny, so the counts are built as **one small map held in-process**
+behind `CURATION_CACHE_MS` — not a per-request lookup by candidate key. The bounded `$or`
+version cost ~370ms per feed request against a map that fits in a few KB. A save taking up
+to 5 minutes to count is fine: this is a ranking nudge, not a read-your-writes surface.
+A broken pipeline degrades to *no boost*, leaving every feed exactly as it was.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `CURATION_ENABLED` | `true` | master switch |
+| `CURATION_CACHE_MS` | `300000` | in-process count-map TTL |
+| `CURATION_RESHARE_WEIGHT` | `0.25` | (was `DISCOVER_RESHARE_WEIGHT` — same value, so discover's tuning is unchanged) |
+| `CURATION_SAVE_WEIGHT` | `0.3` | playlist / Watch Later saves |
+| `CURATION_TAG_WEIGHT` | `0.2` | viewer tags |
+| `CURATION_MAX_BOOST` | `2.5` | hard cap on the stacked boost |
+
+---
+
+# Follow boost (`utils/followBoost.js`)
+
+Videos by creators you follow rank higher in **every** feed — discover, interests, trending,
+shorts and the related rail — not just the dedicated follow feed (`/feed/:username`).
+
+A follow is the strongest standing preference a viewer ever gives us, so it earns a real
+multiplier (`FOLLOW_BOOST`, ×1.6). It is deliberately **below the interest multiplier**
+(2.0 global / 2.5 discover): following someone means *"show me more of them"*, not *"show me
+only them"*, and discover must not quietly collapse into a follow feed. It is a **boost**;
+shorts' `?followedby=` remains the hard filter, and the two are independent.
+
+Matched on the **Hive author**, which is who the viewer actually follows — an embed's `owner`
+is the asset uploader and is not always the same account. (The pool worker now stores `author`
+on every pool doc for exactly this.)
+
+### It never blocks the request
+
+The following list comes from Hive (`condenser_api.get_following`) and is cached in-process
+for 10 minutes. Discover answers in ~0.12s; a cold Hive RPC can take longer than the entire
+request, and Hive nodes go down. So a cache **miss** does not stall the feed — it returns
+"no boost" for that one request and warms the set in the background. The client loads several
+rows per page, so the next request already has it. A **stale** set is served while it refreshes.
+
+Live check — real follow lists against the 2913-entry discover pool:
+
+| user | following | in the pool | entries lifted ×1.6 |
+|---|---|---|---|
+| taskmaster4450le | 82 | 11 | 27 |
+| starkerz | 296 | 16 | 50 |
+| theycallmedan | 485 | 66 | 188 |
+
+⚠️ **The shorts sort cache is keyed per user because of this.** `/shortssorted` freezes its
+ranked list into a cache; now that the ranking contains a per-user boost, that key carries
+`user:<currentuser>` on its own rather than folded into the hide-watched segment — a caller
+with `hidewatched=0` still gets a follow-boosted list, and that list is still theirs alone.
+
+### `?currentuser=` is untrusted — two guards
+
+That query param is unauthenticated and now sits on the hottest routes in the API, where a
+cache miss fires a paged Hive RPC and allocates a Set of up to several thousand usernames.
+So `getFollowSet()`:
+
+1. **rejects anything that isn't a possible Hive account name** before touching the network,
+   so nobody can point us at our own RPC nodes with garbage; and
+2. holds the sets in an **LRU capped at `FOLLOW_BOOST_MAX_USERS`** — an uncapped map would be
+   an unauthenticated memory leak (loop over random usernames, watch RSS climb).
+
+Touching an entry reorders the LRU but deliberately does **not** reset its TTL clock, or a
+continuously-active user's follow set would never be refreshed.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `FOLLOW_BOOST` | `1.6` | multiplier for a followed creator's video (`1` = off) |
+| `FOLLOW_BOOST_TTL_MS` | `600000` | follow-set cache TTL |
+| `FOLLOW_BOOST_MAX_USERS` | `5000` | LRU cap on cached follow sets |
 
 ### Future extensions (not built yet)
 
@@ -226,8 +460,8 @@ math lives in `utils/discoverScore.js` (pure, no I/O).
 ## TLDR
 
 ```
-base           = freshness × newBoost × reshareBoost × retention    (precomputed hourly)
-discover_score = base × interest × jitter                           (per request)
+base           = freshness × newBoost × curationBoost × retention   (precomputed hourly)
+discover_score = base × interest × follow × jitter                  (per request)
 ```
 then random picks from the lower half are interleaved into every 4th slot.
 
@@ -270,10 +504,12 @@ window (a hard cliff would drop a video ~43% the minute it crossed the boundary)
 newBoost = 1 + (DISCOVER_NEW_BOOST − 1) · max(0, 1 − ageHours/DISCOVER_NEW_GRACE_H)
 ```
 
-**3. reshareBoost** — a reshare is a real curation signal (someone put the video on
-their own blog), but it IS a popularity signal, so it's log-damped and hard-capped:
+**3. curationBoost** — the manual votes: reshares + playlist/Watch-Later saves + viewer
+tags, log-damped and hard-capped. Real curation signals, but popularity ones, so they lift
+and never run away. See *Curation signals* above; reshares kept their previous weight, so
+this factor is a superset of the old `reshareBoost` rather than a retune of it.
 ```
-reshareBoost = min(1 + W · ln(1 + n), CAP)     n=1 → 1.17, n=5 → 1.45, n=100 → 2.0
+curationBoost = min(CAP, 1 + Wr·ln(1+reshares) + Ws·ln(1+saves) + Wt·ln(1+tags))
 ```
 
 **4. retention** — `× clamp(1 + W·(relQ−1), MIN, MAX)` from the retention worker.
@@ -286,15 +522,20 @@ A video with no retention record gets exactly `×1` — never a penalty.
 the video's merged own+transcription tags match `?interests=`. Applied per request
 (it's user-specific), against the `tags` array baked into each pool doc.
 
+**6. follow** — `× FOLLOW_BOOST` (1.6) when the video's Hive author is one the caller
+follows. Per request; see *Follow boost* above.
+
 Plus **jitter** — seeded `× [1−J, 1+J]` (J = 0.15) so the row breathes between loads.
 
 ## Driver strength (the point of the tuning)
 
 ```
-retention 3.1x  >  freshness 2.68x  >  interest 2.5x  >  reshares 2.0x
+retention 3.1x  >  freshness 2.68x  >  interest 2.5x  ≈  curation 2.5x  >  follow 1.6x
 ```
 Freshness is no longer last, but it is still below retention — a great old video
-**can** outrank a fresh one, which is the whole point of a discovery feed.
+**can** outrank a fresh one, which is the whole point of a discovery feed. Follow sits
+lowest on purpose: it tilts discover toward people you already read without turning it
+into a second follow feed.
 
 ## Exploration slots
 
@@ -332,8 +573,9 @@ Live: **~0.12s** vs trendingSorted's ~1.5s.
 ## Debugging
 
 `?debug=1` preserves `discover_score`, `base`, `age_hours`, `freshness`,
-`new_boost`, `reshare_boost`, `reshares`, `retention_mult`, `retention_relq`,
-`interest_match` and `pool_src` in the response (stripped otherwise).
+`new_boost`, `curation_boost`, `reshares`, `saves`, `viewer_tags`, `follow_match`,
+`retention_mult`, `retention_relq`, `retention_viewers`, `interest_match` and
+`pool_src` in the response (stripped otherwise).
 
 ## Configuration (env)
 
@@ -356,8 +598,6 @@ Live: **~0.12s** vs trendingSorted's ~1.5s.
 | `DISCOVER_RETENTION_WEIGHT` | 1.5 | amplifies the relQ spread |
 | `DISCOVER_RETENTION_MIN_MULT` | 0.4 | retention lower bound |
 | `DISCOVER_RETENTION_MAX_MULT` | 2.5 | retention upper bound |
-| `DISCOVER_RESHARE_WEIGHT` | 0.25 | log-damped reshare weight |
-| `DISCOVER_RESHARE_MAX_BOOST` | 2.0 | reshare cap |
 | `DISCOVER_JITTER` | 0.15 | ±15% seeded per-video jitter |
 | `DISCOVER_EXPLORE_EVERY` | 4 | every Nth slot = random pick (25%) |
 
@@ -403,6 +643,36 @@ design. Retention still re-ranks whatever survives.
 This feed is often short — a single topic simply doesn't have many recent shorts
 (e.g. `art` alone yields ~8) — so the client falls back to Discover when the viewer
 swipes past the last one.
+
+## Dead videos: the `unavailable` shadow-ban
+
+A video whose media is gone is worse than no video — it takes a feed slot and plays
+nothing. When the frontend hits a hard 404 on a manifest (a card's hover preload, or
+a fatal player error on the watch page) it POSTs `/video/report-unavailable`. A
+confirmed-dead video gets `unavailable: true` on its source doc and is excluded from
+**every** feed — the filter `unavailableMatch()` is spread at exactly the same ~35
+query sites as `feedAgeMatch()`. The post and the watch page still work; it just
+stops being recommended.
+
+**The client report is a HINT, never a verdict.** 3Speak migrates content off the hot
+IPFS zone (`hotipfs-3speak-1`) after a while, so a perfectly healthy old video 404s
+there while `ipfs.3speak.tv` still serves it. Banning on a single-gateway 404 would
+silently gut the archive, and nobody would notice until it was too late. So the
+server re-checks the manifest **itself, across every gateway**, and bans only when
+all of them return a definite 404. A timeout / 5xx / connection error is NOT evidence
+of absence — a gateway being down is not the video being gone — so anything
+inconclusive aborts the ban.
+
+The CID is read from OUR doc, never from the client's `url` (kept only as a
+diagnostic), so a caller cannot point us at an unrelated 404 to ban someone. The
+worst a malicious client can do is make us re-check a healthy video and conclude it
+is fine. Reports are collapsed to one real check per video per hour.
+
+On ban we also evict the video from `discover-pool` / `interest-pool`, which are
+rebuilt on a cron and would otherwise keep serving it until the next rebuild.
+
+Audit trail: the `video-unavailable` collection records the cid, the per-gateway
+verdicts, who reported it and when. `GET /video/unavailable-stats` returns the count.
 
 ## `?topic=<tag>` — recommended shorts on the watch page
 

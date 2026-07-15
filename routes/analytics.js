@@ -8,10 +8,19 @@
  *   GET /analytics/overview       → totals + metrics + best-performing videos
  *   GET /analytics/timeseries     → daily watch-time / views for a trend chart
  *   GET /analytics/video          → per-video detail (retention + most-replayed)
- *   GET /analytics/demographics   → country + device/browser + time-of-day + new/returning
+ *   GET /analytics/demographics   → country + device/browser + time-of-day
  *   GET /analytics/has-data       → does a video have any records (gates the Stats button)
  *
  * Common query params: days (7|28|90|365|0=all), content (all|videos|shorts).
+ *
+ * PRIVACY (2026-07-14): the player stores no viewer IP and no persistent per-browser
+ * id. `country` is resolved on ingest and the IP discarded, so everything here is an
+ * aggregate over watch SESSIONS — no viewer is identifiable and no one is tracked
+ * across visits. Consequences, on purpose:
+ *   • "viewers" counts sessions, not people (a reload is a new session);
+ *   • new-vs-returning is gone — it is not derivable without cross-visit tracking;
+ *   • country buckets below MIN_COUNTRY_VIEWERS are suppressed (anti singling-out).
+ * geoip is still imported: it geolocates pre-migration rows that carry a raw `ip`.
  */
 const express = require('express');
 const router = express.Router();
@@ -27,6 +36,24 @@ const WATCH_HEATMAP = process.env.WATCH_HEATMAP_COLLECTION || 'view-heatmaps';
 // Watched seconds: prefer contentSeconds (speed-correct); fall back to
 // watchedSeconds for rows written before that field existed.
 const WATCH_SEC = { $ifNull: ['$contentSeconds', { $ifNull: ['$watchedSeconds', 0] }] };
+
+// The distinct-viewer key.
+//
+// As of 2026-07-14 we store no viewer IP and no persistent per-browser id — a row
+// is identified only by its `sid` (one watch session). So "viewers" now counts
+// WATCH SESSIONS, not distinct humans: the same person watching twice, or simply
+// reloading the page, counts twice. That is the deliberate cost of not tracking
+// people across visits, and the API/UI name the field `sessions` accordingly.
+//
+// The $ifNull chain is the transition bridge: rows written by an older player
+// build (or by a player process not yet restarted) may still carry `viewerId`/`ip`,
+// and those keep de-duplicating the old way until they age out.
+const VIEWER_KEY = { $ifNull: ['$viewerId', { $ifNull: ['$ip', '$sid'] }] };
+
+// A country bucket this small is a singling-out risk, not a statistic: "1 view from
+// Liechtenstein" on a video shared with one person names that person. Buckets below
+// the threshold are hidden and counted as unlocated instead.
+const MIN_COUNTRY_VIEWERS = Math.max(1, parseInt(process.env.ANALYTICS_MIN_COUNTRY_VIEWERS, 10) || 5);
 
 const ALLOWED_DAYS = new Set([7, 28, 90, 365]);
 function parseDays(req) {
@@ -92,7 +119,7 @@ async function watchStatsByVideo(db, username, extra = {}) {
     { $group: {
       _id: '$permlink',
       sessions: { $sum: 1 },
-      viewers: { $addToSet: { $ifNull: ['$viewerId', '$ip'] } },
+      viewers: { $addToSet: VIEWER_KEY },
       watchSeconds: { $sum: WATCH_SEC },
       avgPct: { $avg: '$watchedPct' },
       avgRate: { $avg: '$avgRate' },
@@ -247,7 +274,7 @@ router.get(['/analytics/overview', '/creator-stats/overview'], async (req, res) 
     const videos = perVideo.map((v) => fmtVideo(v, meta, eng));
     const uniqueViewers = (await db.collection(WATCH_LOG).aggregate([
       { $match: { owner: username, ...extra } },
-      { $group: { _id: { $ifNull: ['$viewerId', '$ip'] } } },
+      { $group: { _id: VIEWER_KEY } },
       { $count: 'n' },
     ]).toArray())[0]?.n || 0;
 
@@ -304,7 +331,7 @@ router.get(['/analytics/timeseries', '/creator-stats/timeseries'], async (req, r
         _id: { $dateToString: { format: '%Y-%m-%d', date: '$updatedAt' } },
         watchSeconds: { $sum: WATCH_SEC },
         views: { $sum: 1 },
-        viewers: { $addToSet: { $ifNull: ['$viewerId', '$ip'] } },
+        viewers: { $addToSet: VIEWER_KEY },
       } },
       { $project: { _id: 0, date: '$_id', watchSeconds: { $round: ['$watchSeconds', 0] }, views: 1, viewers: { $size: '$viewers' } } },
       { $sort: { date: 1 } },
@@ -355,13 +382,16 @@ router.get(['/analytics/video', '/creator-stats/video'], async (req, res) => {
     const assetPermlink = await resolveAssetPermlink(db, username, permlink);
 
     const rows = await db.collection(WATCH_LOG)
-      .find({ owner: username, permlink: assetPermlink }, { projection: { ip: 1, watchedSeconds: 1, contentSeconds: 1, watchedPct: 1, startPosition: 1, lastPosition: 1, maxPosition: 1, videoDuration: 1, avgRate: 1 } })
+      .find({ owner: username, permlink: assetPermlink }, { projection: { sid: 1, viewerId: 1, ip: 1, watchedSeconds: 1, contentSeconds: 1, watchedPct: 1, startPosition: 1, lastPosition: 1, maxPosition: 1, videoDuration: 1, avgRate: 1 } })
       .toArray();
     if (!rows.length) return res.json({ success: true, username, permlink: assetPermlink, sessions: 0 });
 
     const duration = rows.reduce((m, r) => Math.max(m, r.videoDuration || 0), 0) || 1;
     const sessions = rows.length;
-    const viewers = new Set(rows.map((r) => r.ip)).size;
+    // Mirrors VIEWER_KEY: `sid` now, with the legacy viewerId/ip fallback for rows
+    // written before the ingest change. One row per session, so for current rows
+    // this equals `sessions`.
+    const viewers = new Set(rows.map((r) => r.viewerId ?? r.ip ?? r.sid)).size;
     const watchSeconds = rows.reduce((s, r) => s + (r.contentSeconds ?? r.watchedSeconds ?? 0), 0);
     const avgPct = Math.round((rows.reduce((s, r) => s + (r.watchedPct || 0), 0) / sessions) * 10) / 10;
     const avgRate = Math.round((rows.reduce((s, r) => s + (r.avgRate || 1), 0) / sessions) * 100) / 100;
@@ -410,30 +440,50 @@ router.get(['/analytics/demographics', '/creator-stats/demographics'], async (re
     const extra = { ...dateMatch(days), ...(await contentMatch(db, username, content)) };
     const match = { owner: username, ...extra };
 
-    // Distinct VIEWERS (viewerId; IP is the legacy fallback) — for totals and the
-    // new-vs-returning split. Works for private-mode rows (no IP) too.
+    // Watch SESSIONS (see VIEWER_KEY) — the denominator for the country split.
     const perViewer = await db.collection(WATCH_LOG).aggregate([
       { $match: match },
-      { $group: { _id: { $ifNull: ['$viewerId', '$ip'] }, sessions: { $sum: 1 } } },
+      { $group: { _id: VIEWER_KEY, sessions: { $sum: 1 } } },
     ]).toArray();
 
-    // Country demographics come from the IP, which is present only on non-private
-    // rows — private-mode viewers simply don't appear on the map (by design).
-    const perIp = await db.collection(WATCH_LOG).aggregate([
-      { $match: { ...match, ip: { $ne: null } } },
-      { $group: { _id: '$ip', sessions: { $sum: 1 } } },
+    // Country demographics read the `country` field, which the player resolves from
+    // the IP ON INGEST and then discards. Private-mode rows carry no country and so
+    // never appear on the map (by design).
+    const perCountry = await db.collection(WATCH_LOG).aggregate([
+      { $match: { ...match, country: { $ne: null, $exists: true } } },
+      { $group: { _id: '$country', sessions: { $sum: 1 }, viewers: { $addToSet: VIEWER_KEY } } },
     ]).toArray();
     const countries = {};
-    let located = 0, unknown = 0;
-    for (const row of perIp) {
-      const g = row._id ? geoip.lookup(row._id) : null;
-      if (g && g.country) {
-        located += 1;
-        const c = countries[g.country] || (countries[g.country] = { country: g.country, sessions: 0, viewers: 0 });
-        c.sessions += row.sessions; c.viewers += 1;
-      } else { unknown += 1; }
+    let located = 0;
+    for (const row of perCountry) {
+      const n = row.viewers.length;
+      located += n;
+      countries[row._id] = { country: row._id, sessions: row.sessions, viewers: n };
     }
-    const byCountry = Object.values(countries).sort((a, b) => b.viewers - a.viewers);
+
+    // Transition bridge: rows written before the ingest change (or by a player
+    // process not yet restarted) still carry a raw `ip` and no `country`.
+    // Geolocate those on read so the map doesn't go blank mid-rollout. Once
+    // migrate-drop-ips.cjs has run and every player is restarted this matches
+    // nothing and costs one indexed count.
+    const legacyPerIp = await db.collection(WATCH_LOG).aggregate([
+      { $match: { ...match, country: { $exists: false }, ip: { $ne: null, $exists: true } } },
+      { $group: { _id: '$ip', sessions: { $sum: 1 } } },
+    ]).toArray();
+    for (const row of legacyPerIp) {
+      const g = row._id ? geoip.lookup(row._id) : null;
+      if (!g || !g.country) continue;
+      located += 1;
+      const c = countries[g.country] || (countries[g.country] = { country: g.country, sessions: 0, viewers: 0 });
+      c.sessions += row.sessions; c.viewers += 1;
+    }
+
+    // Don't publish a country a single session could be singled out from — "1 view
+    // from Liechtenstein" on a video sent to one person identifies that person.
+    // Small counts are folded into the unlocated bucket instead of being shown.
+    const byCountry = Object.values(countries)
+      .filter((c) => c.viewers >= MIN_COUNTRY_VIEWERS)
+      .sort((a, b) => b.viewers - a.viewers);
 
     // Device / browser from userAgent (parse the distinct UAs, then sum counts).
     const uaAgg = await db.collection(WATCH_LOG).aggregate([
@@ -470,25 +520,29 @@ router.get(['/analytics/demographics', '/creator-stats/demographics'], async (re
       if (dow >= 0 && dow < 7 && hour >= 0 && hour < 24) heatmap[dow][hour] += d.sessions;
     }
 
-    // New vs returning: a viewer is "returning" if they have more than one watch
-    // session in this range (i.e. they came back), otherwise "new".
-    let newViewers = 0, returningViewers = 0;
-    for (const r of perViewer) {
-      if ((r.sessions || 0) >= 2) returningViewers += 1; else newViewers += 1;
-    }
+    // New vs returning is GONE, deliberately. It could only ever be computed from a
+    // persistent per-browser id — the exact cross-visit tracking we removed. Rather
+    // than keep serving a field that now always reports "100% new", the API drops it
+    // and the dashboard no longer renders it. `returningViewers: null` is kept as an
+    // explicit tombstone so an un-updated frontend renders nothing instead of a zero
+    // it would present as fact.
+    const shownCountryViewers = byCountry.reduce((n, c) => n + c.viewers, 0);
 
     res.json({
       success: true, username, days, content: content || 'all',
-      totalViewers: perViewer.length,
-      locatedViewers: located,
-      unknownViewers: Math.max(0, perViewer.length - located), // not on the map (incl. private-mode viewers)
+      totalSessions: perViewer.length,
+      totalViewers: perViewer.length,  // deprecated alias — it counts sessions, not people
+      locatedViewers: shownCountryViewers,
+      // Not on the map: private-mode rows, unlocatable IPs, and countries suppressed
+      // for being too small to publish.
+      unknownViewers: Math.max(0, perViewer.length - shownCountryViewers),
       byCountry,
       byDevice: toSorted(devices, 'device'),
       byBrowser: toSorted(browsers, 'browser'),
       bySource,                  // [{ source, sessions }] — 3speak vs embed player
       whenHeatmap: heatmap,      // [7][24] sessions
-      newViewers,
-      returningViewers,
+      newViewers: null,
+      returningViewers: null,
     });
   } catch (err) {
     console.error('analytics/demographics error:', err);

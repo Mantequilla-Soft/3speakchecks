@@ -16,7 +16,6 @@
 const {
   DISCOVER_HALFLIFE_H, DISCOVER_FRESH_FLOOR, DISCOVER_NEW_GRACE_H,
   DISCOVER_NEW_BOOST, DISCOVER_JITTER, DISCOVER_EXPLORE_EVERY,
-  DISCOVER_RESHARE_WEIGHT, DISCOVER_RESHARE_MAX_BOOST,
 } = require('./config');
 
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
@@ -52,17 +51,9 @@ function newBoost(hrs, graceH = DISCOVER_NEW_GRACE_H, boost = DISCOVER_NEW_BOOST
   return 1 + (boost - 1) * Math.max(0, 1 - hrs / graceH);
 }
 
-/**
- * Reshare boost. A reshare is a real curation signal — someone put the video on
- * their own blog — but it IS a popularity signal, so it's log-damped and hard
- * capped: it can lift a video, never run away with the feed.
- *   reshareBoost = min(1 + W · ln(1 + n), CAP)
- * n=1 → 1.17,  n=5 → 1.45,  n=20 → 1.76,  n=100 → 2.0 (capped)   [at W=0.25]
- */
-function reshareBoost(count, weight = DISCOVER_RESHARE_WEIGHT, cap = DISCOVER_RESHARE_MAX_BOOST) {
-  const n = Math.max(0, Number(count) || 0);
-  return Math.min(cap, 1 + weight * Math.log1p(n));
-}
+// The reshare boost used to live here. It is now one of three terms in the shared
+// curation boost (utils/curation.js) — reshares + playlist saves + viewer tags —
+// which is what the pool worker folds into `base`. Reshares kept their weight.
 
 /** Seeded per-video jitter in [1-J, 1+J] — the row isn't identical on every load. */
 function jitter(rand, amount = DISCOVER_JITTER) {
@@ -105,5 +96,5 @@ function interleaveExploration(ranked, rng, every = DISCOVER_EXPLORE_EVERY) {
 }
 
 module.exports = {
-  ageHours, freshness, newBoost, reshareBoost, jitter, shuffle, interleaveExploration, clamp,
+  ageHours, freshness, newBoost, jitter, shuffle, interleaveExploration, clamp,
 };

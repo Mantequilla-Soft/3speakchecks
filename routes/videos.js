@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
+const { confirmAndBan, unavailableCount, unavailableMatch } = require('../utils/unavailable');
 const { nsfwFilter, nsfwFilterTags, nsfwFilterHiveTags, BANNED_FILTER } = require('../utils/filters');
 const { getFollowingList, hiveRpcBatch } = require('../utils/hive');
 const { getCachedViews, setCachedViews } = require('../utils/cache');
@@ -99,8 +100,8 @@ router.get('/videos/tag/:tag', async (req, res) => {
             return ranked;
         };
         if (tag.toLowerCase() === 'mantecurated') {
-            const legacyQuery = { mantecurated: true, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created') };
-            const embedQuery = { mantecurated: true, status: 'published', ...nsfwFilterHiveTags(req), ...feedAgeMatch('createdAt') };
+            const legacyQuery = { mantecurated: true, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
+            const embedQuery = { mantecurated: true, status: 'published', ...nsfwFilterHiveTags(req), ...feedAgeMatch('createdAt'), ...unavailableMatch() };
             if (sinceDate) {
                 legacyQuery.created = { $gte: sinceDate };
                 embedQuery.createdAt = { $gte: sinceDate };
@@ -186,8 +187,8 @@ router.get('/videos/tag/:tag', async (req, res) => {
 
             if (type === 'videos') {
                 // Videos only: use DB-level pagination on legacy, small embed set
-                const legacyQuery = { tags_v2: tagLower, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created') };
-                const embedQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...feedAgeMatch('createdAt') };
+                const legacyQuery = { tags_v2: tagLower, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
+                const embedQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...feedAgeMatch('createdAt'), ...unavailableMatch() };
                 if (sinceDate) { legacyQuery.created = { $gte: sinceDate }; embedQuery.createdAt = { $gte: sinceDate }; }
 
                 const [legacyCount, embedDocs] = await Promise.all([
@@ -222,8 +223,8 @@ router.get('/videos/tag/:tag', async (req, res) => {
 
             } else {
                 // No type specified — default to videos behaviour
-                const legacyQuery = { tags_v2: tagLower, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created') };
-                const embedQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...feedAgeMatch('createdAt') };
+                const legacyQuery = { tags_v2: tagLower, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
+                const embedQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...feedAgeMatch('createdAt'), ...unavailableMatch() };
                 if (sinceDate) { legacyQuery.created = { $gte: sinceDate }; embedQuery.createdAt = { $gte: sinceDate }; }
 
                 const [legacyCount, embedDocs] = await Promise.all([
@@ -279,7 +280,7 @@ router.get('/videos/tag/:tag/counts', async (req, res) => {
         const embedCollection = db.collection('embed-video');
 
         if (tagLower === 'mantecurated') {
-            const legacyQuery = { mantecurated: true, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created') };
+            const legacyQuery = { mantecurated: true, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
             const embedBaseQuery = { mantecurated: true, status: 'published', ...nsfwFilterHiveTags(req) };
             if (sinceDate) {
                 legacyQuery.created = { $gte: sinceDate };
@@ -302,7 +303,7 @@ router.get('/videos/tag/:tag/counts', async (req, res) => {
         const embedTagMatch = buildEmbedTagMatch(tagLower, useLower);
         const isSnapsTag = tagLower === 'snaps';
 
-        const legacyQuery = { tags_v2: tagLower, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created') };
+        const legacyQuery = { tags_v2: tagLower, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
         const embedVideoQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower) };
         const shortsQuery = isSnapsTag
             ? { short: true, status: 'published', ...nsfwFilterHiveTags(req) }
@@ -359,7 +360,7 @@ router.get('/feed/:username', async (req, res) => {
         // `short: false` so shorts are excluded.
         let legacyQuery, embedQuery, feedType;
         if (followingList && followingList.length > 0) {
-            legacyQuery = { owner: { $in: followingList }, status: 'published', ...nsfwFilterTags(req), ...feedAgeMatch('created') };
+            legacyQuery = { owner: { $in: followingList }, status: 'published', ...nsfwFilterTags(req), ...feedAgeMatch('created'), ...unavailableMatch() };
             embedQuery = {
                 hive_author: { $in: followingList },
                 status: 'published',
@@ -367,13 +368,13 @@ router.get('/feed/:username', async (req, res) => {
                 listed_on_3speak: true,
                 hive_permlink: { $ne: null },
                 ...nsfwFilterHiveTags(req),
-                ...feedAgeMatch('createdAt')
+                ...feedAgeMatch('createdAt'), ...unavailableMatch()
             };
             feedType = 'personalized';
             console.log(`Fetching feed for ${username}: ${followingList.length} following`);
         } else {
             // Fallback: all published top-level content (no following list)
-            legacyQuery = { status: 'published', ...nsfwFilterTags(req), ...feedAgeMatch('created') };
+            legacyQuery = { status: 'published', ...nsfwFilterTags(req), ...feedAgeMatch('created'), ...unavailableMatch() };
             embedQuery = {
                 status: 'published',
                 short: false,
@@ -381,7 +382,7 @@ router.get('/feed/:username', async (req, res) => {
                 hive_author: { $ne: null },
                 hive_permlink: { $ne: null },
                 ...nsfwFilterHiveTags(req),
-                ...feedAgeMatch('createdAt')
+                ...feedAgeMatch('createdAt'), ...unavailableMatch()
             };
             feedType = 'all';
             console.log(`Feed fallback for ${username}: showing all videos (no following list)`);
@@ -956,6 +957,88 @@ router.get('/transcription-tags/:author/:permlink', async (req, res) => {
     } catch (error) {
         console.error('Error fetching transcription tags:', error);
         res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+/**
+ * POST /video/report-unavailable   { author, permlink, url? }
+ *
+ * The frontend calls this when a video's HLS manifest comes back as a hard 404 —
+ * from a feed card's hover preview or from the watch page. A confirmed-dead video is
+ * shadow-banned from every feed permanently (the post and the watch page still work;
+ * it just stops being recommended).
+ *
+ * The report is a HINT, not a verdict. We re-check the manifest ourselves across
+ * EVERY gateway and ban only if all of them return a definite 404 — because 3Speak
+ * migrates content off the hot IPFS zone after a while, so a healthy old video 404s
+ * on `hotipfs-3speak-1` while `ipfs.3speak.tv` still serves it happily. Trusting the
+ * client here would silently gut the archive.
+ *
+ * The CID is read from OUR doc, never from the client's `url` (which is kept only as
+ * a diagnostic), so a caller can't point us at someone else's 404 to ban them.
+ */
+const reportSeen = new Map();          // key -> ts, so a card storm re-checks once
+const REPORT_TTL_MS = 60 * 60 * 1000;
+
+router.post('/video/report-unavailable', async (req, res) => {
+    try {
+        const author = String(req.body?.author || '').trim().toLowerCase();
+        const permlink = String(req.body?.permlink || '').trim();
+        if (!author || !permlink) {
+            return res.status(400).json({ success: false, error: 'author and permlink are required' });
+        }
+
+        // A dead video on screen fires one report per card per viewer. Verifying it
+        // means up to 6 gateway fetches, so collapse the storm: one real check per
+        // video per hour is plenty for a permanent, irreversible decision.
+        const key = `${author}/${permlink}`;
+        const db0 = await getDb();
+
+        // Already known dead? Answer straight from the audit table. This must come
+        // BEFORE the rate limit: the caller uses `banned` to decide whether to pull
+        // the card out of the feed, and a deduped "false" would wrongly keep a dead
+        // video on screen for everyone who reported it in the same hour.
+        const known = await db0.collection('video-unavailable').findOne({ _id: key }, { projection: { _id: 1 } });
+        if (known) return res.json({ success: true, banned: true, reason: 'already-banned' });
+
+        // Verifying costs up to 6 gateway fetches, and a dead video on screen fires
+        // one report per viewer per card. Collapse the storm — one real check per
+        // video per hour is plenty for a permanent decision.
+        const now = Date.now();
+        const last = reportSeen.get(key);
+        if (last && now - last < REPORT_TTL_MS) {
+            return res.json({ success: true, banned: false, reason: 'recently-checked' });
+        }
+        reportSeen.set(key, now);
+        if (reportSeen.size > 5000) {
+            for (const [k, ts] of reportSeen) if (now - ts > REPORT_TTL_MS) reportSeen.delete(k);
+        }
+
+        const out = await confirmAndBan(db0, {
+            owner: author,
+            permlink,
+            reportedBy: String(req.body?.reportedBy || '').trim() || null,
+            reportedUrl: String(req.body?.url || '').slice(0, 500) || null,
+        });
+
+        if (out.banned && out.reason === 'confirmed-gone') {
+            console.log(`[unavailable] shadow-banned ${key} (cid ${out.cid}) — 404 on every gateway`);
+        }
+        // A failed ban is NOT an error: "the video is actually fine" is a valid,
+        // expected outcome and the client does nothing with it either way.
+        res.json({ success: true, ...out });
+    } catch (err) {
+        console.error('report-unavailable failed:', err);
+        res.status(500).json({ success: false, error: 'internal error' });
+    }
+});
+
+/** How many videos are currently shadow-banned as dead. */
+router.get('/video/unavailable-stats', async (_req, res) => {
+    try {
+        res.json({ success: true, count: await unavailableCount() });
+    } catch {
+        res.status(500).json({ success: false });
     }
 });
 
