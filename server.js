@@ -38,6 +38,7 @@ const userFiltersRoutes = require('./routes/userFilters');
 const viewerTagsRoutes = require('./routes/viewerTags');
 const leaderboardRoutes = require('./routes/leaderboard');
 const gdprRoutes = require('./routes/gdpr');
+const gdprAdminRoutes = require('./routes/gdprAdmin');
 
 const app = express();
 
@@ -74,6 +75,7 @@ app.use('/scheduled-posts', scheduledPostsRoutes);
 app.use('/', communitiesRoutes);
 app.use('/', analyticsRoutes);
 app.use('/', gdprRoutes);
+app.use('/', gdprAdminRoutes);
 app.use('/', userFiltersRoutes);
 app.use('/', viewerTagsRoutes);
 app.use('/', leaderboardRoutes);
