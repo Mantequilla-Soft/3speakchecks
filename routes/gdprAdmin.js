@@ -47,7 +47,7 @@ router.use((req, res, next) => {
 });
 
 // GET /gdpr-admin/requests?status=open|done|all
-router.get('/gdpr-admin/requests', async (req, res) => {
+router.get('/requests', async (req, res) => {
   try {
     const status = ['open', 'done', 'all'].includes(req.query.status) ? req.query.status : 'open';
     res.json({ success: true, status, requests: await gdpr.listRequests(getDb(), { status }) });
@@ -58,7 +58,7 @@ router.get('/gdpr-admin/requests', async (req, res) => {
 });
 
 // GET /gdpr-admin/export/:username
-router.get('/gdpr-admin/export/:username', async (req, res) => {
+router.get('/export/:username', async (req, res) => {
   try {
     const username = gdpr.normUser(req.params.username);
     if (!gdpr.HIVE_RE.test(username)) return res.status(400).json({ error: 'invalid username' });
@@ -70,7 +70,7 @@ router.get('/gdpr-admin/export/:username', async (req, res) => {
 });
 
 // POST /gdpr-admin/delete { username, dryRun }
-router.post('/gdpr-admin/delete', async (req, res) => {
+router.post('/delete', async (req, res) => {
   try {
     const username = gdpr.normUser(req.body?.username);
     if (!gdpr.HIVE_RE.test(username)) return res.status(400).json({ error: 'invalid username' });
@@ -86,7 +86,7 @@ router.post('/gdpr-admin/delete', async (req, res) => {
 });
 
 // POST /gdpr-admin/close { ref }
-router.post('/gdpr-admin/close', async (req, res) => {
+router.post('/close', async (req, res) => {
   try {
     const ref = String(req.body?.ref || '').trim();
     if (!ref) return res.status(400).json({ error: 'ref required' });
