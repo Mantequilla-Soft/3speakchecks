@@ -85,6 +85,11 @@ let syncRunning = false;
 async function startServer() {
     await connectToMongo();
 
+    // Warm the hidden-creators set on boot so the very first feed/search/watch
+    // request is already filtered (the sync accessors otherwise warm lazily on the
+    // first hit, leaving a sub-second fail-open window after a restart).
+    require('./utils/hiddenCreators').getHiddenSet().catch(() => {});
+
     // Start change stream watcher to keep hive_tags_lower in sync
     startTagSyncWatcher();
 

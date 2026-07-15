@@ -108,6 +108,9 @@ async function connectToMongo() {
                 ['user-hidden-creators', { username: 1 }],
                 // Viewer-supplied tags — tallied per video via author+permlink.
                 ['viewer-tags', { author: 1, permlink: 1 }],
+                // Hidden (moderation-visibility) creators — loaded as a cached set
+                // and consulted by every feed/search/leaderboard read.
+                ['contentcreators', { hidden: 1 }],
             ];
             for (const [coll, key] of wanted) {
                 try { await db.collection(coll).createIndex(key, { background: true }); }

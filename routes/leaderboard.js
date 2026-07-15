@@ -13,6 +13,7 @@
  * rollup deletes them), so "absent" is read as zero everywhere below.
  */
 const express = require('express');
+const { hiddenListSync } = require('../utils/hiddenCreators');
 const router = express.Router();
 const { getDb } = require('../utils/db');
 
@@ -87,7 +88,7 @@ router.get('/leaderboard', async (req, res) => {
 
     const db = getDb();
     const col = db.collection(COLLECTION);
-    const filter = { window, [metric]: { $gt: 0 } };
+    const filter = { window, [metric]: { $gt: 0 }, user: { $nin: hiddenListSync() } };
 
     // (window, metric) has its own index, so this sort is served by it.
     const [docs, total] = await Promise.all([
@@ -136,7 +137,7 @@ router.get('/leaderboard/summary', async (req, res) => {
 
     const boards = await Promise.all(METRICS.map(async (metric) => {
       const docs = await col
-        .find({ window, [metric]: { $gt: 0 } }, { projection: projection() })
+        .find({ window, [metric]: { $gt: 0 }, user: { $nin: hiddenListSync() } }, { projection: projection() })
         .sort({ [metric]: -1, user: 1 })
         .limit(limit)
         .toArray();
@@ -275,7 +276,7 @@ router.get('/leaderboard/topic', async (req, res) => {
 
     const db = getDb();
     const col = db.collection(TOPICS_COLLECTION);
-    const filter = { window, topic, [metric]: { $gt: 0 } };
+    const filter = { window, topic, [metric]: { $gt: 0 }, user: { $nin: hiddenListSync() } };
 
     // Served by the (window, topic, metric) index.
     const [docs, total] = await Promise.all([

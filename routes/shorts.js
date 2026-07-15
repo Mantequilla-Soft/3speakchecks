@@ -4,6 +4,7 @@ const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
 const { unavailableMatch } = require('../utils/unavailable');
 const { nsfwFilterHiveTags } = require('../utils/filters');
+const { hiddenListSync } = require('../utils/hiddenCreators');
 const { HIDDEN_AUTHORS, SHORT_SORT_INTERVAL, REWARD_WEIGHT, RESHARE_WEIGHT, ENABLE_MONGO_WRITES, RELATED_TOPIC_MULT, SHORTS_WINDOW_DAYS, SHORTS_FOLLOW_WINDOW_DAYS } = require('../utils/config');
 const { fetchHiveRewards, fetchLivePageData, fetchFollowerCounts, hiveReputationToScore, mulberry32, getFollowingList, reputationCache } = require('../utils/hive');
 const { sortedShortsCache, SORTED_SHORTS_CACHE_TTL, getCachedViews, setCachedViews } = require('../utils/cache');
@@ -39,7 +40,7 @@ router.get('/shorts', async (req, res) => {
             listed_on_3speak: { $ne: false }, // hide unlisted shorts (matches the video feeds)
             embed_url: { $exists: true, $ne: null },
             createdAt: { $gte: sevenDaysAgo },
-            owner: { $nin: HIDDEN_AUTHORS },
+            owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
             ...unavailableMatch(),
             ...nsfwFilterHiveTags(req)
         };
@@ -145,7 +146,7 @@ router.get('/shorts/stories', async (req, res) => {
             listed_on_3speak: { $ne: false }, // hide unlisted shorts (matches the video feeds)
             embed_url: { $exists: true, $ne: null },
             createdAt: { $gte: sevenDaysAgo },
-            owner: { $nin: HIDDEN_AUTHORS },
+            owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
             ...unavailableMatch(),
             ...nsfwFilterHiveTags(req)
         };
@@ -489,7 +490,7 @@ router.get('/shortssorted', async (req, res) => {
                 listed_on_3speak: { $ne: false }, // hide unlisted shorts (matches the video feeds)
                 embed_url: { $exists: true, $ne: null },
                 createdAt: { $gte: windowStart },
-                owner: { $nin: HIDDEN_AUTHORS },
+                owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
                 ...nsfwFilterHiveTags(req)
             };
 
