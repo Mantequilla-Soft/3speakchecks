@@ -31,11 +31,6 @@ const HIVE_RE = /^[a-z][a-z0-9.-]{2,15}$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const TYPES = new Set(['export', 'delete']);
 
-// Rate limit: a data-subject request is a once-in-a-blue-moon action. This exists
-// to stop someone hammering the endpoint to spam the privacy inbox, not to gate
-// legitimate use — the window is per Hive account.
-const RATE_LIMIT_MS = 60 * 60 * 1000; // 1 per account per hour
-
 /**
  * The personal data we hold that is keyed to a Hive account, and can therefore be
  * exported or deleted. Single source of truth: the UI renders this list verbatim,
@@ -75,12 +70,19 @@ router.post('/gdpr-request', async (req, res) => {
     const db = getDb();
     const coll = db.collection(COLLECTION);
 
-    const recent = await coll.findOne(
-      { username, createdAt: { $gt: new Date(Date.now() - RATE_LIMIT_MS) } },
+    // Block a duplicate only while a request of the SAME TYPE is still OPEN. Once it
+    // has been fulfilled (status: 'done') the account can ask again — e.g. request a
+    // fresh export later. (This used to block on ANY request within an hour
+    // regardless of status, so a fulfilled export wrongly blocked a new one.)
+    const openDup = await coll.findOne(
+      { username, type, status: 'open' },
       { projection: { _id: 1 } },
     );
-    if (recent) {
-      return res.status(429).json({ success: false, error: 'We already have a recent request for this account. We will be in touch — no need to send another.' });
+    if (openDup) {
+      return res.status(429).json({
+        success: false,
+        error: `You already have a pending ${type === 'delete' ? 'deletion' : 'data'} request for this account — we'll action it shortly. No need to send another.`,
+      });
     }
 
     const now = new Date();
