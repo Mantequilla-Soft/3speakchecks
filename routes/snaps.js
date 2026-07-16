@@ -160,7 +160,9 @@ router.get('/snaps-feed', async (req, res) => {
       ownerClause.$in = following;
     }
 
-    // Per-viewer exclusions: hidden creators/posts + already-engaged snaps.
+    // Per-viewer exclusions: hidden creators/posts + already-engaged snaps + the
+    // viewer's OWN snaps (you see those on your profile's Community tab, not in
+    // your own home feed).
     if (currentuser) {
       const [hides, interactions] = await Promise.all([
         db.collection(HIDDEN_COLLECTION).find({ user: currentuser }).toArray(),
@@ -173,7 +175,7 @@ router.get('/snaps-feed', async (req, res) => {
           ...interactions.map((i) => i.key),
         ]),
       ];
-      if (hiddenCreators.length) ownerClause.$nin = hiddenCreators;
+      ownerClause.$nin = [...new Set([...hiddenCreators, currentuser])];
       if (excludedKeys.length) query._id = { $nin: excludedKeys };
     }
     if (Object.keys(ownerClause).length) query.owner = ownerClause;
