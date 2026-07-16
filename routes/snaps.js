@@ -12,19 +12,28 @@ const express = require('express');
 const dhive = require('@hiveio/dhive');
 const { getDb } = require('../utils/db');
 const { HIVE_RPC_ENDPOINTS } = require('../utils/config');
+const { getFollowingList } = require('../utils/hive');
 
 const router = express.Router();
 const client = new dhive.Client(HIVE_RPC_ENDPOINTS);
 
 const COLLECTION = 'community-snaps';
+const HIDDEN_COLLECTION = 'snap-hidden';         // per-user hides — SEPARATE from video hides
+const INTERACT_COLLECTION = 'snap-interactions';  // snaps a user has voted/commented on
 const SNAP_APP = '3speak/snap'; // json_metadata.app our composer stamps on a snap
+// Community posts only surface in the home feed while they're fresh.
+const SNAP_FEED_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const norm = (s) => String(s || '').trim().toLowerCase();
 
 let _indexed = false;
 async function ensureIndex() {
   if (_indexed) return;
   _indexed = true;
-  try { await getDb().collection(COLLECTION).createIndex({ owner: 1, created: -1 }); } catch (_) { /* best effort */ }
+  const db = getDb();
+  try { await db.collection(COLLECTION).createIndex({ owner: 1, created: -1 }); } catch (_) { /* best effort */ }
+  try { await db.collection(COLLECTION).createIndex({ created: -1 }); } catch (_) { /* feed order */ }
+  try { await db.collection(INTERACT_COLLECTION).createIndex({ user: 1 }); } catch (_) { /* per-user lookup */ }
+  try { await db.collection(HIDDEN_COLLECTION).createIndex({ user: 1 }); } catch (_) { /* per-user lookup */ }
 }
 
 function parseMeta(post) {
@@ -120,5 +129,110 @@ router.get('/snaps/:owner', async (req, res) => {
     res.status(500).json({ success: false, error: 'internal error' });
   }
 });
+
+/**
+ * GET /snaps-feed?scope=all|following&currentuser=&page=&limit=&nsfw=
+ * Cross-author community-post feed for the home feed. Fresh (<7d) only.
+ *   scope=following → only people `currentuser` follows (Interests + Follow sections)
+ *   scope=all       → anyone (Discover + New sections)
+ * Excludes the viewer's snap-hidden posts/creators and the snaps they've already
+ * voted/commented on (see POST /snaps/interaction). These filters are SEPARATE from
+ * the video hide lists — a snap-hidden creator's videos are unaffected.
+ */
+router.get('/snaps-feed', async (req, res) => {
+  try {
+    const currentuser = norm(req.query.currentuser);
+    const scope = req.query.scope === 'following' ? 'following' : 'all';
+    const limit = Math.min(30, Math.max(1, parseInt(req.query.limit, 10) || 10));
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const skip = (page - 1) * limit;
+    const db = getDb();
+    await ensureIndex();
+
+    const query = { created: { $gt: new Date(Date.now() - SNAP_FEED_MAX_AGE_MS) } };
+    if (req.query.nsfw !== 'true') query.nsfw = { $ne: true };
+
+    const ownerClause = {};
+    if (scope === 'following') {
+      if (!currentuser) return res.json({ success: true, snaps: [], page, limit, hasMore: false });
+      const following = await getFollowingList(currentuser);
+      if (!following || !following.length) return res.json({ success: true, snaps: [], page, limit, hasMore: false });
+      ownerClause.$in = following;
+    }
+
+    // Per-viewer exclusions: hidden creators/posts + already-engaged snaps.
+    if (currentuser) {
+      const [hides, interactions] = await Promise.all([
+        db.collection(HIDDEN_COLLECTION).find({ user: currentuser }).toArray(),
+        db.collection(INTERACT_COLLECTION).find({ user: currentuser }, { projection: { key: 1 } }).toArray(),
+      ]);
+      const hiddenCreators = hides.filter((h) => h.type === 'creator').map((h) => h.owner);
+      const excludedKeys = [
+        ...new Set([
+          ...hides.filter((h) => h.type === 'post').map((h) => `${h.owner}/${h.permlink}`),
+          ...interactions.map((i) => i.key),
+        ]),
+      ];
+      if (hiddenCreators.length) ownerClause.$nin = hiddenCreators;
+      if (excludedKeys.length) query._id = { $nin: excludedKeys };
+    }
+    if (Object.keys(ownerClause).length) query.owner = ownerClause;
+
+    // Fetch limit+1 to know if there's a next page.
+    const items = await db.collection(COLLECTION).find(query).sort({ created: -1 }).skip(skip).limit(limit + 1).toArray();
+    const hasMore = items.length > limit;
+    res.json({ success: true, snaps: items.slice(0, limit), page, limit, hasMore });
+  } catch (err) {
+    console.error('GET /snaps-feed failed:', err);
+    res.status(500).json({ success: false, error: 'internal error' });
+  }
+});
+
+/**
+ * POST /snaps/interaction { user, author, permlink }
+ * Record that `user` voted or commented on a snap, so it stops surfacing in their
+ * home feed. Idempotent; fire-and-forget from the client.
+ */
+router.post('/snaps/interaction', async (req, res) => {
+  try {
+    const user = norm(req.body?.user);
+    const owner = norm(req.body?.author || req.body?.owner);
+    const permlink = String(req.body?.permlink || '').trim();
+    if (!user || !owner || !permlink) {
+      return res.status(400).json({ success: false, error: 'user, author and permlink are required' });
+    }
+    const key = `${owner}/${permlink}`;
+    await getDb().collection(INTERACT_COLLECTION).updateOne(
+      { _id: `${user}:${key}` },
+      { $set: { user, key, at: new Date() } },
+      { upsert: true },
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('POST /snaps/interaction failed:', err);
+    res.status(500).json({ success: false, error: 'internal error' });
+  }
+});
+
+// ── Per-user snap hides (community posts only; separate from video hides) ──────
+async function setHide(res, { user, owner, permlink, type, remove }) {
+  if (!user || !owner || (type === 'post' && !permlink)) {
+    return res.status(400).json({ success: false, error: 'missing fields' });
+  }
+  const _id = type === 'post' ? `${user}:post:${owner}/${permlink}` : `${user}:creator:${owner}`;
+  const col = getDb().collection(HIDDEN_COLLECTION);
+  if (remove) await col.deleteOne({ _id });
+  else await col.updateOne({ _id }, { $set: { user, type, owner, permlink: type === 'post' ? permlink : null, at: new Date() } }, { upsert: true });
+  return res.json({ success: true });
+}
+
+router.post('/snaps/hide', (req, res) =>
+  setHide(res, { user: norm(req.body?.user), owner: norm(req.body?.author || req.body?.owner), permlink: String(req.body?.permlink || '').trim(), type: 'post', remove: false }));
+router.delete('/snaps/hide', (req, res) =>
+  setHide(res, { user: norm(req.body?.user), owner: norm(req.body?.author || req.body?.owner), permlink: String(req.body?.permlink || '').trim(), type: 'post', remove: true }));
+router.post('/snaps/hide-creator', (req, res) =>
+  setHide(res, { user: norm(req.body?.user), owner: norm(req.body?.author || req.body?.owner), type: 'creator', remove: false }));
+router.delete('/snaps/hide-creator', (req, res) =>
+  setHide(res, { user: norm(req.body?.user), owner: norm(req.body?.author || req.body?.owner), type: 'creator', remove: true }));
 
 module.exports = router;
