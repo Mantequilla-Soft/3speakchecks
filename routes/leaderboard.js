@@ -222,7 +222,7 @@ router.get('/leaderboard/user/:username', async (req, res) => {
 });
 
 /**
- * Per-topic boards, from the separate `leaderboard-topics` collection: one doc
+ * Per-topic boards, from the separate `leaderboard-topics-v2` collection: one doc
  * per (window, topic, user) with just two metrics. Topics bucket by the video's
  * UPLOAD date (not the date it was tagged), so a back-catalogue video tagged
  * today counts toward the day it was actually published.
@@ -230,7 +230,11 @@ router.get('/leaderboard/user/:username', async (req, res) => {
  *   GET /leaderboard/topics                                → the topic list
  *   GET /leaderboard/topic?topic=&window=&metric=&limit=&page=  → one topic board
  */
-const TOPICS_COLLECTION = 'leaderboard-topics';
+// v2 topic boards: built from the v2 tag taxonomy (7 categories + 27 topics,
+// plus the viewer-only `vlog`) and covering the back catalogue, not just recent
+// uploads. `leaderboard-topic-daily-v2` is the rollup job's own per-day source
+// and is deliberately NOT read here — same arrangement as `leaderboard-daily`.
+const TOPICS_COLLECTION = 'leaderboard-topics-v2';
 // Videos and shorts are tracked separately; `uploads`/`watch_secs` are the
 // combined totals kept alongside them, so "top gaming creator overall" is still
 // one sort. Every one of the six has a (window, topic, metric) index.
@@ -292,7 +296,7 @@ router.get('/leaderboard/topic', async (req, res) => {
       // Per-topic rows must be summed per creator, so this can't use the plain
       // (window, topic, metric) index path — group first, then rank.
       //
-      // ⚠️ Approximate by construction: `leaderboard-topics` is pre-aggregated
+      // ⚠️ Approximate by construction: `leaderboard-topics-v2` is pre-aggregated
       // per topic, so a video tagged with TWO topics of the same category (e.g.
       // technology + education) contributes to both rows and is counted twice
       // here. De-duplicating would need per-video tags, which this collection
