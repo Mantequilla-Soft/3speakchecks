@@ -40,6 +40,7 @@ const leaderboardRoutes = require('./routes/leaderboard');
 const gdprRoutes = require('./routes/gdpr');
 const gdprAdminRoutes = require('./routes/gdprAdmin');
 const snapsRoutes = require('./routes/snaps');
+const playlistsFeedRoutes = require('./routes/playlistsFeed');
 
 const app = express();
 
@@ -81,6 +82,7 @@ app.use('/', userFiltersRoutes);
 app.use('/', viewerTagsRoutes);
 app.use('/', leaderboardRoutes);
 app.use('/', snapsRoutes);
+app.use('/', playlistsFeedRoutes);
 
 // Track whether heavy sync tasks are running
 let syncRunning = false;

@@ -485,17 +485,43 @@ even enter its candidate set.
 
 ## The five factors
 
-**1. freshness** — half-life decay, floored. Still the **weakest** driver (~2.68×):
-fresh uploads matter but must not dominate a discovery feed. It hits the floor at
-~3.7 days, after which a 4-day-old and a 4-year-old video are equal on age and are
-separated only by quality, interest and reshares.
+> **Note — since the page is now composed to a target age distribution
+> (`interleaveByAge`, above), *cross-age* composition is governed by the age quota,
+> not by freshness.** Freshness still orders videos WITHIN an age band and feeds the
+> `base` score used for the within-band ranking and the interest/related feeds; its
+> old job of setting the fresh-vs-old *mix* of the page is now the quota's. The
+> factors below describe the score that ranks within a band.
+
+**1. freshness** — TWO-stage age decay:
 ```
-freshness = max(0.5 ^ (ageHours / DISCOVER_HALFLIFE_H), DISCOVER_FRESH_FLOOR)
+freshness = max( 0.5 ^ (ageHours / DISCOVER_HALFLIFE_H),
+                 FLOOR · max(0.5 ^ (ageYears / DISCOVER_AGE_HALFLIFE_Y), DISCOVER_AGE_FLOOR) )
 ```
-The FLOOR *is* the fresh-vs-old spread: `1 / FLOOR`. It was raised from 0.65 (1.54×)
-to **0.43 (2.33×)** — a 1.5× stronger recency bias — because the top of discover was
-carrying too many years-old videos. Measured over the top 24 across 3 seeds: videos
-older than a year went **22% → 13%**, under-30-days **72% → 79%**.
+Stage 1 is the fast half-life (72h) that makes this week beat last week; it bottoms
+out at the FLOOR after ~3.7 days. The FLOOR was raised from 0.65 (1.54×) to **0.43
+(2.33×)** because the top of discover was carrying too many years-old videos —
+measured over the top 24 across 3 seeds: videos older than a year went **22% → 13%**,
+under-30-days **72% → 79%**.
+
+Stage 2 (added 2026-07-14) is the long **age tail** on the floor itself. The flat
+floor made everything past ~3.7 days age-EQUAL: a 5-month-old and a 4-year-old video
+scored identically on age, so the archive competed head-on with recent work. The
+floor now keeps decaying with a 1-year half-life, bottoming out exactly at the
+2-year mark:
+
+| age | freshness |
+|---|---|
+| 4 days | 0.43 |
+| 1 month | 0.41 |
+| 5 months | 0.32 |
+| 1 year | 0.22 |
+| ≥2 years | **0.107 flat** |
+
+A 5-month-old now outranks a 4-year-old ~3× on age; ≥2y is damped ~4× vs the old
+flat floor, but never zero — retention (×2.5) and curation (×2.5) can still
+resurface a genuinely great old video, which is the point of the feed. A missing
+upload date gets the *ancient* floor (unknown age must not outrank known-old).
+`DISCOVER_AGE_HALFLIFE_Y=0` restores the flat floor.
 
 **2. newBoost** — a modest lift for really fresh uploads so they get first traction
 before any retention data exists. Tapers **linearly** to 1.0 across the grace
@@ -537,13 +563,53 @@ Freshness is no longer last, but it is still below retention — a great old vid
 lowest on purpose: it tilts discover toward people you already read without turning it
 into a second follow feed.
 
-## Exploration slots
+## Page composition — a TARGET age distribution (`interleaveByAge`)
 
-After sorting and hide-watched, `interleaveExploration()` takes every
-`DISCOVER_EXPLORE_EVERY`-th (4th → 25% of the page) slot from a **seeded shuffle of
-the lower half** of the ranking; the rest come from the top half in score order.
-Every item appears exactly once — no dupes, no drops — so `total` and pagination
-stay correct.
+The discover page is composed to an **explicit age distribution**, not left to emerge
+from freshness × exploration. `DISCOVER_AGE_WEIGHTS` is each age band's share of every
+page:
+
+| \<7d | 7–30d | 30d–6mo | 6mo–1y | 1y–2y | >2y |
+|---|---|---|---|---|---|
+| 50% | 20% | 12% | 8% | 6% | 4% |
+
+Bands are fixed at 7d / 30d / 6mo / 1y / 2y (`AGE_BAND_DAYS`). Within a band, videos
+stay in `discover_score` order — so **quality still picks WHICH videos of each age
+surface; the weights only pick HOW MANY**. "How much old content" is now a product
+dial, decoupled from "which old content is good", which is quality.
+
+### Why this replaced the explore-slot approach
+
+The old design took every 4th slot for "exploration" and tuned freshness + an explore
+quota, hoping the page mix fell out. It **structurally could not hit an arbitrary
+target**: the 75% non-explore slots came straight off the top of the score order,
+which is ~100% <30d — so >70% of the page was always <30d, whatever the tuning. Two
+rounds of trying (uniform lower-half draw → 58% of explore slots >2y; score-weighted
+lower-half → *worse*, 83%, because the age tail had left the lower half purely
+ancient) confirmed you can't weight your way to a composition when the draw pool's
+composition is itself wrong. So the page is now composed to the target directly.
+
+### The scheduler
+
+`interleaveByAge()` splits the score-sorted list into bands and emits them with a
+virtual-time (WFQ / stride) scheduler: `vt(band) = (emitted + 0.5) / weight`, and each
+slot takes the non-empty band furthest behind its quota. Properties:
+
+- The mix holds at **every depth**, so page 1 and page 5 have the same age profile and
+  pagination is consistent (measured live: 50/19/13/8/6/4 on pages 1–3).
+- A band with too few videos **backfills**: its slots flow to the most-behind weighted
+  band (usually <7d), so a thin band skews the page fresher rather than leaving gaps.
+- A weight-0 band still appears (served last), so **exactly-once** holds — `total` and
+  pagination stay correct.
+- **Deterministic, no RNG of its own**: the per-load seed already lives in each item's
+  `discover_score` (via jitter), so within-band order breathes per seed.
+
+The pool must be able to supply each band; live it can (tightest is <7d at ~11 pages
+of quota), and when a band can't, backfill handles it. `DISCOVER_AGE_STRATIFY=false`
+reverts to the legacy score-weighted `interleaveExploration`. Retention and curation
+still resurface a genuinely great old video — into the 4% >2y quota, ranked by
+quality — so the discovery mandate ("keep giving old videos a shot") is preserved
+while their *frequency* is capped.
 
 ## Determinism
 
@@ -590,8 +656,10 @@ Live: **~0.12s** vs trendingSorted's ~1.5s.
 | `DISCOVER_RANDOM_OLD_COUNT` | 2000 | all-time random sample (≈1000 land) |
 | `DISCOVER_RETENTION_ACTIVE_DAYS` | 14 | "still being watched" window |
 | `DISCOVER_POOL_LIMIT` | 4000 | hard cap on pool size |
-| `DISCOVER_HALFLIFE_H` | 72 | freshness half-life (hours) |
-| `DISCOVER_FRESH_FLOOR` | 0.43 | minimum freshness. `1/FLOOR` = the fresh-vs-old spread |
+| `DISCOVER_HALFLIFE_H` | 72 | fast freshness half-life (hours) |
+| `DISCOVER_FRESH_FLOOR` | 0.43 | where the fast decay bottoms out (~3.7 days) |
+| `DISCOVER_AGE_HALFLIFE_Y` | 1 | the long age tail's half-life (years); `0` = flat floor |
+| `DISCOVER_AGE_FLOOR` | 0.25 | tail floor — engages exactly at 2y; `FLOOR·this` = ancient freshness (0.107) |
 | `DISCOVER_NEW_GRACE_H` | 12 | "really fresh" window |
 | `DISCOVER_NEW_BOOST` | 1.15 | lift at age 0, tapering to 1.0 |
 | `DISCOVER_INTEREST_MULTIPLIER` | 2.5 | interest-match multiplier |
@@ -599,7 +667,9 @@ Live: **~0.12s** vs trendingSorted's ~1.5s.
 | `DISCOVER_RETENTION_MIN_MULT` | 0.4 | retention lower bound |
 | `DISCOVER_RETENTION_MAX_MULT` | 2.5 | retention upper bound |
 | `DISCOVER_JITTER` | 0.15 | ±15% seeded per-video jitter |
-| `DISCOVER_EXPLORE_EVERY` | 4 | every Nth slot = random pick (25%) |
+| `DISCOVER_AGE_STRATIFY` | true | compose the page to `DISCOVER_AGE_WEIGHTS`; `false` = legacy explore interleave |
+| `DISCOVER_AGE_WEIGHTS` | `0.50,0.20,0.12,0.08,0.06,0.04` | page share per band (\<7d / 7–30d / 30d–6mo / 6mo–1y / 1y–2y / >2y) |
+| `DISCOVER_EXPLORE_EVERY` | 4 | legacy interleave only — every Nth slot = exploration pick |
 
 ---
 
@@ -625,6 +695,52 @@ set to **0** to disable and serve the full archive).
   bounded, so an old video still plays if you open its link — it just isn't listed.
 
 As of 2026-07: ~32k of ~387k legacy videos are >6y old; `embed-video` has none.
+
+---
+
+# Hide from feeds (`hiddenFromFeed`)
+
+An **author-controlled** opt-out. A creator can set `hiddenFromFeed: true` on one of
+their own videos (same field on `videos` and `embed-video`); it is then dropped from
+**every** discovery / aggregation surface but stays fully intact everywhere else.
+
+- **Where it's hidden:** home/discover, interests, trending (`/trendingSorted`,
+  `/trending`), shorts (`/shortssorted` + the simple shorts endpoints), search,
+  the follow feed (`/feed/:username`), tag feeds + counts, related, recommended,
+  promoted, first-uploads, and the community feeds.
+- **Where it still shows:** the author's **profile / channel** (`/api/my-videos`) —
+  to *everyone* who visits it, not just the author — and the **watch page** (the
+  post still resolves and plays if you open its link). Per-channel **RSS**
+  (`/:username.xml`) also keeps it: that endpoint is the raw channel record and
+  filters nothing else (not banned, not dead, not age), so it sits with the profile,
+  not the feeds. *(Say the word if RSS should drop them too.)*
+
+### How it differs from its neighbours — this is the whole point
+
+| flag | hidden from feeds | on the author's public profile | plays by link |
+|---|---|---|---|
+| `unavailable` (media gone) | yes | **no** (card plays nothing) | no |
+| `listed_on_3speak:false` (unlisted) | yes | **only the owner sees it**, badged | yes |
+| **`hiddenFromFeed:true`** | yes | **yes — everyone** | yes |
+
+That "public on the channel, gone from discovery" is exactly what makes it distinct
+from *unlisted* (owner-only) — so the profile endpoint deliberately does **not** apply
+the filter.
+
+### Implementation
+
+- Helper `utils/hiddenFromFeed.js` → `hiddenFromFeedMatch()` returns
+  `{ hiddenFromFeed: { $ne: true } }` (or `{}` when `HIDE_FROM_FEED_ENABLED=false`),
+  spread right next to `unavailableMatch()` at every one of its ~36 sites (same
+  `$ne:true` so the field-less majority of docs still match — no over-filtering).
+- The precomputed pools exclude it at **build time** (`services/discoverWorker.js`
+  source queries + resolution skip), and `hydrate()` also drops it from the **fresh**
+  doc at request time — so a video hidden *after* the last hourly rebuild disappears
+  from discover/interests/related **immediately**, not up to an hour later.
+- **Two pre-existing gaps** were closed while wiring this (both also lacked
+  `unavailableMatch`, added for consistency): the main `/shortssorted` candidate
+  query, and the `/trendingSorted` **legacy** aggregate `$match`.
+- Kill switch: `HIDE_FROM_FEED_ENABLED=false` → the filter is a no-op everywhere.
 
 ---
 

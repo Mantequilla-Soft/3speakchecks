@@ -130,7 +130,11 @@ router.get('/viewer-tags/:author/:permlink', async (req, res) => {
     for (const r of voteRows) {
       byTag.set(r._id, { tag: r._id, weight: r.weight, count: r.count, auto: false, voters: topVoters(r.voters) });
     }
-    for (const tag of auto.tags || []) {
+    // Seed the auto tags from v2 ONLY. The v1 tags are retired from the UI, so a
+    // video the new tagger hasn't reached yet simply shows no auto tag rather
+    // than falling back to the old taxonomy.
+    const autoTags = auto.tagsV2 || [];
+    for (const tag of autoTags) {
       const cur = byTag.get(tag) || { tag, weight: 0, count: 0, auto: false, voters: [] };
       cur.weight += AUTO_TAG_WEIGHT;
       cur.auto = true;
@@ -148,7 +152,9 @@ router.get('/viewer-tags/:author/:permlink', async (req, res) => {
       permlink,
       total: voteRows.reduce((a, c) => a + c.count, 0), // human voters
       totalWeight,
-      autoTags: auto.tags || [],
+      autoTags,
+      autoTagsV1: auto.tags || [], // kept for reference/debugging
+      autoTagModelV2: auto.tagModelV2 || null,
       winner: counts[0]?.tag || null,
       counts, // [{ tag, weight, count, auto, pct }]
     });

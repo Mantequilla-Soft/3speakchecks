@@ -3,6 +3,7 @@ const router = express.Router();
 const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
 const { unavailableMatch } = require('../utils/unavailable');
+const { hiddenFromFeedMatch } = require('../utils/hiddenFromFeed');
 const { nsfwFilterTags, nsfwFilterHiveTags } = require('../utils/filters');
 const { hiddenListSync } = require('../utils/hiddenCreators');
 const { HIDDEN_AUTHORS, TRENDING_CANDIDATE_LIMIT, TRENDING_VIEWS_WEIGHT, TRENDING_VOTES_WEIGHT, TRENDING_COMMENTS_WEIGHT, TRENDING_REWARD_WEIGHT, TRENDING_RESHARE_WEIGHT, RESHARE_WEIGHT } = require('../utils/config');
@@ -17,7 +18,8 @@ const {
     RELATED_TOPIC_MULT, RELATED_INTEREST_MULT, RELATED_CREATOR_MULT,
     RELATED_CREATOR_POOL, RELATED_JITTER,
 } = require('../utils/config');
-const { jitter, interleaveExploration, freshness, ageHours } = require('../utils/discoverScore');
+const { jitter, interleaveExploration, interleaveByAge, freshness, ageHours } = require('../utils/discoverScore');
+const { DISCOVER_AGE_STRATIFY, DISCOVER_AGE_WEIGHTS } = require('../utils/config');
 const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
 const { getFollowSetForReq, applyFollowBoost } = require('../utils/followBoost');
 const { getPool, hydrate } = require('../utils/discoverPool');
@@ -193,8 +195,17 @@ router.get('/discover', async (req, res) => {
         // preference is on — already-watched, BEFORE pagination so pages stay full.
         const visible = await filterForUser(db, req, scored);
 
-        // Sprinkle random discovery picks through the page (skipped in chrono mode).
-        const finalEntries = chrono ? visible : interleaveExploration(visible, rng);
+        // Compose the page to the target AGE DISTRIBUTION (skipped in chrono mode).
+        // The list is already score-sorted; interleaveByAge splits it into age bands
+        // and emits them at DISCOVER_AGE_WEIGHTS proportions (quality still orders
+        // within each band). This REPLACES the old head+explore interleave, which
+        // couldn't hit an arbitrary target because its head slots were ~100% <30d.
+        // interleaveExploration is kept for the legacy path / when stratify is off.
+        const finalEntries = chrono
+            ? visible
+            : (DISCOVER_AGE_STRATIFY
+                ? interleaveByAge(visible, DISCOVER_AGE_WEIGHTS)
+                : interleaveExploration(visible, rng, { weightOf: (e) => e.discover_score }));
 
         const total = finalEntries.length;
         const pageEntries = finalEntries.slice(skip, skip + limit);
@@ -293,11 +304,11 @@ router.get('/related/:author/:permlink', async (req, res) => {
         if (author) {
             const [recentEmbed, recentLegacy] = await Promise.all([
                 db.collection('embed-video').find(
-                    { ...feedAgeMatch('createdAt'), ...unavailableMatch(), owner: author, status: 'published', short: false, listed_on_3speak: true, hive_permlink: { $ne: null } },
+                    { ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(), owner: author, status: 'published', short: false, listed_on_3speak: true, hive_permlink: { $ne: null } },
                     { projection: { owner: 1, permlink: 1, hive_permlink: 1, createdAt: 1, isNsfwContent: 1 } }
                 ).sort({ createdAt: -1 }).limit(RELATED_CREATOR_POOL).toArray(),
                 db.collection('videos').find(
-                    { ...feedAgeMatch('created'), ...unavailableMatch(), owner: author, status: 'published', publishFailed: { $ne: true } },
+                    { ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch(), owner: author, status: 'published', publishFailed: { $ne: true } },
                     { projection: { owner: 1, permlink: 1, created: 1, isNsfwContent: 1 } }
                 ).sort({ created: -1 }).limit(RELATED_CREATOR_POOL).toArray(),
             ]);
@@ -370,7 +381,7 @@ router.get('/recommended', async (req, res) => {
 
         // Query for recommended videos
         const query = {
-            ...feedAgeMatch('created'), ...unavailableMatch(),
+            ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
             recommended: true,
             status: 'published',
             owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
@@ -425,7 +436,7 @@ router.get('/promoted', async (req, res) => {
         const now = new Date();
 
         const embedVideosRaw = await embedVideoCollection.find({
-            ...feedAgeMatch('createdAt'), ...unavailableMatch(),
+            ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
             status: 'published',
             short: false,
             listed_on_3speak: true,
@@ -481,7 +492,7 @@ router.get('/new', async (req, res) => {
 
         // Query for new content (exclude first uploads and trending)
         const query = {
-            ...feedAgeMatch('created'), ...unavailableMatch(),
+            ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
             status: 'published',
             owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
             firstUpload: { $ne: true },
@@ -494,7 +505,7 @@ router.get('/new', async (req, res) => {
         const [legacyVideos, embedVideosRaw] = await Promise.all([
             videosCollection.find(query).sort({ created: -1 }).limit(limit + skip).toArray(),
             embedVideoCollection.find({
-                ...feedAgeMatch('createdAt'), ...unavailableMatch(),
+                ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
@@ -589,7 +600,7 @@ router.get('/trending', async (req, res) => {
 
         // Query for trending videos
         const query = {
-            ...feedAgeMatch('created'), ...unavailableMatch(),
+            ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
             trending: true,
             status: 'published',
             owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
@@ -653,6 +664,10 @@ router.get('/trendingSorted', async (req, res) => {
                         owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
                         publishFailed: { $ne: true },
                         created: { $gte: sevenDaysAgo },
+                        // hiddenFromFeed = author opt-out. unavailableMatch mirrors the
+                        // embed candidate query below (it was missing on the legacy side
+                        // — pre-existing gap). The 7-day window already covers feedAge.
+                        ...unavailableMatch(), ...hiddenFromFeedMatch(),
                         ...nsfwFilterTags(req)
                     }
                 },
@@ -672,7 +687,7 @@ router.get('/trendingSorted', async (req, res) => {
             ]).toArray(),
             // Fetch published embed videos (non-shorts) from last 7 days with Hive links
             embedVideoCollection.find({
-                ...feedAgeMatch('createdAt'), ...unavailableMatch(),
+                ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
@@ -882,7 +897,7 @@ router.get('/firstUploads', async (req, res) => {
 
         // Query for first time uploads (exclude trending)
         const query = {
-            ...feedAgeMatch('created'), ...unavailableMatch(),
+            ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
             firstUpload: true,
             status: 'published',
             owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
@@ -895,7 +910,7 @@ router.get('/firstUploads', async (req, res) => {
         const [legacyVideos, embedVideosRaw] = await Promise.all([
             videosCollection.find(query).sort({ created: -1 }).limit(limit + skip).toArray(),
             embedVideoCollection.find({
-                ...feedAgeMatch('createdAt'), ...unavailableMatch(),
+                ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
@@ -1082,7 +1097,7 @@ router.get('/community/:id/new', async (req, res) => {
 
         const [legacyVideos, embedVideosRaw] = await Promise.all([
             videosCollection.find({
-                ...feedAgeMatch('created'), ...unavailableMatch(),
+                ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
                 status: 'published',
                 owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
                 publishFailed: { $ne: true },
@@ -1090,7 +1105,7 @@ router.get('/community/:id/new', async (req, res) => {
                 ...nsfwFilterTags(req),
             }).sort({ created: -1 }).limit(limit + skip).toArray(),
             embedVideoCollection.find({
-                ...feedAgeMatch('createdAt'), ...unavailableMatch(),
+                ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,
@@ -1163,7 +1178,7 @@ router.get('/community/:id/trending', async (req, res) => {
 
         const [legacyVideos, embedVideosRaw] = await Promise.all([
             videosCollection.find({
-                ...feedAgeMatch('created'), ...unavailableMatch(),
+                ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
                 status: 'published',
                 owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
                 publishFailed: { $ne: true },
@@ -1172,7 +1187,7 @@ router.get('/community/:id/trending', async (req, res) => {
                 ...nsfwFilterTags(req),
             }).sort({ views: -1 }).limit(CANDIDATE_LIMIT).toArray(),
             embedVideoCollection.find({
-                ...feedAgeMatch('createdAt'), ...unavailableMatch(),
+                ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
                 status: 'published',
                 short: false,
                 listed_on_3speak: true,

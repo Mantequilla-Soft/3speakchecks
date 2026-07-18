@@ -3,6 +3,7 @@ const router = express.Router();
 const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
 const { unavailableMatch } = require('../utils/unavailable');
+const { hiddenFromFeedMatch } = require('../utils/hiddenFromFeed');
 const { nsfwFilterHiveTags } = require('../utils/filters');
 const { hiddenListSync } = require('../utils/hiddenCreators');
 const { HIDDEN_AUTHORS, SHORT_SORT_INTERVAL, REWARD_WEIGHT, RESHARE_WEIGHT, ENABLE_MONGO_WRITES, RELATED_TOPIC_MULT, SHORTS_WINDOW_DAYS, SHORTS_FOLLOW_WINDOW_DAYS } = require('../utils/config');
@@ -41,7 +42,7 @@ router.get('/shorts', async (req, res) => {
             embed_url: { $exists: true, $ne: null },
             createdAt: { $gte: sevenDaysAgo },
             owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
-            ...unavailableMatch(),
+            ...unavailableMatch(), ...hiddenFromFeedMatch(),
             ...nsfwFilterHiveTags(req)
         };
 
@@ -147,7 +148,7 @@ router.get('/shorts/stories', async (req, res) => {
             embed_url: { $exists: true, $ne: null },
             createdAt: { $gte: sevenDaysAgo },
             owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
-            ...unavailableMatch(),
+            ...unavailableMatch(), ...hiddenFromFeedMatch(),
             ...nsfwFilterHiveTags(req)
         };
 
@@ -491,6 +492,10 @@ router.get('/shortssorted', async (req, res) => {
                 embed_url: { $exists: true, $ne: null },
                 createdAt: { $gte: windowStart },
                 owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
+                // The main /shortssorted feed. hiddenFromFeed = the author's opt-out;
+                // unavailableMatch was missing here (the two simpler shorts endpoints
+                // above both carry it) — a pre-existing gap, added for consistency.
+                ...unavailableMatch(), ...hiddenFromFeedMatch(),
                 ...nsfwFilterHiveTags(req)
             };
 

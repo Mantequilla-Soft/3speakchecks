@@ -3,6 +3,7 @@ const router = express.Router();
 const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
 const { unavailableMatch } = require('../utils/unavailable');
+const { hiddenFromFeedMatch } = require('../utils/hiddenFromFeed');
 const { nsfwFilter, nsfwFilterTags, nsfwFilterHiveTags } = require('../utils/filters');
 const { hiddenListSync } = require('../utils/hiddenCreators');
 
@@ -216,7 +217,7 @@ router.get('/', async (req, res) => {
         if (wantType('video')) {
             searches.push(
                 db.collection('videos').find({
-                    ...feedAgeMatch('created'), ...unavailableMatch(),
+                    ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
                     ...textQuery,
                     status: 'published',
                     publishFailed: { $ne: true },
@@ -248,7 +249,7 @@ router.get('/', async (req, res) => {
         if (wantType('video')) {
             searches.push(
                 db.collection('embed-video').find({
-                    ...feedAgeMatch('createdAt'), ...unavailableMatch(),
+                    ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
                     ...textQuery,
                     status: 'published',
                     short: false,
@@ -282,7 +283,7 @@ router.get('/', async (req, res) => {
         if (wantType('short')) {
             searches.push(
                 db.collection('embed-video').find({
-                    ...feedAgeMatch('createdAt'), ...unavailableMatch(),
+                    ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
                     ...textQuery,
                     status: 'published',
                     short: true,
@@ -417,7 +418,7 @@ router.get('/', async (req, res) => {
 
                     const [vids, embeds] = await Promise.all([
                         db.collection('videos').find({
-                            ...feedAgeMatch('created'), ...unavailableMatch(),
+                            ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
                             $or: lookups,
                             status: 'published',
                             publishFailed: { $ne: true },
@@ -425,7 +426,7 @@ router.get('/', async (req, res) => {
                             ...nsfwFilterTags(req)
                         }, { projection: { owner: 1, author: 1, permlink: 1, title: 1, created: 1, created_at: 1, createdAt: 1, duration: 1, tags_v2: 1, thumbnail: 1, images: 1, views: 1 } }).limit(50).toArray(),
                         db.collection('embed-video').find({
-                            ...feedAgeMatch('createdAt'), ...unavailableMatch(),
+                            ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
                             $or: lookups.map(l => ({ owner: l.owner, permlink: l.permlink })),
                             status: 'published',
                             hive_author: { $nin: hiddenListSync() },

@@ -16,6 +16,7 @@ const express = require('express');
 const { hiddenListSync } = require('../utils/hiddenCreators');
 const router = express.Router();
 const { getDb } = require('../utils/db');
+const { expandTag } = require('../utils/interestTags');
 
 const COLLECTION = 'leaderboard';
 
@@ -221,7 +222,7 @@ router.get('/leaderboard/user/:username', async (req, res) => {
 });
 
 /**
- * Per-topic boards, from the separate `leaderboard-topics` collection: one doc
+ * Per-topic boards, from the separate `leaderboard-topics-v2` collection: one doc
  * per (window, topic, user) with just two metrics. Topics bucket by the video's
  * UPLOAD date (not the date it was tagged), so a back-catalogue video tagged
  * today counts toward the day it was actually published.
@@ -229,7 +230,11 @@ router.get('/leaderboard/user/:username', async (req, res) => {
  *   GET /leaderboard/topics                                → the topic list
  *   GET /leaderboard/topic?topic=&window=&metric=&limit=&page=  → one topic board
  */
-const TOPICS_COLLECTION = 'leaderboard-topics';
+// v2 topic boards: built from the v2 tag taxonomy (7 categories + 27 topics,
+// plus the viewer-only `vlog`) and covering the back catalogue, not just recent
+// uploads. `leaderboard-topic-daily-v2` is the rollup job's own per-day source
+// and is deliberately NOT read here — same arrangement as `leaderboard-daily`.
+const TOPICS_COLLECTION = 'leaderboard-topics-v2';
 // Videos and shorts are tracked separately; `uploads`/`watch_secs` are the
 // combined totals kept alongside them, so "top gaming creator overall" is still
 // one sort. Every one of the six has a (window, topic, metric) index.
@@ -276,17 +281,59 @@ router.get('/leaderboard/topic', async (req, res) => {
 
     const db = getDb();
     const col = db.collection(TOPICS_COLLECTION);
-    const filter = { window, topic, [metric]: { $gt: 0 }, user: { $nin: hiddenListSync() } };
 
-    // Served by the (window, topic, metric) index.
-    const [docs, total] = await Promise.all([
-      col.find(filter, { projection: topicProjection() })
-        .sort({ [metric]: -1, user: 1 })
-        .skip(skip)
-        .limit(limit)
-        .toArray(),
-      col.countDocuments(filter),
-    ]);
+    // A CATEGORY rolls up: its own board plus every topic beneath it (selecting
+    // "Tech & Science" must cover technology + education + science + programming,
+    // as well as videos tagged with the bare category). Plain topics keep the
+    // simple indexed path below.
+    const bucket = expandTag(topic);
+    const rolledUp = bucket.length > 1;
+
+    let docs;
+    let total;
+
+    if (rolledUp) {
+      // Per-topic rows must be summed per creator, so this can't use the plain
+      // (window, topic, metric) index path — group first, then rank.
+      //
+      // ⚠️ Approximate by construction: `leaderboard-topics-v2` is pre-aggregated
+      // per topic, so a video tagged with TWO topics of the same category (e.g.
+      // technology + education) contributes to both rows and is counted twice
+      // here. De-duplicating would need per-video tags, which this collection
+      // doesn't carry — hence `approx: true` in the response.
+      const sums = Object.fromEntries(TOPIC_METRICS.map((m) => [m, { $sum: `$${m}` }]));
+      const base = [
+        { $match: { window, topic: { $in: bucket }, user: { $nin: hiddenListSync() } } },
+        {
+          $group: {
+            _id: '$user',
+            ...sums,
+            from: { $min: '$from' },
+            to: { $max: '$to' },
+            updated_at: { $max: '$updated_at' },
+          },
+        },
+        { $match: { [metric]: { $gt: 0 } } },
+        { $sort: { [metric]: -1, _id: 1 } },
+      ];
+      const [rows, counted] = await Promise.all([
+        col.aggregate([...base, { $skip: skip }, { $limit: limit }]).toArray(),
+        col.aggregate([...base, { $count: 'n' }]).toArray(),
+      ]);
+      docs = rows.map((r) => ({ ...r, user: r._id }));
+      total = counted[0]?.n || 0;
+    } else {
+      const filter = { window, topic, [metric]: { $gt: 0 }, user: { $nin: hiddenListSync() } };
+      // Served by the (window, topic, metric) index.
+      [docs, total] = await Promise.all([
+        col.find(filter, { projection: topicProjection() })
+          .sort({ [metric]: -1, user: 1 })
+          .skip(skip)
+          .limit(limit)
+          .toArray(),
+        col.countDocuments(filter),
+      ]);
+    }
 
     // Same caveat as the main board: watch-time only exists from the tracking
     // start date, so any watch metric is partial on a window longer than 7d.
@@ -306,6 +353,9 @@ router.get('/leaderboard/topic', async (req, res) => {
       updated_at: first ? first.updated_at : null,
       watch_tracked_since: WATCH_TRACKED_SINCE,
       partial_watch_data: partial,
+      rolled_up: rolledUp,        // category board = itself + its topics
+      rolled_up_topics: rolledUp ? bucket : null,
+      approx: rolledUp,           // see the double-count caveat above
       entries: docs.map((d, i) => ({
         rank: skip + i + 1,
         user: d.user,
