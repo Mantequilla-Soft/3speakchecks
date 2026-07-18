@@ -6,6 +6,11 @@ const {
 } = require('../utils/retentionScore');
 const { curationBoost } = require('../utils/curation');
 const { applyFollowBoost } = require('../utils/followBoost');
+const { freshness, weightedOrder, interleaveExploration, interleaveByAge, ageBandIndex } = require('../utils/discoverScore');
+const { mulberry32 } = require('../utils/hive');
+
+const HOURS = { day: 24, month: 730.5, year: 8766 };
+const DAY = 86400000;
 
 // Discover's multiplier options (the amplified ones) — the harshest case.
 const DISCOVER = { weight: 1.5, min: 0.4, max: 2.5 };
@@ -160,6 +165,198 @@ describe('applyFollowBoost', () => {
     const vids = mk();
     expect(applyFollowBoost(vids, null, { mult: 2 })).toBe(0);
     expect(vids[0].trending_score).toBe(10);
+  });
+});
+
+describe('freshness — the two-stage age decay', () => {
+  test('recent ordering is untouched: today > 3 days > a week', () => {
+    const now = freshness(2);
+    const days3 = freshness(3 * HOURS.day);
+    const week = freshness(7 * HOURS.day);
+    expect(now).toBeGreaterThan(days3);
+    expect(days3).toBeGreaterThan(week);
+  });
+
+  // The question that prompted this: "do 5-month-old videos outrank 4-year-old
+  // ones?" Under the flat floor they did NOT — both scored exactly 0.43.
+  test('a 5-month-old video now outranks a 4-year-old one on age (~3x)', () => {
+    const mo5 = freshness(5 * HOURS.month);
+    const y4 = freshness(4 * HOURS.year);
+    expect(mo5).toBeGreaterThan(y4);
+    expect(mo5 / y4).toBeGreaterThan(2.5);
+  });
+
+  test('the tail keeps separating months and years until the 2-year floor', () => {
+    const mo5 = freshness(5 * HOURS.month);
+    const y1 = freshness(1 * HOURS.year);
+    const y2 = freshness(2 * HOURS.year);
+    const y4 = freshness(4 * HOURS.year);
+    expect(mo5).toBeGreaterThan(y1);
+    expect(y1).toBeGreaterThan(y2);
+    expect(y2).toBeCloseTo(y4, 5);        // past 2y it's flat — damped, not ranked further
+    expect(y4).toBeGreaterThan(0);         // ...and never zero: an old gem can still be lifted
+  });
+
+  test('an unknown date gets the ANCIENT floor, not the full one', () => {
+    expect(freshness(Infinity)).toBeCloseTo(freshness(10 * HOURS.year), 5);
+  });
+
+  test('AGE_HALFLIFE_Y=0 restores the flat-floor behaviour', () => {
+    expect(freshness(4 * HOURS.year, undefined, undefined, 0)).toBeCloseTo(0.43, 5);
+  });
+});
+
+describe('weighted exploration', () => {
+  const items = (n, weightFn) => Array.from({ length: n }, (_, i) => ({ id: i, w: weightFn(i) }));
+
+  test('deterministic for a given seed — pagination stays stable', () => {
+    const a = weightedOrder(items(50, (i) => 1 + (i % 5)), mulberry32(42), (x) => x.w);
+    const b = weightedOrder(items(50, (i) => 1 + (i % 5)), mulberry32(42), (x) => x.w);
+    expect(a.map((x) => x.id)).toEqual(b.map((x) => x.id));
+  });
+
+  test('every item appears exactly once', () => {
+    const out = weightedOrder(items(30, () => 1), mulberry32(7), (x) => x.w);
+    expect(new Set(out.map((x) => x.id)).size).toBe(30);
+  });
+
+  test('heavier items come out earlier on average', () => {
+    // half the items weigh 0.1 (the ">2y at the floor" case), half weigh 0.4
+    let heavyFirstHalf = 0;
+    for (let seed = 0; seed < 200; seed++) {
+      const out = weightedOrder(items(20, (i) => (i < 10 ? 0.4 : 0.1)), mulberry32(seed), (x) => x.w);
+      heavyFirstHalf += out.slice(0, 10).filter((x) => x.w === 0.4).length;
+    }
+    const share = heavyFirstHalf / (200 * 10);
+    expect(share).toBeGreaterThan(0.6);   // uniform would be 0.5
+  });
+
+  test('interleaveExploration keeps its exactly-once contract with a weightOf', () => {
+    const ranked = items(40, (i) => 40 - i);
+    const out = interleaveExploration(ranked, mulberry32(3), { weightOf: (x) => x.w });
+    expect(out).toHaveLength(40);
+    expect(new Set(out.map((x) => x.id)).size).toBe(40);
+    // ranked slots (not every 4th) still come from the head in order
+    expect(out[0].id).toBe(0);
+    expect(out[1].id).toBe(1);
+  });
+
+  test('with weightOf, the explore pool starts right below the head — the mid-band competes', () => {
+    // 200 items: ids 0..199 in score order. With headSize=48, explore slots must be
+    // able to surface items from just below the head (the "months old" band), which
+    // the old lower-half split quarantined away from the draw entirely.
+    const ranked = items(200, (i) => 200 - i);
+    const out = interleaveExploration(ranked, mulberry32(9), { weightOf: (x) => x.w, headSize: 48 });
+    const explorePicks = out.filter((_, i) => (i + 1) % 4 === 0).slice(0, 12); // page 1
+    // heavier (lower-id) tail items should dominate early explore picks
+    const fromMidBand = explorePicks.filter((x) => x.id >= 48 && x.id < 124).length;
+    expect(fromMidBand).toBeGreaterThan(6);
+  });
+
+  test('zero/undefined weights do not crash the draw', () => {
+    const out = weightedOrder([{ id: 1 }, { id: 2, w: 0 }], mulberry32(1), (x) => x.w);
+    expect(out).toHaveLength(2);
+  });
+});
+
+describe('age-stratified interleave — compose the page to a target distribution', () => {
+  const now = Date.now();
+  const WEIGHTS = [0.50, 0.20, 0.12, 0.08, 0.06, 0.04];
+  // Build a big score-sorted list with plenty in every band.
+  const daysForBand = [3, 20, 100, 280, 550, 1500];
+  const makeList = (perBand) => {
+    const out = [];
+    for (let b = 0; b < 6; b++) {
+      for (let k = 0; k < perBand; k++) {
+        out.push({ id: `${b}-${k}`, band: b, created: new Date(now - daysForBand[b] * DAY) });
+      }
+    }
+    // interleave the bands so the input isn't already grouped (proves the scheduler works)
+    return out.sort((a, b) => (a.id < b.id ? -1 : 1));
+  };
+
+  const bandMix = (page) => {
+    const c = [0, 0, 0, 0, 0, 0];
+    for (const v of page) c[ageBandIndex(v.created, now)]++;
+    return c.map((n) => n / page.length);
+  };
+
+  test('page 1 matches the target within a couple of percent', () => {
+    const out = interleaveByAge(makeList(200), WEIGHTS, now);
+    const mix = bandMix(out.slice(0, 48));
+    WEIGHTS.forEach((target, b) => expect(Math.abs(mix[b] - target)).toBeLessThan(0.06));
+  });
+
+  test('the mix holds on a DEEP page too (pagination stays consistent)', () => {
+    const out = interleaveByAge(makeList(200), WEIGHTS, now);
+    const mix = bandMix(out.slice(144, 192)); // page 4
+    WEIGHTS.forEach((target, b) => expect(Math.abs(mix[b] - target)).toBeLessThan(0.08));
+  });
+
+  test('every item appears exactly once', () => {
+    const list = makeList(50);
+    const out = interleaveByAge(list, WEIGHTS, now);
+    expect(out).toHaveLength(list.length);
+    expect(new Set(out.map((v) => v.id)).size).toBe(list.length);
+  });
+
+  test('within a band, score order (input order) is preserved — quality picks which', () => {
+    const list = [
+      { id: 'fresh-best', created: new Date(now - 1 * DAY) },
+      { id: 'fresh-worst', created: new Date(now - 2 * DAY) },
+      { id: 'old-best', created: new Date(now - 900 * DAY) },
+      { id: 'old-worst', created: new Date(now - 901 * DAY) },
+    ];
+    const out = interleaveByAge(list, WEIGHTS, now);
+    expect(out.indexOf(list[0])).toBeLessThan(out.indexOf(list[1])); // fresh-best before fresh-worst
+    expect(out.indexOf(list[2])).toBeLessThan(out.indexOf(list[3])); // old-best before old-worst
+  });
+
+  test('a thin/empty band backfills from the others (no gaps, still exactly-once)', () => {
+    // no >2y videos at all
+    const list = [];
+    for (const b of [0, 1, 2, 3, 4]) for (let k = 0; k < 40; k++) {
+      list.push({ id: `${b}-${k}`, created: new Date(now - daysForBand[b] * DAY) });
+    }
+    const out = interleaveByAge(list, WEIGHTS, now);
+    expect(out).toHaveLength(list.length);
+    // the >2y quota flows to the most-behind weighted band (the 50% one), so the
+    // page skews fresher rather than leaving holes
+    const mix = bandMix(out.slice(0, 48));
+    expect(mix[5]).toBe(0);
+    expect(mix[0]).toBeGreaterThan(0.5);
+  });
+
+  test('a zero-weight band still appears (exactly-once), just served last', () => {
+    const w = [1, 0, 0, 0, 0, 0]; // only fresh has weight
+    const list = [
+      { id: 'a', created: new Date(now - 1 * DAY) },
+      { id: 'b', created: new Date(now - 1500 * DAY) },
+    ];
+    const out = interleaveByAge(list, w, now);
+    expect(out.map((v) => v.id)).toEqual(['a', 'b']);
+  });
+
+  test('degenerate inputs pass through untouched', () => {
+    expect(interleaveByAge([], WEIGHTS)).toEqual([]);
+    const one = [{ id: 'x', created: new Date() }];
+    expect(interleaveByAge(one, WEIGHTS)).toEqual(one);
+  });
+});
+
+describe('ageBandIndex', () => {
+  const now = Date.now();
+  test('boundaries land in the expected band', () => {
+    expect(ageBandIndex(new Date(now - 1 * DAY), now)).toBe(0);
+    expect(ageBandIndex(new Date(now - 20 * DAY), now)).toBe(1);
+    expect(ageBandIndex(new Date(now - 100 * DAY), now)).toBe(2);
+    expect(ageBandIndex(new Date(now - 300 * DAY), now)).toBe(3);
+    expect(ageBandIndex(new Date(now - 600 * DAY), now)).toBe(4);
+    expect(ageBandIndex(new Date(now - 2000 * DAY), now)).toBe(5);
+  });
+  test('an unknown/invalid date is treated as oldest', () => {
+    expect(ageBandIndex(null, now)).toBe(5);
+    expect(ageBandIndex(undefined, now)).toBe(5);
   });
 });
 

@@ -102,7 +102,7 @@ async function run() {
     const [recentEmbed, recentLegacy, randomTagged, retentionActive, topicSampled] = await Promise.all([
       db.collection('embed-video').find({
         status: 'published', short: false, listed_on_3speak: true,
-        unavailable: { $ne: true },
+        unavailable: { $ne: true }, hiddenFromFeed: { $ne: true },
         hive_author: { $nin: [null, ...HIDDEN_AUTHORS] },
         owner: { $nin: HIDDEN_AUTHORS },
         hive_permlink: { $ne: null },
@@ -112,7 +112,7 @@ async function run() {
 
       db.collection('videos').find({
         status: 'published', publishFailed: { $ne: true },
-        unavailable: { $ne: true },
+        unavailable: { $ne: true }, hiddenFromFeed: { $ne: true },
         owner: { $nin: HIDDEN_AUTHORS },
         created: { $gte: recentCutoff },
       }, { projection: { owner: 1, permlink: 1 } })
@@ -162,12 +162,12 @@ async function run() {
     // embed-video is small enough to hold in memory keyed by owner/permlink.
     const embedAll = await db.collection('embed-video').find({
       status: 'published', short: false, listed_on_3speak: true,
-      unavailable: { $ne: true },
+      unavailable: { $ne: true }, hiddenFromFeed: { $ne: true },
       hive_author: { $ne: null }, hive_permlink: { $ne: null },
     }, {
       projection: {
         owner: 1, permlink: 1, hive_author: 1, hive_permlink: 1, hive_tags: 1,
-        createdAt: 1, isNsfwContent: 1, banned: 1, unavailable: 1, duration: 1,
+        createdAt: 1, isNsfwContent: 1, banned: 1, unavailable: 1, hiddenFromFeed: 1, duration: 1,
       },
     }).toArray();
     const embedByKey = new Map(embedAll.map((d) => [`${d.owner}/${d.permlink}`, d]));
@@ -179,7 +179,7 @@ async function run() {
     }
     const legacyDocs = await findChunked(db.collection('videos'), legacyConds, {
       owner: 1, permlink: 1, created: 1, tags: 1, tags_v2: 1,
-      isNsfwContent: 1, banned: 1, unavailable: 1, duration: 1, status: 1, publishFailed: 1,
+      isNsfwContent: 1, banned: 1, unavailable: 1, hiddenFromFeed: 1, duration: 1, status: 1, publishFailed: 1,
     });
     const legacyByKey = new Map(
       legacyDocs
@@ -235,6 +235,11 @@ async function run() {
       if ((ev || lv).banned === true) { skipped += 1; continue; }
       // Media confirmed gone (404 on every gateway) — never pool a dead video.
       if ((ev || lv).unavailable === true) { skipped += 1; continue; }
+      // Author hid it from feeds — it stays on their profile, never in the pool. The
+      // random/retention/topic sources come from subtitles-tags / view-durations,
+      // which don't carry the flag, so this catches those (the recent source already
+      // filtered it in its query above).
+      if ((ev || lv).hiddenFromFeed === true) { skipped += 1; continue; }
       // An embed's hive_author can differ from its owner — check both.
       if (isHiddenAuthor(k.owner) || (ev && isHiddenAuthor(ev.hive_author))) { skipped += 1; continue; }
       // Moderation-hidden creators (contentcreators.hidden) — same both-keys check.

@@ -16,25 +16,63 @@
 const {
   DISCOVER_HALFLIFE_H, DISCOVER_FRESH_FLOOR, DISCOVER_NEW_GRACE_H,
   DISCOVER_NEW_BOOST, DISCOVER_JITTER, DISCOVER_EXPLORE_EVERY,
+  DISCOVER_AGE_HALFLIFE_Y, DISCOVER_AGE_FLOOR,
 } = require('./config');
 
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 
-/** Hours since `created`. Infinity for a missing/invalid date (→ floor score). */
+// Age-band upper bounds in DAYS, aligned 1:1 with DISCOVER_AGE_WEIGHTS.
+//   [0]<7d  [1]7–30d  [2]30d–6mo  [3]6mo–1y  [4]1y–2y  [5]>2y
+const AGE_BAND_DAYS = [7, 30, 182.5, 365, 730, Infinity];
+const DAY_MS = 86400000;
+
+/** Which age band a `created` date falls in. Unknown/invalid date → the oldest band. */
+function ageBandIndex(created, now = Date.now()) {
+  const t = created instanceof Date ? created.getTime() : new Date(created).getTime();
+  const days = Number.isFinite(t) ? (now - t) / DAY_MS : Infinity;
+  for (let i = 0; i < AGE_BAND_DAYS.length; i += 1) if (days < AGE_BAND_DAYS[i]) return i;
+  return AGE_BAND_DAYS.length - 1;
+}
+
+/** Hours since `created`. Infinity for a missing/invalid date (→ the ancient floor). */
 function ageHours(created, now = Date.now()) {
   const t = created instanceof Date ? created.getTime() : new Date(created).getTime();
   if (!Number.isFinite(t)) return Infinity;
   return Math.max(0, (now - t) / 3600000);
 }
 
+const HOURS_PER_YEAR = 24 * 365.25;
+
 /**
- * Half-life decay on age, floored so a great older video never scores exactly 0
- * (it can still be lifted back up by retention + interest).
- *   freshness = max(0.5 ^ (ageHours / HALFLIFE), FLOOR)
+ * Two-stage age decay.
+ *
+ * Stage 1 — the fast half-life (hours). This is what makes this week's uploads
+ * beat last week's; it bottoms out at the FLOOR after ~3.7 days.
+ *
+ * Stage 2 — the long AGE TAIL (years) on the floor itself. The flat floor used to
+ * make everything past ~3.7 days age-equal: a 5-month-old video and a 4-year-old
+ * one scored identically, so the archive competed head-on with recent work and
+ * >2y videos saturated the feed. The floor now keeps decaying, slowly:
+ *
+ *   freshness = max( 0.5^(hrs / HALFLIFE_H),
+ *                    FLOOR · max(0.5^(years / AGE_HALFLIFE_Y), AGE_FLOOR) )
+ *
+ * Defaults (1y half-life, 0.25 tail floor) bottom out exactly at the 2-year mark:
+ * 4 days → 0.43, 5 months → 0.32, 1 year → 0.22, ≥2 years → 0.107 flat. Ancient is
+ * damped, not dead — retention (×2.5) and curation (×2.5) can still resurface a
+ * genuinely great old video, which is the point of a discovery feed.
+ *
+ * A missing/invalid date now gets the ANCIENT floor, not the full one — unknown
+ * age must not outrank known-old.
  */
-function freshness(hrs, halfLifeH = DISCOVER_HALFLIFE_H, floor = DISCOVER_FRESH_FLOOR) {
-  if (!Number.isFinite(hrs)) return floor;
-  return Math.max(floor, Math.pow(0.5, hrs / (halfLifeH || 1)));
+function freshness(hrs, halfLifeH = DISCOVER_HALFLIFE_H, floor = DISCOVER_FRESH_FLOOR,
+                   ageHalfLifeY = DISCOVER_AGE_HALFLIFE_Y, ageFloor = DISCOVER_AGE_FLOOR) {
+  const tailAt = (years) => (ageHalfLifeY > 0
+    ? Math.max(Math.pow(0.5, years / ageHalfLifeY), ageFloor)
+    : 1);
+  if (!Number.isFinite(hrs)) return floor * tailAt(Infinity);
+  const fast = Math.pow(0.5, hrs / (halfLifeH || 1));
+  return Math.max(fast, floor * tailAt(hrs / HOURS_PER_YEAR));
 }
 
 /**
@@ -71,17 +109,64 @@ function shuffle(arr, rng) {
 }
 
 /**
- * Sprinkle exploration picks through the ranking: every `every`-th slot is taken
- * from a seeded shuffle of the LOWER half of the ranked list, the rest come from
- * the top half in score order. Every item appears exactly once (no dupes, no
- * drops), so `total` and pagination stay correct.
+ * Weighted order without replacement (Efraimidis–Spirakis): each item draws the
+ * key u^(1/w) from the seeded RNG and the keys are sorted descending. An item's
+ * chance of coming out early is proportional to its weight, every item still
+ * appears exactly once, and the result is deterministic for a given seed.
  */
-function interleaveExploration(ranked, rng, every = DISCOVER_EXPLORE_EVERY) {
+function weightedOrder(items, rng, weightOf) {
+  return items
+    .map((it) => {
+      const w = Math.max(Number(weightOf(it)) || 0, 1e-9);
+      return { it, key: Math.pow(rng(), 1 / w) };
+    })
+    .sort((a, b) => b.key - a.key)
+    .map((x) => x.it);
+}
+
+/**
+ * Sprinkle exploration picks through the ranking: every `every`-th slot is taken
+ * from the exploration tail, the rest come from the head in score order. Every
+ * item appears exactly once (no dupes, no drops), so `total` and pagination stay
+ * correct, and everything is deterministic for a given seed.
+ *
+ * THE PARTITION IS THE WHOLE GAME here, and it has been wrong twice:
+ *
+ *   - Uniform draw from the lower HALF (original): the lower half is mostly the
+ *     all-time random pool sample, so 58% of the exploration slots on a live page
+ *     were >2y-old videos — the ranked slots were 100% fresh, so effectively every
+ *     ancient video a user saw arrived through this one door (~15-23% of the page).
+ *   - Score-WEIGHTED draw from the lower half: no better (measured 83% of explore
+ *     slots >2y). Once the freshness age tail cleanly separated ages, every fresh
+ *     and mid-age video moved into the top half — the lower half became PURELY
+ *     ancient, and no weighting can fix composition. The draw pool must contain
+ *     the mid-band for weights to matter at all.
+ *
+ * So with `weightOf`: the head is only the top `headSize` (≈ one page) in strict
+ * score order, and EVERYTHING below it competes for the explore slots, drawn by
+ * score^`pow` (weightedOrder). The weight already carries freshness (age tail),
+ * retention and curation, so the odds per slot are: weak-fresh and months-old
+ * first, years-old rarely, ancient rarest — but never zero, which is the point of
+ * a discovery feed. Simulated on the live pool (5 seeds): >2y went from ~23% of
+ * the page to ~5%, and the previously-invisible 30d–2y band to ~10%.
+ *
+ * Without `weightOf` the legacy behaviour (uniform draw from the lower half) is
+ * preserved for any caller that wants a plain shuffle.
+ */
+function interleaveExploration(ranked, rng, opts = {}) {
+  const every = opts.every ?? DISCOVER_EXPLORE_EVERY;
+  const weightOf = opts.weightOf ?? null;
+  const pow = opts.pow ?? 1;              // legacy fallback path — defaults inline now
   if (!Array.isArray(ranked) || ranked.length < 4 || !(every >= 2)) return ranked;
 
-  const cut = Math.ceil(ranked.length / 2);
+  const cut = weightOf
+    ? Math.min(opts.headSize ?? 48, Math.ceil(ranked.length / 2))
+    : Math.ceil(ranked.length / 2);
   const head = ranked.slice(0, cut);          // strong scores, kept in order
-  const tail = shuffle(ranked.slice(cut), rng); // the discovery pool
+  const rest = ranked.slice(cut);             // the exploration pool
+  const tail = weightOf
+    ? weightedOrder(rest, rng, (it) => Math.pow(Math.max(Number(weightOf(it)) || 0, 1e-9), pow))
+    : shuffle(rest, rng);
 
   const out = [];
   let hi = 0;
@@ -95,6 +180,66 @@ function interleaveExploration(ranked, rng, every = DISCOVER_EXPLORE_EVERY) {
   return out;
 }
 
+/**
+ * Age-stratified interleave — compose the page to a TARGET age distribution.
+ *
+ * `ranked` is already in score order. We split it into the AGE_BAND_DAYS bands and
+ * emit ONE ordering whose age composition matches `weights` at every depth, using a
+ * virtual-time (WFQ / stride) scheduler:
+ *
+ *   vt(band) = (emitted[band] + 0.5) / weight[band]
+ *
+ * At each output slot, among bands that still have items we take the one with the
+ * smallest virtual time — i.e. the band that is furthest behind its quota. This
+ * makes page 1 AND page 5 carry the same mix (so pagination is consistent), and
+ * because we only ever advance within a band's own score-sorted list, quality still
+ * decides WHICH videos of each age appear — the weights only decide HOW MANY.
+ *
+ * Robust by construction:
+ *  - A band with too few videos simply runs dry; its slots flow to the others
+ *    (highest-weight-first), so a thin <7d band backfills from 7–30d rather than
+ *    leaving gaps.
+ *  - A band with items but weight 0 gets a huge vt, so it is served only after every
+ *    weighted band is exhausted — it still appears (exactly-once holds), just last.
+ *  - Every item is emitted exactly once → `total` and pagination stay correct.
+ *
+ * Deterministic: no RNG here. The per-load seed already lives in each item's
+ * discover_score (via jitter), so the within-band order breathes per seed and the
+ * scheduler is a pure function of that order.
+ */
+function interleaveByAge(ranked, weights, now = Date.now()) {
+  if (!Array.isArray(ranked) || ranked.length < 2 || !Array.isArray(weights) || !weights.length) {
+    return ranked;
+  }
+  const nb = weights.length;
+  const w = weights.map((x) => Math.max(Number(x) || 0, 0));
+  const bands = Array.from({ length: nb }, () => []);
+  for (const v of ranked) {
+    // Clamp the band index into the weight vector in case someone configures fewer
+    // weights than AGE_BAND_DAYS has bands — extra-old videos fall into the last one.
+    bands[Math.min(ageBandIndex(v.created, now), nb - 1)].push(v);
+  }
+
+  const emitted = new Array(nb).fill(0);
+  const pos = new Array(nb).fill(0);
+  const vt = (i) => (emitted[i] + 0.5) / (w[i] || 1e-9);
+
+  const out = [];
+  while (out.length < ranked.length) {
+    let pick = -1;
+    for (let i = 0; i < nb; i += 1) {
+      if (pos[i] >= bands[i].length) continue;       // band drained
+      if (pick < 0 || vt(i) < vt(pick)) pick = i;
+    }
+    if (pick < 0) break;                             // all bands drained
+    out.push(bands[pick][pos[pick]]);
+    pos[pick] += 1;
+    emitted[pick] += 1;
+  }
+  return out;
+}
+
 module.exports = {
-  ageHours, freshness, newBoost, jitter, shuffle, interleaveExploration, clamp,
+  ageHours, freshness, newBoost, jitter, shuffle, weightedOrder,
+  interleaveExploration, interleaveByAge, ageBandIndex, AGE_BAND_DAYS, clamp,
 };

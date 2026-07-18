@@ -10,6 +10,7 @@
 const { DISCOVER_POOL_COLLECTION, DISCOVER_POOL_CACHE_MS } = require('./config');
 const { feedAgeMatch } = require('./feedAge');
 const { unavailableMatch } = require('./unavailable');
+const { hiddenFromFeedMatch, isHiddenFromFeed } = require('./hiddenFromFeed');
 const { filterHiddenDocs } = require('./hiddenCreators');
 
 let cache = { at: 0, docs: [] };
@@ -23,7 +24,7 @@ async function getPool(db, { force = false } = {}) {
       // no longer resolve). Filtered on read, so changing FEED_MAX_AGE_YEARS takes
       // effect on the next pool refresh without rebuilding the pool.
       docs = await db.collection(DISCOVER_POOL_COLLECTION)
-        .find({ ...feedAgeMatch('created'), ...unavailableMatch() }, {
+        .find({ ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch() }, {
           projection: {
             owner: 1, author: 1, permlink: 1, assetPermlink: 1, source: 1, src: 1,
             created: 1, tags: 1, winnerTag: 1, nsfw: 1, relQ: 1,
@@ -66,6 +67,10 @@ async function hydrate(db, entries) {
     if (e.source === 'embed') {
       const ev = embedByKey.get(`${e.owner}/${e.assetPermlink}`);
       if (!ev) continue; // vanished since the pool was built
+      // The FRESH doc is authoritative: a video hidden AFTER the last hourly pool
+      // rebuild is dropped here immediately, not up to an hour later. (The worker
+      // also excludes it at build time; this closes the staleness window.)
+      if (isHiddenFromFeed(ev)) continue;
       out.push({
         owner: ev.owner,
         author: ev.hive_author,
@@ -93,6 +98,7 @@ async function hydrate(db, entries) {
     } else {
       const lv = legacyByKey.get(`${e.owner}/${e.permlink}`);
       if (!lv) continue;
+      if (isHiddenFromFeed(lv)) continue;   // fresh doc is authoritative (see above)
       out.push({ ...lv, _pool: e });
     }
   }

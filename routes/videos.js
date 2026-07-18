@@ -3,6 +3,7 @@ const router = express.Router();
 const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
 const { confirmAndBan, unavailableCount, unavailableMatch } = require('../utils/unavailable');
+const { hiddenFromFeedMatch } = require('../utils/hiddenFromFeed');
 const { nsfwFilter, nsfwFilterTags, nsfwFilterHiveTags, BANNED_FILTER } = require('../utils/filters');
 const { hiddenListSync, isHiddenSync } = require('../utils/hiddenCreators');
 const { getFollowingList, hiveRpcBatch } = require('../utils/hive');
@@ -102,8 +103,8 @@ router.get('/videos/tag/:tag', async (req, res) => {
             return ranked;
         };
         if (tag.toLowerCase() === 'mantecurated') {
-            const legacyQuery = { mantecurated: true, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
-            const embedQuery = { mantecurated: true, status: 'published', ...nsfwFilterHiveTags(req), ...feedAgeMatch('createdAt'), ...unavailableMatch() };
+            const legacyQuery = { mantecurated: true, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch() };
+            const embedQuery = { mantecurated: true, status: 'published', ...nsfwFilterHiveTags(req), ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch() };
             if (sinceDate) {
                 legacyQuery.created = { $gte: sinceDate };
                 embedQuery.createdAt = { $gte: sinceDate };
@@ -189,8 +190,8 @@ router.get('/videos/tag/:tag', async (req, res) => {
 
             if (type === 'videos') {
                 // Videos only: use DB-level pagination on legacy, small embed set
-                const legacyQuery = { tags_v2: tagLower, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
-                const embedQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...feedAgeMatch('createdAt'), ...unavailableMatch() };
+                const legacyQuery = { tags_v2: tagLower, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch() };
+                const embedQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch() };
                 if (sinceDate) { legacyQuery.created = { $gte: sinceDate }; embedQuery.createdAt = { $gte: sinceDate }; }
 
                 const [legacyCount, embedDocs] = await Promise.all([
@@ -215,8 +216,8 @@ router.get('/videos/tag/:tag', async (req, res) => {
                 // Shorts only: DB-level pagination on embed-video
                 const shortsNsfw = nsfwFilterHiveTags(req);
                 const query = isSnapsTag
-                    ? { short: true, status: 'published', hive_author: { $nin: hiddenListSync() }, ...shortsNsfw }
-                    : { short: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower) };
+                    ? { short: true, status: 'published', hive_author: { $nin: hiddenListSync() }, ...unavailableMatch(), ...hiddenFromFeedMatch(), ...shortsNsfw }
+                    : { short: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...unavailableMatch(), ...hiddenFromFeedMatch() };
                 if (sinceDate) query.createdAt = { $gte: sinceDate };
 
                 total = await embedCollection.countDocuments(query);
@@ -225,8 +226,8 @@ router.get('/videos/tag/:tag', async (req, res) => {
 
             } else {
                 // No type specified — default to videos behaviour
-                const legacyQuery = { tags_v2: tagLower, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
-                const embedQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...feedAgeMatch('createdAt'), ...unavailableMatch() };
+                const legacyQuery = { tags_v2: tagLower, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch() };
+                const embedQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch() };
                 if (sinceDate) { legacyQuery.created = { $gte: sinceDate }; embedQuery.createdAt = { $gte: sinceDate }; }
 
                 const [legacyCount, embedDocs] = await Promise.all([
@@ -282,8 +283,8 @@ router.get('/videos/tag/:tag/counts', async (req, res) => {
         const embedCollection = db.collection('embed-video');
 
         if (tagLower === 'mantecurated') {
-            const legacyQuery = { mantecurated: true, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
-            const embedBaseQuery = { mantecurated: true, status: 'published', ...nsfwFilterHiveTags(req) };
+            const legacyQuery = { mantecurated: true, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch() };
+            const embedBaseQuery = { mantecurated: true, status: 'published', ...unavailableMatch(), ...hiddenFromFeedMatch(), ...nsfwFilterHiveTags(req) };
             if (sinceDate) {
                 legacyQuery.created = { $gte: sinceDate };
                 embedBaseQuery.createdAt = { $gte: sinceDate };
@@ -305,11 +306,11 @@ router.get('/videos/tag/:tag/counts', async (req, res) => {
         const embedTagMatch = buildEmbedTagMatch(tagLower, useLower);
         const isSnapsTag = tagLower === 'snaps';
 
-        const legacyQuery = { tags_v2: tagLower, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch() };
-        const embedVideoQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower) };
+        const legacyQuery = { tags_v2: tagLower, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch() };
+        const embedVideoQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...unavailableMatch(), ...hiddenFromFeedMatch() };
         const shortsQuery = isSnapsTag
-            ? { short: true, status: 'published', ...nsfwFilterHiveTags(req) }
-            : { short: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower) };
+            ? { short: true, status: 'published', ...unavailableMatch(), ...hiddenFromFeedMatch(), ...nsfwFilterHiveTags(req) }
+            : { short: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...unavailableMatch(), ...hiddenFromFeedMatch() };
         if (sinceDate) {
             legacyQuery.created = { $gte: sinceDate };
             embedVideoQuery.createdAt = { $gte: sinceDate };
@@ -362,7 +363,7 @@ router.get('/feed/:username', async (req, res) => {
         // `short: false` so shorts are excluded.
         let legacyQuery, embedQuery, feedType;
         if (followingList && followingList.length > 0) {
-            legacyQuery = { owner: { $in: followingList, $nin: hiddenListSync() }, status: 'published', ...nsfwFilterTags(req), ...feedAgeMatch('created'), ...unavailableMatch() };
+            legacyQuery = { owner: { $in: followingList, $nin: hiddenListSync() }, status: 'published', ...nsfwFilterTags(req), ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch() };
             embedQuery = {
                 hive_author: { $in: followingList, $nin: hiddenListSync() },
                 status: 'published',
@@ -370,13 +371,13 @@ router.get('/feed/:username', async (req, res) => {
                 listed_on_3speak: true,
                 hive_permlink: { $ne: null },
                 ...nsfwFilterHiveTags(req),
-                ...feedAgeMatch('createdAt'), ...unavailableMatch()
+                ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch()
             };
             feedType = 'personalized';
             console.log(`Fetching feed for ${username}: ${followingList.length} following`);
         } else {
             // Fallback: all published top-level content (no following list)
-            legacyQuery = { owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilterTags(req), ...feedAgeMatch('created'), ...unavailableMatch() };
+            legacyQuery = { owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilterTags(req), ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch() };
             embedQuery = {
                 status: 'published',
                 short: false,
@@ -384,7 +385,7 @@ router.get('/feed/:username', async (req, res) => {
                 hive_author: { $ne: null, $nin: hiddenListSync() },
                 hive_permlink: { $ne: null },
                 ...nsfwFilterHiveTags(req),
-                ...feedAgeMatch('createdAt'), ...unavailableMatch()
+                ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch()
             };
             feedType = 'all';
             console.log(`Feed fallback for ${username}: showing all videos (no following list)`);
@@ -810,6 +811,42 @@ router.put('/video/thumbnail', validateApiKey, async (req, res) => {
             error: 'Internal server error',
             message: 'Failed to update thumbnail'
         });
+    }
+});
+
+// Mark an embed-video as an OpenPods stream recording. Called right after the
+// studio uploads the VOD for a finished session (the asset permlink IS the room
+// id, so this mostly stamps provenance). Lets the profile's Streams tab select
+// these without guessing from filenames.
+router.put('/video/openpod', validateApiKey, async (req, res) => {
+    const db = getDb();
+    if (!ENABLE_MONGO_WRITES) {
+        return res.status(503).json({ success: false, error: 'Writes disabled', message: 'MongoDB writes are currently disabled' });
+    }
+    try {
+        const { owner, permlink, room } = req.body;
+        if (!owner || !permlink) {
+            return res.status(400).json({ success: false, error: 'Invalid request', message: 'owner and permlink are required' });
+        }
+        const embedVideoCollection = db.collection('embed-video');
+        const embedDoc = await embedVideoCollection.findOne({
+            $or: [{ owner, permlink }, { hive_author: owner, hive_permlink: permlink }],
+        });
+        if (!embedDoc) {
+            return res.status(404).json({ success: false, error: 'Video not found', message: `No embed video for ${owner}/${permlink}` });
+        }
+        await embedVideoCollection.updateOne(
+            { _id: embedDoc._id },
+            { $set: { is_openpod_stream: true, openpod_room: room || permlink, openpod_marked_at: new Date() } },
+        );
+        return res.json({
+            success: true,
+            message: 'Marked as an OpenPods stream recording',
+            data: { owner, permlink, room: room || permlink },
+        });
+    } catch (err) {
+        console.error('PUT /video/openpod error:', err.message);
+        return res.status(500).json({ success: false, error: 'internal' });
     }
 });
 

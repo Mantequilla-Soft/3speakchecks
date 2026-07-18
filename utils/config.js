@@ -150,6 +150,18 @@ module.exports = {
     // and a 4-year-old are equal on age and separated only by quality/interest.
     DISCOVER_HALFLIFE_H: parseFloat(process.env.DISCOVER_HALFLIFE_H ?? '72'),        // freshness half-life (hours)
     DISCOVER_FRESH_FLOOR: parseFloat(process.env.DISCOVER_FRESH_FLOOR ?? '0.43'),    // old-but-great stays competitive
+    // The long AGE TAIL below the fast floor. The fast decay bottoms out at ~3.7
+    // days, which used to make a 5-month-old and a 4-year-old video IDENTICAL on
+    // age — the only thing age ever did past that was the 6-year hard cutoff, and
+    // >2y videos were all over the feed. The floor now decays slowly with age:
+    //   freshness = max( 0.5^(hrs/HALFLIFE), FLOOR · max(0.5^(years/AGE_HALFLIFE_Y), AGE_FLOOR) )
+    // At the defaults (1y half-life, 0.25 floor) the tail bottoms out exactly at
+    // the 2-year mark: 5mo → 0.32, 1y → 0.22, ≥2y → 0.107 flat. A 5-month-old
+    // outranks a 4-year-old ~3× on age; ancient still isn't zero, so a genuinely
+    // great old video can be lifted back up by retention + curation.
+    // AGE_HALFLIFE_Y=0 disables the tail (old flat-floor behaviour).
+    DISCOVER_AGE_HALFLIFE_Y: parseFloat(process.env.DISCOVER_AGE_HALFLIFE_Y ?? '1'),
+    DISCOVER_AGE_FLOOR: parseFloat(process.env.DISCOVER_AGE_FLOOR ?? '0.25'),
     DISCOVER_NEW_GRACE_H: parseFloat(process.env.DISCOVER_NEW_GRACE_H ?? '12'),      // "really fresh" window
     DISCOVER_NEW_BOOST: parseFloat(process.env.DISCOVER_NEW_BOOST ?? '1.15'),        // modest lift, tapering to 1.0
     DISCOVER_INTEREST_MULTIPLIER: parseFloat(process.env.DISCOVER_INTEREST_MULTIPLIER ?? '2.5'), // > global 2.0
@@ -160,8 +172,26 @@ module.exports = {
     DISCOVER_RETENTION_WEIGHT: parseFloat(process.env.DISCOVER_RETENTION_WEIGHT ?? '1.5'),
     DISCOVER_RETENTION_MIN_MULT: parseFloat(process.env.DISCOVER_RETENTION_MIN_MULT ?? '0.4'),
     DISCOVER_RETENTION_MAX_MULT: parseFloat(process.env.DISCOVER_RETENTION_MAX_MULT ?? '2.5'),
-    DISCOVER_JITTER: parseFloat(process.env.DISCOVER_JITTER ?? '0.15'),              // ±15% seeded per-video shuffle
-    DISCOVER_EXPLORE_EVERY: parseInt(process.env.DISCOVER_EXPLORE_EVERY) || 4,       // every Nth slot = random pick (25%)
+    DISCOVER_JITTER: parseFloat(process.env.DISCOVER_JITTER ?? '0.15'),              // ±15% seeded per-video jitter
+    DISCOVER_EXPLORE_EVERY: parseInt(process.env.DISCOVER_EXPLORE_EVERY) || 4,       // every Nth slot = exploration pick (25%) — legacy interleave only
+
+    // ── Target AGE DISTRIBUTION of the discover page (the primary age control) ──
+    // The page is COMPOSED to these proportions directly (age-stratified interleave,
+    // utils/discoverScore.js), rather than hoping a freshness curve + an explore
+    // quota emergently produce them. That approach structurally COULDN'T hit an
+    // arbitrary target: the head slots came straight off the top of the score order,
+    // which is ~100% <30d, so >70% of the page was always <30d no matter the tuning.
+    //
+    // Bands are fixed at 7d / 30d / 6mo / 1y / 2y (see AGE_BAND_DAYS); the weights
+    // are their share of every page and need not sum to 1 (they're normalized).
+    // Within a band, videos are ordered by discover_score — quality still picks
+    // WHICH videos surface, the weights only set HOW MANY of each age. A band with
+    // too few videos hands its slots to the others (graceful backfill). The mix
+    // holds at EVERY page depth, so pagination stays consistent.
+    DISCOVER_AGE_STRATIFY: parseBool(process.env.DISCOVER_AGE_STRATIFY, true),
+    //                         <7d   7-30d  30d-6mo 6mo-1y  1y-2y  >2y
+    DISCOVER_AGE_WEIGHTS: (process.env.DISCOVER_AGE_WEIGHTS || '0.50, 0.20, 0.12, 0.08, 0.06, 0.04')
+      .split(',').map((s) => parseFloat(s.trim())).filter((n) => Number.isFinite(n)),
 
     // ─── Curation signals: the MANUAL votes (utils/curation.js) ───────────────
     // Three deliberate human acts, as opposed to the passive signals (views, watch

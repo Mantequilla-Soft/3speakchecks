@@ -240,6 +240,11 @@ router.get('/api/my-videos', async (req, res) => {
         // unlisted videos still appear (badged) and can be re-listed. Every
         // other surface keeps the default listed_on_3speak:true filter.
         const includeUnlisted = req.query.include_unlisted === '1' || req.query.include_unlisted === 'true';
+        // `openpod=1` narrows to OpenPods stream recordings (the VOD published
+        // when a live session ends). Matched either by the flag we stamp at
+        // publish time, or by the recorder's `stream-<room>-<n>s.<ext>`
+        // filename so sessions recorded before the flag existed still show up.
+        const openpodOnly = req.query.openpod === '1' || req.query.openpod === 'true';
 
         if (!username) {
             return res.status(400).json({
@@ -264,10 +269,18 @@ router.get('/api/my-videos', async (req, res) => {
         if (statusFilter !== 'all') {
             embedQuery.status = statusFilter;
         }
+        if (openpodOnly) {
+            embedQuery.$or = [
+                { is_openpod_stream: true },
+                { originalFilename: { $regex: '^stream-' } },
+            ];
+        }
 
         // Fetch both in parallel
         const [videosData, embedVideosData] = await Promise.all([
-            videosCollection.find(query).sort({ created: -1, _id: -1 }).toArray(),
+            openpodOnly
+                ? Promise.resolve([])
+                : videosCollection.find(query).sort({ created: -1, _id: -1 }).toArray(),
             embedVideoCollection.find(embedQuery).sort({ createdAt: -1, _id: -1 }).toArray()
         ]);
 
@@ -334,6 +347,11 @@ router.get('/api/my-videos', async (req, res) => {
                     // NSFW = explicit doc flag OR the Hive `nsfw` tag.
                     isNsfwContent: ev.isNsfwContent === true || (Array.isArray(ev.hive_tags) && ev.hive_tags.some(t => String(t).toLowerCase() === 'nsfw')),
                     promotedUntil: ev.promotedUntil || null,
+                    // OpenPods stream recording (flagged at publish time, or
+                    // recognised by the recorder's stream-<room>-<n>s filename).
+                    isOpenpodStream: ev.is_openpod_stream === true
+                        || /^stream-/.test(String(ev.originalFilename || '')),
+                    openpodRoom: ev.openpod_room || null,
                     _sortDate: new Date(ev.createdAt || 0).getTime()
                 };
             });
