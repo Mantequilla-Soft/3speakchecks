@@ -12,9 +12,7 @@ const { feedAgeMatch } = require('./feedAge');
 const { unavailableMatch } = require('./unavailable');
 const { hiddenFromFeedMatch, isHiddenFromFeed } = require('./hiddenFromFeed');
 const { filterHiddenDocs } = require('./hiddenCreators');
-const { fetchTagsV2Batch } = require('./transcriptionTags');
-const { fetchViewerWeights } = require('./effectiveTags');
-const { TAGS_V2_TREE } = require('./interestTags');
+const { attachTopicTags } = require('./topicTag');
 
 let cache = { at: 0, docs: [] };
 
@@ -106,54 +104,18 @@ async function hydrate(db, entries) {
     }
   }
 
-  // Attach the v2 tags so cards can show the topic without a lookup per tile.
-  // `subtitles-tags` is keyed by owner + ASSET permlink: that's the pool entry's
-  // assetPermlink for embeds, and the permlink itself for legacy videos. Viewer
-  // tags live on the HIVE key instead, so both lookups run off different keys.
-  try {
-    const tagKeys = entries.map((e) => ({
-      author: e.owner,
-      permlink: e.source === 'embed' ? e.assetPermlink : e.permlink,
-    }));
-    const hiveKeys = out.map((v) => ({ author: v.author || v.owner, permlink: v.permlink }));
-    const [tagMap, viewerMap] = await Promise.all([
-      fetchTagsV2Batch(db, tagKeys),
-      fetchViewerWeights(db, hiveKeys),
-    ]);
-
-    // Only slugs the UI can roll up to a category may override — viewer tags can
-    // still carry retired v1 values (e.g. `tutorial`) from the deployed prod
-    // frontend, and those have no category to show.
-    const V2_SLUGS = new Set([...Object.keys(TAGS_V2_TREE), ...Object.values(TAGS_V2_TREE).flat()]);
-
-    for (const v of out) {
+  // Display topic for the cards. Keys differ per source: auto tags live on the
+  // owner + ASSET permlink (the pool entry's assetPermlink for embeds, the
+  // permlink itself for legacy), viewer tags on the hive author + permlink.
+  await attachTopicTags(
+    db,
+    out,
+    (v) => {
       const e = v._pool || {};
-      const autoKey = `${String(e.owner || '').toLowerCase()}/${e.source === 'embed' ? e.assetPermlink : e.permlink}`;
-      const list = tagMap.get(autoKey);
-      if (list && list.length) {
-        v.tags_v2_auto = list;   // ordered, best-first
-        v.tag_v2 = list[0];      // the strongest automatic signal
-        v.tag_v2_source = 'auto';
-      }
-
-      // What viewers picked WINS over the tagger: a human who watched the video
-      // beats a model that read its transcript. Heaviest combined vote weight
-      // takes it, ties broken by name so the choice is stable across requests.
-      const weights = viewerMap.get(`${String(v.author || v.owner || '').toLowerCase()}/${v.permlink}`);
-      if (weights) {
-        const winner = Object.entries(weights)
-          .filter(([tag]) => V2_SLUGS.has(tag))
-          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
-        if (winner) {
-          v.tag_v2 = winner[0];
-          v.tag_v2_source = 'viewer';
-        }
-      }
-    }
-  } catch (err) {
-    // Decorative only — a tag lookup must never take a feed down.
-    console.error('hydrate: v2 tag attach failed:', err && err.message);
-  }
+      return { author: e.owner, permlink: e.source === 'embed' ? e.assetPermlink : e.permlink };
+    },
+    (v) => ({ author: v.author || v.owner, permlink: v.permlink }),
+  );
 
   return out;
 }
