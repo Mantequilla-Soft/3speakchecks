@@ -12,6 +12,7 @@ const { feedAgeMatch } = require('./feedAge');
 const { unavailableMatch } = require('./unavailable');
 const { hiddenFromFeedMatch, isHiddenFromFeed } = require('./hiddenFromFeed');
 const { filterHiddenDocs } = require('./hiddenCreators');
+const { fetchTagsV2Batch } = require('./transcriptionTags');
 
 let cache = { at: 0, docs: [] };
 
@@ -102,6 +103,30 @@ async function hydrate(db, entries) {
       out.push({ ...lv, _pool: e });
     }
   }
+
+  // Attach the v2 tags so cards can show the topic without a lookup per tile.
+  // `subtitles-tags` is keyed by owner + ASSET permlink: that's the pool entry's
+  // assetPermlink for embeds, and the permlink itself for legacy videos.
+  try {
+    const tagKeys = entries.map((e) => ({
+      author: e.owner,
+      permlink: e.source === 'embed' ? e.assetPermlink : e.permlink,
+    }));
+    const tagMap = await fetchTagsV2Batch(db, tagKeys);
+    for (const v of out) {
+      const e = v._pool || {};
+      const key = `${String(e.owner || '').toLowerCase()}/${e.source === 'embed' ? e.assetPermlink : e.permlink}`;
+      const list = tagMap.get(key);
+      if (list && list.length) {
+        v.tags_v2_auto = list;   // ordered, best-first
+        v.tag_v2 = list[0];      // the strongest signal; the UI rolls it up to its category
+      }
+    }
+  } catch (err) {
+    // Decorative only — a tag lookup must never take a feed down.
+    console.error('hydrate: v2 tag attach failed:', err && err.message);
+  }
+
   return out;
 }
 

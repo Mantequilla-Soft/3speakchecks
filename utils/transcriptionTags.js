@@ -79,4 +79,35 @@ async function getTranscriptionTags(db, authorRaw, permlinkRaw) {
   return empty; // not transcribed (yet)
 }
 
-module.exports = { getTranscriptionTags, splitTags };
+/**
+ * Batch v2 tags for many videos at once — for feed payloads, where a per-video
+ * lookup would be one query per card. Keys are owner + ASSET permlink (how
+ * `subtitles-tags` is keyed), same as the single-video resolver above.
+ *
+ * @param {Array<{author:string, permlink:string}>} keys
+ * @returns {Promise<Map<string, string[]>>} "author/permlink" -> ordered v2 slugs
+ */
+async function fetchTagsV2Batch(db, keys) {
+  const map = new Map();
+  const orConds = [];
+  const seen = new Set();
+  for (const k of keys || []) {
+    if (!k || !k.author || !k.permlink) continue;
+    const author = String(k.author).trim().toLowerCase();
+    const id = `${author}/${k.permlink}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    orConds.push({ author, permlink: k.permlink });
+  }
+  if (!orConds.length) return map;
+  const docs = await db.collection('subtitles-tags')
+    .find({ $or: orConds }, { projection: { author: 1, permlink: 1, tags_list_v2: 1, tags_v2: 1 } })
+    .toArray();
+  for (const d of docs) {
+    const list = v2List(d);
+    if (list.length) map.set(`${String(d.author).toLowerCase()}/${d.permlink}`, list);
+  }
+  return map;
+}
+
+module.exports = { getTranscriptionTags, splitTags, fetchTagsV2Batch };
