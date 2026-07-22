@@ -23,6 +23,15 @@ const INTERACT_COLLECTION = 'snap-interactions';  // snaps a user has voted/comm
 const SNAP_APP = '3speak/snap'; // json_metadata.app our composer stamps on a snap
 // Community posts only surface in the home feed while they're fresh.
 const SNAP_FEED_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Callers may ask for a TIGHTER window than the default (Discover only wants the
+// last few days, so stale posts don't pad a browse surface). Clamped so a caller
+// can narrow but never widen past the default.
+function maxAgeMsFrom(req, defaultMs) {
+  const h = parseFloat(req.query.maxAgeHours);
+  if (!Number.isFinite(h) || h <= 0) return defaultMs;
+  return Math.min(h * 60 * 60 * 1000, defaultMs);
+}
 const norm = (s) => String(s || '').trim().toLowerCase();
 
 let _indexed = false;
@@ -149,7 +158,7 @@ router.get('/snaps-feed', async (req, res) => {
     const db = getDb();
     await ensureIndex();
 
-    const query = { created: { $gt: new Date(Date.now() - SNAP_FEED_MAX_AGE_MS) } };
+    const query = { created: { $gt: new Date(Date.now() - maxAgeMsFrom(req, SNAP_FEED_MAX_AGE_MS)) } };
     if (req.query.nsfw !== 'true') query.nsfw = { $ne: true };
 
     const ownerClause = {};

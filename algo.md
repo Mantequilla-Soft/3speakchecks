@@ -223,7 +223,7 @@ watch-history** — retention is the shared quality layer on top of them:
 |---|---|---|---|
 | Home / Trending | `GET /feeds/trendingSorted` | views·votes·comments·reward·reshares × interests | `trending_score` |
 | Shorts | `GET /shortssorted` | recency·reward·reshares·random × interests | `sort_score` |
-| Follow feed | `GET /feed/:username` | recency (chronological) + hide-watched | recency-decayed `_rankScore` (recency stays dominant via `RETENTION_FOLLOW_HALFLIFE_H`) |
+| Follow feed | `GET /feed/:username` | recency (chronological) + hide-watched | recency-decayed `_rankScore` (recency stays dominant via `FOLLOW_FEED_HALFLIFE_H` = **96h**, its own shorter half-life so followed creators' newest uploads sit higher; the tag & firstUploads feeds keep the gentler 168h `RETENTION_FOLLOW_HALFLIFE_H`) |
 
 At request time this is a single **indexed `_id: {$in}` lookup** into the
 pre-computed `video-retention` table — no aggregation on the hot path. If a video
@@ -274,7 +274,9 @@ behaviour.
 | `RETENTION_PENALTY_MIN_VIEWERS` | `3` | at/below this many distinct viewers, retention can only BOOST |
 | `RETENTION_PENALTY_FULL_VIEWERS` | `10` | full demotion weight from here up |
 | `RETENTION_PENALTY_DEADBAND` | `0.1` | how far below `relQ=1` is free |
-| `RETENTION_FOLLOW_HALFLIFE_H` | `168` | recency half-life for the follow feed |
+| `RETENTION_FOLLOW_HALFLIFE_H` | `168` | recency half-life for the **tag** & **firstUploads** feeds |
+| `FOLLOW_FEED_HALFLIFE_H` | `96` | recency half-life for the **`/feed/:username` follow feed** (shorter → newer higher) |
+| `INTEREST_RECENCY_TILT` / `_DAYS` | `0.35` / `21` | interests feed: extra `×(1+TILT·(1−ageDays/DAYS))` freshness tilt on top of `base` |
 
 Set `RETENTION_WEIGHT=0` (or `RETENTION_ENABLED=false`) to make the whole thing a
 no-op instantly, without a code change. To disable **only** the demotion side, set
@@ -429,6 +431,58 @@ continuously-active user's follow set would never be refreshed.
 | `FOLLOW_BOOST_TTL_MS` | `600000` | follow-set cache TTL |
 | `FOLLOW_BOOST_MAX_USERS` | `5000` | LRU cap on cached follow sets |
 
+---
+
+# Comment boost (`utils/commentBoost.js` + `services/commentCounts.js`)
+
+Videos that spark discussion rank a bit higher — on discover, interests and the follow
+feed.
+
+**Comment counts are not in Mongo.** `stats.num_comments` is empty on *every* video doc
+(so the legacy trending vote/comment weights have always multiplied zero). Counts live
+only on Hive. So a background job stamps them into Mongo for the feeds to read cheaply:
+
+- `services/commentCounts.js` runs **in-process every `COMMENT_SYNC_INTERVAL_MIN`** (30) —
+  the work is Hive network I/O, not CPU, so it awaits between batches and never blocks
+  feed serving. It fetches the **top-level** comment count per video via batched
+  `condenser_api.get_content_replies`, but **only for videos younger than
+  `COMMENT_SYNC_MAX_AGE_DAYS`** (30), which bounds the fetch to ~1k videos (~13s/run) —
+  and is also where a "lively discussion" signal is most meaningful. Rows for videos that
+  age out are dropped each run, keeping the `video-comment-counts` collection small.
+- A post whose batch **fails** is left absent (keeps its prior value) rather than zeroed,
+  and the age-out prune only runs when the fetch wrote something — a total Hive outage
+  can't wipe the collection.
+
+**Native 3Speak comments count more.** A comment posted through the 3Speak frontend sets
+`json_metadata.app` to `3speak/…` (e.g. `3speak/new-version`). Those count
+`COMMENT_NATIVE_MULT`× (1.5) toward an **effective** total:
+
+```
+effective    = comments + (NATIVE_MULT − 1)·native3Speak
+commentBoost = min(CAP, 1 + W·ln(1 + effective))      (W=0.2, CAP=1.8)
+```
+
+`eff 1 → ×1.14, 5 → ×1.36, 10 → ×1.48, 20 → ×1.61`, capped at 1.8 — modest, log-damped,
+so a lively section lifts a video but a brigaded one can't run away. No record → ×1.
+
+> Reality check (live): only **~2%** of comments on 3Speak videos are posted through the
+> 3Speak site — 47% come via ecency, 18% peakd, 17% hive.blog. So the native 1.5× is a
+> small tie-breaker, not a major factor, which is exactly what it should be.
+
+**Where:** folded into the discover/interests pool `base` by the discover worker
+(so `base = freshness × newBoost × curationBoost × commentBoost × retention`), and applied
+to the follow feed's rank at request time (one cached-map read). Trending is untouched.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `COMMENT_BOOST_ENABLED` | `true` | master switch (also `COMMENT_SYNC_ENABLED` for the fetch job) |
+| `COMMENT_BOOST_WEIGHT` / `_MAX` | `0.2` / `1.8` | log-damped weight and hard cap |
+| `COMMENT_NATIVE_MULT` | `1.5` | how much a 3Speak-frontend comment outweighs a generic one |
+| `COMMENT_SYNC_INTERVAL_MIN` | `30` | how often the fetch job runs |
+| `COMMENT_SYNC_MAX_AGE_DAYS` | `30` | only fetch comments for videos this fresh |
+| `COMMENT_SYNC_MAX_VIDEOS` | `8000` | per-run safety cap |
+| `COMMENT_CACHE_MS` | `300000` | in-process count-map TTL (follow feed) |
+
 ### Future extensions (not built yet)
 
 - **Interest-conditioned retention** — a video's retention *among users who picked
@@ -460,7 +514,7 @@ math lives in `utils/discoverScore.js` (pure, no I/O).
 ## TLDR
 
 ```
-base           = freshness × newBoost × curationBoost × retention   (precomputed hourly)
+base           = freshness × newBoost × curationBoost × commentBoost × retention   (precomputed hourly)
 discover_score = base × interest × follow × jitter                  (per request)
 ```
 then random picks from the lower half are interleaved into every 4th slot.
@@ -571,7 +625,10 @@ page:
 
 | \<7d | 7–30d | 30d–6mo | 6mo–1y | 1y–2y | >2y |
 |---|---|---|---|---|---|
-| 50% | 20% | 12% | 8% | 6% | 4% |
+| 56% | 22% | 11% | 6% | 3% | 2% |
+
+*(2026-07-22: tilted newer, from `50/20/12/8/6/4`. Measured live after the change:
+56/23/10/6/2/2 on page 1.)*
 
 Bands are fixed at 7d / 30d / 6mo / 1y / 2y (`AGE_BAND_DAYS`). Within a band, videos
 stay in `discover_score` order — so **quality still picks WHICH videos of each age
@@ -639,7 +696,8 @@ Live: **~0.12s** vs trendingSorted's ~1.5s.
 ## Debugging
 
 `?debug=1` preserves `discover_score`, `base`, `age_hours`, `freshness`,
-`new_boost`, `curation_boost`, `reshares`, `saves`, `viewer_tags`, `follow_match`,
+`new_boost`, `curation_boost`, `reshares`, `saves`, `viewer_tags`, `comment_boost`,
+`comments`, `native_comments`, `follow_match`,
 `retention_mult`, `retention_relq`, `retention_viewers`, `interest_match` and
 `pool_src` in the response (stripped otherwise).
 
@@ -668,8 +726,62 @@ Live: **~0.12s** vs trendingSorted's ~1.5s.
 | `DISCOVER_RETENTION_MAX_MULT` | 2.5 | retention upper bound |
 | `DISCOVER_JITTER` | 0.15 | ±15% seeded per-video jitter |
 | `DISCOVER_AGE_STRATIFY` | true | compose the page to `DISCOVER_AGE_WEIGHTS`; `false` = legacy explore interleave |
-| `DISCOVER_AGE_WEIGHTS` | `0.50,0.20,0.12,0.08,0.06,0.04` | page share per band (\<7d / 7–30d / 30d–6mo / 6mo–1y / 1y–2y / >2y) |
+| `DISCOVER_AGE_WEIGHTS` | `0.56,0.22,0.11,0.06,0.03,0.02` | page share per band (\<7d / 7–30d / 30d–6mo / 6mo–1y / 1y–2y / >2y) |
 | `DISCOVER_EXPLORE_EVERY` | 4 | legacy interleave only — every Nth slot = exploration pick |
+
+---
+
+# "Follow these" creator suggestions (`GET /feeds/suggested-creators`)
+
+A who-to-follow rail for the discover / interests feeds. Given the caller's interests,
+it returns creators who **posted interest-matching videos in the last 30 days**, ranked
+by the **engagement on their recent work (views + comments + reshares)**, excluding the
+caller and anyone they already follow. The frontend renders as many tiles as fit its
+row, so it just passes `?limit=X`. Query: `?interests&currentuser&limit`.
+
+### Two sources, split by what each is good at (`utils/suggestedCreators.js`)
+
+- **Topic membership → `leaderboard-topics-v2`** (the 30d window). This answers "which
+  creators make <topic> content recently" and is robust: it does **not** depend on a
+  fresh video having been transcribed yet (the winner-tag path does, so it would miss
+  brand-new uploads). ⚠️ Verified that its `user` field is the **creator**, not a viewer
+  who tagged the video — sampled music/30d users all had real uploads (2–243 videos) and
+  ~zero tagging activity. Topic vocabulary matches the interest taxonomy (35/36; only
+  `tutorial` has no board). A category interest (`tech-science`) rolls up to its children
+  via `expandTag`.
+- **Engagement ranking → the video docs + `video-comment-counts` + `reshares`**,
+  aggregated over each creator's recent (<30d) videos. `score = Wv·ln(1+views) +
+  Wc·ln(1+comments) + Wr·ln(1+reshares)` with `Wv/Wc/Wr = 1/2/3` — comments and reshares
+  (the "someone cared" signals, and comment counts are the thing we now track) outweigh
+  raw views, so a discussed video beats a merely-viewed one. `ln` keeps views from
+  dominating.
+
+The per-creator engagement map is user-independent, so it's built once over the ~1.1k
+recent videos and **cached** (`SUGGEST_CACHE_MS`, 15 min); each request is then a cheap
+`leaderboard-topics-v2` topic lookup + in-memory rank + a bounded `hiveprofiles` fetch
+for the top slice (display name + avatar for the tile). Live: **~0.26s** cached.
+
+The follow set (to exclude) is the same non-blocking, LRU-cached set as the follow
+boost — a cold miss just skips exclusion for that one request rather than stalling on
+Hive. Guests (no `currentuser`) get the top creators with no follow-exclusion.
+
+**Two tabs, two lists** — `?pool=N&seed=S` returns a seeded-random `limit` out of the
+top `pool` (re-sorted by score). The frontend's **discover** tab sends `pool=20&seed=`
+(the shared per-page feed seed) so its rail is a different slice than the **interests**
+tab, which sends neither → the deterministic top `limit`.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `SUGGEST_CREATORS_ENABLED` | `true` | master switch |
+| `SUGGEST_WINDOW_DAYS` | `30` | recency window for both membership and engagement |
+| `SUGGEST_CACHE_MS` | `900000` | engagement-map cache TTL |
+| `SUGGEST_MAX_LIMIT` | `30` | hard cap on `?limit=` |
+| `SUGGEST_W_VIEWS / _COMMENTS / _RESHARES` | `1 / 2 / 3` | engagement blend (on `ln(1+x)`) |
+
+> Frontend: `preview-3speak` `SuggestedCreators` component — a horizontal follow rail
+> mounted above the grid on the discover + interests home tabs (cloned from the existing
+> `PopularCreators` rail; reuses the aioha follow + `HiveAvatar`). Discover passes
+> `pool=20&seed`; interests the deterministic top. LIVE on preview.
 
 ---
 

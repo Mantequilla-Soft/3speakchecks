@@ -19,6 +19,7 @@ const { schedule: scheduleScheduledPosts } = require('./services/scheduledPosts'
 const { schedule: scheduleWatchRetention } = require('./services/watchRetention');
 const { scheduleRetention } = require('./services/retention');
 const { scheduleDiscover } = require('./services/discover');
+const { scheduleCommentCounts } = require('./services/commentCounts');
 
 // Routes
 const healthRoutes = require('./routes/health');
@@ -41,6 +42,7 @@ const gdprRoutes = require('./routes/gdpr');
 const gdprAdminRoutes = require('./routes/gdprAdmin');
 const snapsRoutes = require('./routes/snaps');
 const playlistsFeedRoutes = require('./routes/playlistsFeed');
+const reviewsRoutes = require('./routes/reviews');
 
 const app = express();
 
@@ -83,6 +85,7 @@ app.use('/', viewerTagsRoutes);
 app.use('/', leaderboardRoutes);
 app.use('/', snapsRoutes);
 app.use('/', playlistsFeedRoutes);
+app.use('/', reviewsRoutes);
 
 // Track whether heavy sync tasks are running
 let syncRunning = false;
@@ -234,6 +237,11 @@ async function startServer() {
     // Discover pool: union recent + a fresh random slice of the transcription-tagged
     // back catalogue + still-watched videos, precomputing each one's base score.
     scheduleDiscover();
+
+    // Comment counts: fetch top-level comment counts (Hive) for recent videos and
+    // stamp them into video-comment-counts, so the feeds can apply a comment boost
+    // cheaply. In-process (network I/O, not CPU) — see services/commentCounts.js.
+    scheduleCommentCounts();
 
     app.listen(PORT, () => {
         console.log(`Server is running on port ${PORT}`);

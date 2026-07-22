@@ -2,6 +2,7 @@ const express = require('express');
 const { hiddenSubset } = require('../utils/hiddenCreators');
 const router = express.Router();
 const { getDb } = require('../utils/db');
+const { attachTopicTags } = require('../utils/topicTag');
 const { ObjectId } = require('mongodb');
 const { COLLECTION_NAME } = require('../utils/config');
 const { BANNED_FILTER } = require('../utils/filters');
@@ -365,6 +366,16 @@ router.get('/api/my-videos', async (req, res) => {
 
         // Clean up internal sort field
         paginatedVideos.forEach(v => { delete v._sortDate; delete v._source; });
+
+        // Display topic, same as the feeds — the profile grid uses Card3 too.
+        // `video_id` is the ASSET permlink (auto tags) for both legacy and embed
+        // rows, while `permlink` is the HIVE permlink (viewer tags).
+        await attachTopicTags(
+            db,
+            paginatedVideos,
+            (v) => ({ author: v.owner, permlink: v.video_id }),
+            (v) => ({ author: v.author || v.owner, permlink: v.permlink }),
+        );
 
         // Return response
         res.json({

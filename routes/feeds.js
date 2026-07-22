@@ -12,7 +12,18 @@ const { INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTa
 const { applyRetention } = require('../utils/retentionRank');
 const { rankFeed, applyInterestBoost, filterForUser } = require('../utils/feedRank');
 const { getUserFilters, applyUserFilterQuery } = require('../utils/userFilters');
-const { RETENTION_FOLLOW_HALFLIFE_H } = require('../utils/config');
+const { RETENTION_FOLLOW_HALFLIFE_H, INTEREST_RECENCY_TILT, INTEREST_RECENCY_DAYS } = require('../utils/config');
+
+// Mild "favor newer" tilt for the interests feed, on top of `base`'s own freshness:
+//   × (1 + TILT · max(0, 1 − ageDays/DAYS))   → new ×(1+TILT), tapering to ×1 at DAYS+.
+// Undated entries get ×1 (no tilt), never a penalty.
+function interestRecencyTilt(created) {
+    if (!(INTEREST_RECENCY_TILT > 0) || !(INTEREST_RECENCY_DAYS > 0)) return 1;
+    const t = created ? new Date(created).getTime() : NaN;
+    if (!Number.isFinite(t)) return 1;
+    const ageDays = Math.max(0, (Date.now() - t) / 86400000);
+    return 1 + INTEREST_RECENCY_TILT * Math.max(0, 1 - ageDays / INTEREST_RECENCY_DAYS);
+}
 const { DISCOVER_INTEREST_MULTIPLIER } = require('../utils/config');
 const {
     RELATED_TOPIC_MULT, RELATED_INTEREST_MULT, RELATED_CREATOR_MULT,
@@ -22,6 +33,8 @@ const { jitter, interleaveExploration, interleaveByAge, freshness, ageHours } = 
 const { DISCOVER_AGE_STRATIFY, DISCOVER_AGE_WEIGHTS } = require('../utils/config');
 const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
 const { getFollowSetForReq, applyFollowBoost } = require('../utils/followBoost');
+const { getSuggestedCreators } = require('../utils/suggestedCreators');
+const { SUGGEST_MAX_LIMIT } = require('../utils/config');
 const { getPool, hydrate } = require('../utils/discoverPool');
 const { getInterestPool } = require('../utils/interestPool');
 const { getTranscriptionTags } = require('../utils/transcriptionTags');
@@ -72,13 +85,13 @@ router.get('/interests', async (req, res) => {
 
         // `base` already carries freshness × newBoost × curationBoost × retention.
         // Every candidate matches an interest by definition, so there's no interest
-        // multiplier to apply here — just the follow boost and jitter.
+        // multiplier to apply here — just a mild recency tilt, the follow boost and jitter.
         const chrono = req.query.chrono === '1' || req.query.chrono === 'true';
         const followSet = getFollowSetForReq(req);
         const scored = candidates.map((e) => ({
             ...e,
             interest_match: true,
-            discover_score: (Number(e.base) || 0) * jitter(rng()),
+            discover_score: (Number(e.base) || 0) * interestRecencyTilt(e.created) * jitter(rng()),
         }));
         applyFollowBoost(scored, followSet, { scoreField: 'discover_score' });
 
@@ -107,6 +120,56 @@ router.get('/interests', async (req, res) => {
         });
     } catch (error) {
         console.error('Error building interests feed:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+/**
+ * GET /feeds/suggested-creators — the "follow these" rail for discover / interests.
+ *
+ * Creators who posted interest-matching videos in the last 30 days, ranked by the
+ * engagement on their recent work (views + comments + reshares), excluding the
+ * caller and anyone they already follow. Topic membership comes from the pre-built
+ * `leaderboard-topics-v2` (robust to un-transcribed fresh uploads); the engagement is
+ * aggregated from the video docs + video-comment-counts + reshares. See
+ * utils/suggestedCreators.js.
+ *
+ * The frontend renders as many tiles as fit its row, so it just passes ?limit=X.
+ * Query: ?interests&currentuser&limit
+ */
+router.get('/suggested-creators', async (req, res) => {
+    try {
+        const db = getDb();
+        const interestSet = parseInterests(req);
+        if (!interestSet.size) {
+            return res.json({ success: true, feed: 'suggested-creators', interests: [], creators: [] });
+        }
+        const limit = Math.min(Math.max(parseInt(req.query.limit) || 12, 1), SUGGEST_MAX_LIMIT);
+        // `pool` + `seed` → seeded-random `limit` out of the top `pool`, so discover
+        // (e.g. pool=20&seed=…) shows a different slice than the interests tab (which
+        // sends neither → the deterministic top `limit`).
+        const pool = Math.min(Math.max(parseInt(req.query.pool) || 0, 0), SUGGEST_MAX_LIMIT);
+        const seed = req.query.seed != null ? parseInt(req.query.seed) : null;
+        // Non-blocking follow set: a cold miss returns null (no follow-exclusion this
+        // one request; it warms in the background), so the rail never stalls on Hive.
+        const followSet = getFollowSetForReq(req);
+
+        const creators = await getSuggestedCreators(db, {
+            interests: [...interestSet],
+            followSet,
+            excludeUser: req.query.currentuser,
+            limit, pool, seed,
+        });
+
+        res.json({
+            success: true,
+            feed: 'suggested-creators',
+            interests: [...interestSet],
+            count: creators.length,
+            creators,
+        });
+    } catch (error) {
+        console.error('Error building suggested-creators:', error);
         res.status(500).json({ success: false, error: 'Internal server error' });
     }
 });
@@ -225,6 +288,9 @@ router.get('/discover', async (req, res) => {
                 v.reshares = p.reshares;
                 v.saves = p.saves;
                 v.viewer_tags = p.viewerTags;
+                v.comment_boost = p.commentBoost;
+                v.comments = p.comments;
+                v.native_comments = p.native3Speak;
                 v.follow_match = !!p.follow_match;
                 v.retention_mult = p.retentionMult;
                 v.retention_relq = p.relQ;

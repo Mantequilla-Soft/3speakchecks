@@ -34,6 +34,7 @@ async function getInterestPool(db, { force = false } = {}) {
             owner: 1, author: 1, permlink: 1, assetPermlink: 1, source: 1, src: 1,
             created: 1, tags: 1, winnerTag: 1, nsfw: 1, relQ: 1,
             reshares: 1, saves: 1, viewerTags: 1, curationBoost: 1,
+            comments: 1, native3Speak: 1, commentBoost: 1,
             retentionMult: 1, retentionViewers: 1, freshness: 1, newBoost: 1, base: 1,
           },
         }).toArray();

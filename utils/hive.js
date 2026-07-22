@@ -267,12 +267,61 @@ function mulberry32(seed) {
     };
 }
 
+// Comments posted through the 3Speak frontend set json_metadata.app to '3speak/...'
+// (CommentSection.jsx / Short.jsx = '3speak/new-version'); older/other 3Speak surfaces
+// use '3speak/...' or 'threespeak'. Match either — these count NATIVE_MULT× (see config).
+const NATIVE_COMMENT_APP_RE = /3speak|threespeak/i;
+function isNative3SpeakComment(reply) {
+    try {
+        const md = typeof reply.json_metadata === 'string'
+            ? JSON.parse(reply.json_metadata || '{}')
+            : (reply.json_metadata || {});
+        return NATIVE_COMMENT_APP_RE.test(String(md && md.app || ''));
+    } catch { return false; }
+}
+
+/**
+ * Fetch TOP-LEVEL comment counts for each post via batched
+ * condenser_api.get_content_replies (direct replies only — one RPC per post, no
+ * recursion). Returns Map "author/permlink" -> { comments, native3Speak }.
+ *
+ * A post whose batch failed (transient RPC error) is simply ABSENT from the map, so
+ * the caller keeps its previous stored value rather than zeroing it. A real post with
+ * no comments returns `result: []` → { comments: 0, native3Speak: 0 }.
+ */
+async function fetchCommentReplyCounts(authorPerms, { batchSize = 20 } = {}) {
+    const results = new Map();
+    for (let i = 0; i < authorPerms.length; i += batchSize) {
+        const batch = authorPerms.slice(i, i + batchSize);
+        const rpcBatch = batch.map((it, idx) => ({
+            jsonrpc: '2.0', id: i + idx,
+            method: 'condenser_api.get_content_replies',
+            params: [it.author, it.permlink],
+        }));
+        const arr = await hiveRpcBatch(rpcBatch);
+        for (const r of arr) {
+            // JSON-RPC batch responses carry the request id; map back by it (order isn't
+            // guaranteed, and a failover can drop entries — those posts stay absent).
+            if (!r || !Array.isArray(r.result)) continue;
+            const idx = Number(r.id) - i;
+            const item = batch[idx];
+            if (!item) continue;
+            let native = 0;
+            for (const rep of r.result) if (isNative3SpeakComment(rep)) native += 1;
+            results.set(`${item.author}/${item.permlink}`, { comments: r.result.length, native3Speak: native });
+        }
+    }
+    return results;
+}
+
 module.exports = {
     hiveRpcBatch,
     hiveReputationToScore,
     fetchHiveRewards,
     fetchLivePageData,
     fetchFollowerCounts,
+    fetchCommentReplyCounts,
+    isNative3SpeakComment,
     getFollowingList,
     mulberry32,
     reputationCache,

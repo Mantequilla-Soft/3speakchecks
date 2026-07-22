@@ -18,6 +18,14 @@ const { getFollowingList } = require('../utils/hive');
 // "Recently changed" window. Matches the snaps feed's 7-day freshness. Env-tunable.
 const MAX_AGE_MS = (parseInt(process.env.PLAYLIST_FEED_MAX_AGE_DAYS, 10) || 7) * 24 * 60 * 60 * 1000;
 
+// Callers may ask for a TIGHTER window than the default (Discover only wants
+// playlists changed in the last day). Clamped: narrow, never widen.
+function maxAgeMsFrom(req, defaultMs) {
+  const h = parseFloat(req.query.maxAgeHours);
+  if (!Number.isFinite(h) || h <= 0) return defaultMs;
+  return Math.min(h * 60 * 60 * 1000, defaultMs);
+}
+
 // Playlist `metadata` is stored as JSON (json.RawMessage) — via the Node driver
 // it can arrive as an object, a BSON Binary, or a base64 string. (Mirrors the
 // helper in routes/audio.js.)
@@ -66,7 +74,7 @@ router.get('/playlists-feed', async (req, res) => {
       type: { $ne: 'audio' },              // audio albums have their own surface (/audio)
       owner: ownerClause,
       'items.1': { $exists: true },        // >= 2 items so the card isn't thin/empty
-      updated_at: { $gt: new Date(Date.now() - MAX_AGE_MS) },
+      updated_at: { $gt: new Date(Date.now() - maxAgeMsFrom(req, MAX_AGE_MS)) },
     };
 
     // Only 50-ish public playlists exist and the whole set is tiny, so an
