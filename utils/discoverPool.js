@@ -12,6 +12,7 @@ const { feedAgeMatch } = require('./feedAge');
 const { unavailableMatch } = require('./unavailable');
 const { hiddenFromFeedMatch, isHiddenFromFeed } = require('./hiddenFromFeed');
 const { filterHiddenDocs } = require('./hiddenCreators');
+const { seasonalMatch } = require('./seasonal');
 const { attachTopicTags } = require('./topicTag');
 
 let cache = { at: 0, docs: [] };
@@ -24,12 +25,24 @@ async function getPool(db, { force = false } = {}) {
       // Drop pool entries past the global age cutoff (very old legacy videos often
       // no longer resolve). Filtered on read, so changing FEED_MAX_AGE_YEARS takes
       // effect on the next pool refresh without rebuilding the pool.
+      //
+      // seasonalMatch() is on the read side for the same reason, and one more: the
+      // pool only rebuilds hourly, but the calendar turns over at midnight. Filtering
+      // here means Christmas content leaves discover on Dec 27 and comes back on
+      // Dec 1 by itself, with no rebuild and no deploy. Entries written before this
+      // field existed have no `seasonal` key and pass straight through ($nin).
       docs = await db.collection(DISCOVER_POOL_COLLECTION)
-        .find({ ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch() }, {
+        .find({
+          ...feedAgeMatch('created'),
+          ...unavailableMatch(),
+          ...hiddenFromFeedMatch(),
+          ...seasonalMatch(),
+        }, {
           projection: {
             owner: 1, author: 1, permlink: 1, assetPermlink: 1, source: 1, src: 1,
-            created: 1, tags: 1, winnerTag: 1, nsfw: 1, relQ: 1,
+            created: 1, tags: 1, seasonal: 1, winnerTag: 1, nsfw: 1, relQ: 1,
             reshares: 1, saves: 1, viewerTags: 1, curationBoost: 1,
+            comments: 1, native3Speak: 1, commentBoost: 1,
             retentionMult: 1, retentionViewers: 1, freshness: 1, newBoost: 1, base: 1,
           },
         }).toArray();

@@ -41,10 +41,12 @@ const {
 const { ageHours, freshness, newBoost } = require('../utils/discoverScore');
 const { retentionMultiplier } = require('../utils/retentionScore');
 const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
+const { commentBoost } = require('../utils/commentBoost');
 const { normalizeTags } = require('../utils/interests');
 const { pickWinner } = require('../utils/effectiveTags');
 const { INTEREST_TAGS } = require('../utils/interestTags');
 const { getHiddenSet } = require('../utils/hiddenCreators');
+const { seasonalKeys } = require('../utils/seasonal');
 
 const WATCH_LOG = process.env.WATCH_LOG_COLLECTION || 'view-durations';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -191,7 +193,7 @@ async function run() {
     // All of these collections are small; load them whole rather than N lookups.
     // `curation` = distinct-actor counts of reshares + playlist saves + viewer tags,
     // self-curation already excluded (utils/curation.js).
-    const [subtitleDocs, curation, retentionDocs, viewerTagDocs] = await Promise.all([
+    const [subtitleDocs, curation, retentionDocs, viewerTagDocs, commentDocs] = await Promise.all([
       db.collection('subtitles-tags').find({}, { projection: { author: 1, permlink: 1, tags: 1 } }).toArray(),
       // force: this worker is a fresh thread each run — take the live counts, not a
       // TTL-cached map that happens to be empty on a cold start.
@@ -200,6 +202,8 @@ async function run() {
       // "no evidence" and is never demoted. See retentionMultiplier().
       db.collection(RETENTION_COLLECTION).find({}, { projection: { score: 1, viewers: 1 } }).toArray(),
       db.collection('viewer-tags').find({}, { projection: { author: 1, permlink: 1, 'viewer-tag': 1, weight: 1 } }).toArray(),
+      // Comment counts (stamped by services/commentCounts.js, bounded to recent videos).
+      db.collection('video-comment-counts').find({}, { projection: { effective: 1, comments: 1, native3Speak: 1 } }).toArray(),
     ]);
     // subtitles-tags.tags is a COMMA STRING ("tech,news") in RELEVANCE ORDER.
     const splitOrdered = (raw) => String(raw || '').split(',').map((t) => t.trim().toLowerCase()).filter(Boolean);
@@ -210,6 +214,8 @@ async function run() {
       subtitleDocs.map((d) => [`${d.author}/${d.permlink}`, splitOrdered(d.tags)])     // ordered (winner calc)
     );
     const retByKey = new Map(retentionDocs.map((d) => [d._id, d]));
+    // Comment counts keyed by HIVE author/permlink (video-comment-counts._id).
+    const commentByKey = new Map(commentDocs.map((d) => [d._id, d]));
     // Viewer votes keyed by HIVE author/permlink -> { tag: summed weight }.
     const viewerWeightsByHive = new Map();
     for (const d of viewerTagDocs) {
@@ -248,9 +254,17 @@ async function run() {
       const source = ev ? 'embed' : 'legacy';
       const hivePermlink = ev ? ev.hive_permlink : lv.permlink;
       const created = ev ? ev.createdAt : lv.created;
-      const ownTags = normalizeTags(ev ? ev.hive_tags : (lv.tags_v2 || lv.tags));
+      const rawOwnTags = ev ? ev.hive_tags : (lv.tags_v2 || lv.tags);
+      const ownTags = normalizeTags(rawOwnTags);
       const trTags = transcriptionByKey.get(id) || new Set();
       const tags = [...new Set([...ownTags, ...trTags])];   // merged (display only)
+      // Holiday ids this video's OWN tags identify it with — almost always []. Kept
+      // off the merged `tags` on purpose: transcription tags are speech-derived, and
+      // a video that merely SAYS "christmas" is not a Christmas video. `created` is
+      // passed so a boilerplate holiday tag on an off-season upload doesn't count.
+      // Date-free with respect to TODAY, so the stamp never goes stale; discoverPool
+      // decides what's in season at read time. See utils/seasonal.js.
+      const seasonal = seasonalKeys(rawOwnTags, created);
 
       // Winner-only topic: viewer votes (by hive key) + ordered auto tags.
       const hiveAuthor = String(ev ? ev.hive_author : lv.owner).toLowerCase();
@@ -266,10 +280,16 @@ async function run() {
         ? 1
         : retentionMultiplier(ret.score, { ...multOpts, viewers: ret.viewers });
 
+      // Comment boost: lively discussion lifts a video (3Speak-frontend comments count
+      // 1.5×, baked into `effective` by the sync). No record → ×1. Keyed by hive key.
+      const cmt = commentByKey.get(`${hiveAuthor}/${hivePermlink}`);
+      const commentEffective = cmt ? (cmt.effective || 0) : 0;
+
       const f = freshness(hrs);
       const nb = newBoost(hrs);
       const cb = curationBoost(counts);
-      const base = f * nb * cb * retMult;
+      const mb = commentBoost(commentEffective);
+      const base = f * nb * cb * mb * retMult;
 
       const doc = {
         owner: k.owner,
@@ -280,17 +300,21 @@ async function run() {
         src: k.src,
         created: created ? new Date(created) : null,
         tags,
+        seasonal,                         // [] unless holiday-tagged; gated on read
         winnerTag,                        // winner-only interest match key
         nsfw: isNsfw(ev || lv, new Set(tags)),
         reshares: counts.reshares,
         saves: counts.saves,
         viewerTags: counts.tags,
+        comments: cmt ? (cmt.comments || 0) : 0,
+        native3Speak: cmt ? (cmt.native3Speak || 0) : 0,
         relQ: ret && ret.score != null ? ret.score : null,
         retentionViewers: ret ? (ret.viewers ?? null) : null,
         retentionMult: Math.round(retMult * 1000) / 1000,
         freshness: Math.round(f * 1000) / 1000,
         newBoost: Math.round(nb * 1000) / 1000,
         curationBoost: Math.round(cb * 1000) / 1000,
+        commentBoost: Math.round(mb * 1000) / 1000,
         base: Math.round(base * 100000) / 100000,
         runAt,
       };
