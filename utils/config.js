@@ -98,6 +98,17 @@ module.exports = {
     // (hours) keeps "newest first" dominant so retention just reorders similar-age
     // videos. Long default (7 days) → the feed stays close to chronological.
     RETENTION_FOLLOW_HALFLIFE_H: parseFloat(process.env.RETENTION_FOLLOW_HALFLIFE_H ?? '168'),
+    // The `/feed/:username` follow feed gets its OWN recency half-life (shorter → newer
+    // ranks higher). Kept separate from RETENTION_FOLLOW_HALFLIFE_H, which the tag feed
+    // and firstUploads also use — those should stay on the gentler 7-day decay.
+    // 2026-07-22: 96h (4 days) so followed creators' newest uploads sit higher.
+    FOLLOW_FEED_HALFLIFE_H: parseFloat(process.env.FOLLOW_FEED_HALFLIFE_H ?? '96'),
+    // Interests feed gets a mild extra recency tilt on top of `base`'s freshness:
+    //   × (1 + TILT · max(0, 1 − ageDays/DAYS))
+    // A brand-new video ×1.35, tapering linearly to ×1.0 at 21 days+. Gentle — the
+    // topic match and quality still dominate, this just breaks ties toward newer.
+    INTEREST_RECENCY_TILT: parseFloat(process.env.INTEREST_RECENCY_TILT ?? '0.35'),
+    INTEREST_RECENCY_DAYS: parseFloat(process.env.INTEREST_RECENCY_DAYS ?? '21'),
 
     // ─── Shorts candidate window (/shortssorted) ──────────────────────────────
     // The default 14-day window is sized for the GLOBAL pool, where two weeks is
@@ -190,7 +201,9 @@ module.exports = {
     // holds at EVERY page depth, so pagination stays consistent.
     DISCOVER_AGE_STRATIFY: parseBool(process.env.DISCOVER_AGE_STRATIFY, true),
     //                         <7d   7-30d  30d-6mo 6mo-1y  1y-2y  >2y
-    DISCOVER_AGE_WEIGHTS: (process.env.DISCOVER_AGE_WEIGHTS || '0.50, 0.20, 0.12, 0.08, 0.06, 0.04')
+    // 2026-07-22: tilted newer (was 0.50,0.20,0.12,0.08,0.06,0.04) — more <30d,
+    // fewer >6mo, so the page leans fresher. Older videos aren't gone, just rarer.
+    DISCOVER_AGE_WEIGHTS: (process.env.DISCOVER_AGE_WEIGHTS || '0.56, 0.22, 0.11, 0.06, 0.03, 0.02')
       .split(',').map((s) => parseFloat(s.trim())).filter((n) => Number.isFinite(n)),
 
     // ─── Curation signals: the MANUAL votes (utils/curation.js) ───────────────
@@ -225,6 +238,52 @@ module.exports = {
     // allocates a Set of up to several thousand usernames, so an uncapped map is an
     // unauthenticated memory leak. 5k concurrent logged-in browsers is far past real.
     FOLLOW_BOOST_MAX_USERS: parseInt(process.env.FOLLOW_BOOST_MAX_USERS) || 5000,
+
+    // ─── Comment boost (utils/commentBoost.js + services/commentCounts.js) ─────
+    // Comment counts live ONLY on Hive (Mongo's stats.num_comments is empty on every
+    // doc). So a background sync (in-process, every COMMENT_SYNC_INTERVAL_MIN) fetches
+    // top-level comment counts from Hive for videos younger than COMMENT_SYNC_MAX_AGE_DAYS
+    // — bounding the fetch to a few thousand recent videos — and stamps them into the
+    // `video-comment-counts` collection, which the feeds then read cheaply.
+    //   commentBoost = min(CAP, 1 + W·ln(1 + effective))
+    // Modest + capped, same shape as the reshare boost. Applied to discover/interests
+    // (folded into pool `base`) and the follow feed.
+    COMMENT_BOOST_ENABLED: parseBool(process.env.COMMENT_BOOST_ENABLED, true),
+    COMMENT_BOOST_WEIGHT: parseFloat(process.env.COMMENT_BOOST_WEIGHT ?? '0.2'),
+    COMMENT_BOOST_MAX: parseFloat(process.env.COMMENT_BOOST_MAX ?? '1.8'),
+    // Comments posted through the 3Speak frontend (json_metadata.app ~ /3speak/) are a
+    // stronger signal than generic Hive comments, so they count NATIVE_MULT× toward the
+    // "effective" comment total: effective = comments + (NATIVE_MULT − 1)·native.
+    COMMENT_NATIVE_MULT: parseFloat(process.env.COMMENT_NATIVE_MULT ?? '1.5'),
+    COMMENT_SYNC_ENABLED: parseBool(process.env.COMMENT_SYNC_ENABLED, true),
+    COMMENT_SYNC_INTERVAL_MIN: parseInt(process.env.COMMENT_SYNC_INTERVAL_MIN) || 30,
+    COMMENT_SYNC_MAX_AGE_DAYS: parseInt(process.env.COMMENT_SYNC_MAX_AGE_DAYS) || 30,   // only fetch comments for videos this fresh
+    COMMENT_SYNC_MAX_VIDEOS: parseInt(process.env.COMMENT_SYNC_MAX_VIDEOS) || 8000,     // hard cap per run (safety)
+    COMMENT_CACHE_MS: parseInt(process.env.COMMENT_CACHE_MS) || 5 * 60 * 1000,          // in-process count-map TTL (follow feed)
+
+    // Accounts excluded from the LEADERBOARDS only (and the leaderboard-derived
+    // creator suggestions) — e.g. bots/spam gaming the boards. This is NARROWER than
+    // the site-wide hidden-creators list: these accounts still appear in feeds/search/
+    // their own profile; they're just kept off the boards. Comma-separated, lowercased.
+    LEADERBOARD_EXCLUDED_USERS: (process.env.LEADERBOARD_EXCLUDED_USERS || 'badadib')
+        .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+
+    // ─── "Follow these" creator suggestions (/feeds/suggested-creators) ───────
+    // A who-to-follow rail for the discover / interests feeds: creators who posted
+    // interest-matching videos in the last SUGGEST_WINDOW_DAYS, ranked by the
+    // engagement on their recent work (views + comments + reshares). Topic membership
+    // comes from the pre-built `leaderboard-topics-v2` (robust — it doesn't depend on
+    // a fresh video being transcribed yet); the engagement is aggregated from the
+    // video docs + video-comment-counts + reshares. See utils/suggestedCreators.js.
+    SUGGEST_CREATORS_ENABLED: parseBool(process.env.SUGGEST_CREATORS_ENABLED, true),
+    SUGGEST_WINDOW_DAYS: parseInt(process.env.SUGGEST_WINDOW_DAYS) || 30,
+    SUGGEST_CACHE_MS: parseInt(process.env.SUGGEST_CACHE_MS) || 15 * 60 * 1000,
+    SUGGEST_MAX_LIMIT: parseInt(process.env.SUGGEST_MAX_LIMIT) || 30,
+    // Engagement blend, on ln(1+x) so views (which dwarf the others) don't dominate.
+    // Comments and reshares are the stronger "someone cared" signals, so weighted up.
+    SUGGEST_W_VIEWS: parseFloat(process.env.SUGGEST_W_VIEWS ?? '1'),
+    SUGGEST_W_COMMENTS: parseFloat(process.env.SUGGEST_W_COMMENTS ?? '2'),
+    SUGGEST_W_RESHARES: parseFloat(process.env.SUGGEST_W_RESHARES ?? '3'),
 
     // ─── Related videos (/feeds/related/:author/:permlink) ────────────────────
     // Sidebar recommendations biased toward the CURRENT video's winning topic,

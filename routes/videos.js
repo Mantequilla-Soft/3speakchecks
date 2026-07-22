@@ -9,8 +9,9 @@ const { hiddenListSync, isHiddenSync } = require('../utils/hiddenCreators');
 const { getFollowingList, hiveRpcBatch } = require('../utils/hive');
 const { getCachedViews, setCachedViews } = require('../utils/cache');
 const { validateApiKey } = require('../utils/middleware');
-const { ENABLE_MONGO_WRITES, RETENTION_FOLLOW_HALFLIFE_H } = require('../utils/config');
+const { ENABLE_MONGO_WRITES, RETENTION_FOLLOW_HALFLIFE_H, FOLLOW_FEED_HALFLIFE_H } = require('../utils/config');
 const { rankFeed } = require('../utils/feedRank');
+const { getCommentCounts, commentBoost, keyOf: commentKeyOf } = require('../utils/commentBoost');
 const { getTranscriptionTags } = require('../utils/transcriptionTags');
 
 // Cache whether hive_tags_lower has been backfilled
@@ -438,19 +439,28 @@ router.get('/feed/:username', async (req, res) => {
         const legacyKeys = new Set(legacyWithDate.map(v => `${v.author || v.owner}/${v.permlink}`));
         const uniqueEmbed = embedVideos.filter(ev => !legacyKeys.has(`${ev.author}/${ev.permlink}`));
 
-        // Merge, then rank. Base rank = recency decay (half-life
-        // RETENTION_FOLLOW_HALFLIFE_H) so the follow feed stays newest-first;
-        // retention then multiplies it as a bounded nudge, so a slightly older
-        // video with strong retention can edge above a brand-new one but recency
-        // still dominates. See algo.md.
+        // Merge, then rank. Base rank = recency decay (half-life FOLLOW_FEED_HALFLIFE_H,
+        // its OWN shorter default than the tag/firstUploads feeds) so the follow feed
+        // stays newest-first and leans harder on the newest uploads; retention then
+        // multiplies it as a bounded nudge, so a slightly older video with strong
+        // retention can edge above a brand-new one but recency still dominates.
         const allVideos = [...legacyWithDate, ...uniqueEmbed];
         const nowMs = Date.now();
-        const halfLifeMs = Math.max(1, RETENTION_FOLLOW_HALFLIFE_H) * 3600 * 1000;
+        const halfLifeMs = Math.max(1, FOLLOW_FEED_HALFLIFE_H) * 3600 * 1000;
         for (const v of allVideos) {
             const ageMs = Math.max(0, nowMs - (v._sortDate || 0));
             // Floor > 0 so a missing/epoch _sortDate can't zero the score (which
             // would make the interest/retention multipliers no-ops).
             v._rankScore = Math.max(1e-6, Math.pow(0.5, ageMs / halfLifeMs));
+        }
+        // Comment boost — a video followed creators are discussing ranks a bit higher.
+        // One cached map read; ×1 when there's no record. Keyed by HIVE author/permlink.
+        const commentCounts = await getCommentCounts(db);
+        if (commentCounts.size) {
+            for (const v of allVideos) {
+                const rec = commentCounts.get(commentKeyOf(v.author || v.owner, v.permlink));
+                if (rec) v._rankScore *= commentBoost(rec.effective);
+            }
         }
         // Interest boost → retention → sort → hide-seen (?currentuser=), on the
         // recency-decayed base score. Shared with the discovery feeds so the follow

@@ -14,6 +14,11 @@
  */
 const express = require('express');
 const { hiddenListSync } = require('../utils/hiddenCreators');
+const { LEADERBOARD_EXCLUDED_USERS } = require('../utils/config');
+
+// Site-wide hidden creators PLUS the leaderboard-only exclusions (bots/spam gaming
+// the boards). Used at every ranking site so an excluded account never places.
+const excludedCreators = () => [...hiddenListSync(), ...LEADERBOARD_EXCLUDED_USERS];
 const router = express.Router();
 const { getDb } = require('../utils/db');
 const { expandTag } = require('../utils/interestTags');
@@ -89,7 +94,7 @@ router.get('/leaderboard', async (req, res) => {
 
     const db = getDb();
     const col = db.collection(COLLECTION);
-    const filter = { window, [metric]: { $gt: 0 }, user: { $nin: hiddenListSync() } };
+    const filter = { window, [metric]: { $gt: 0 }, user: { $nin: excludedCreators() } };
 
     // (window, metric) has its own index, so this sort is served by it.
     const [docs, total] = await Promise.all([
@@ -138,7 +143,7 @@ router.get('/leaderboard/summary', async (req, res) => {
 
     const boards = await Promise.all(METRICS.map(async (metric) => {
       const docs = await col
-        .find({ window, [metric]: { $gt: 0 }, user: { $nin: hiddenListSync() } }, { projection: projection() })
+        .find({ window, [metric]: { $gt: 0 }, user: { $nin: excludedCreators() } }, { projection: projection() })
         .sort({ [metric]: -1, user: 1 })
         .limit(limit)
         .toArray();
@@ -303,7 +308,7 @@ router.get('/leaderboard/topic', async (req, res) => {
       // doesn't carry — hence `approx: true` in the response.
       const sums = Object.fromEntries(TOPIC_METRICS.map((m) => [m, { $sum: `$${m}` }]));
       const base = [
-        { $match: { window, topic: { $in: bucket }, user: { $nin: hiddenListSync() } } },
+        { $match: { window, topic: { $in: bucket }, user: { $nin: excludedCreators() } } },
         {
           $group: {
             _id: '$user',
@@ -323,7 +328,7 @@ router.get('/leaderboard/topic', async (req, res) => {
       docs = rows.map((r) => ({ ...r, user: r._id }));
       total = counted[0]?.n || 0;
     } else {
-      const filter = { window, topic, [metric]: { $gt: 0 }, user: { $nin: hiddenListSync() } };
+      const filter = { window, topic, [metric]: { $gt: 0 }, user: { $nin: excludedCreators() } };
       // Served by the (window, topic, metric) index.
       [docs, total] = await Promise.all([
         col.find(filter, { projection: topicProjection() })
