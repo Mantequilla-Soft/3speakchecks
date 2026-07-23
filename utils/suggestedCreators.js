@@ -22,7 +22,7 @@ const {
   SUGGEST_CREATORS_ENABLED, SUGGEST_WINDOW_DAYS, SUGGEST_CACHE_MS,
   SUGGEST_W_VIEWS, SUGGEST_W_COMMENTS, SUGGEST_W_RESHARES, LEADERBOARD_EXCLUDED_USERS,
 } = require('./config');
-const { expandTag } = require('./interestTags');
+const { expandTag, TAGS_V2_TOPICS } = require('./interestTags');
 const { hiddenListSync } = require('./hiddenCreators');
 const { mulberry32 } = require('./hive');
 const { shuffle } = require('./discoverScore');
@@ -112,16 +112,59 @@ function rankCandidates(candidates, engagement, opts = {}) {
     if (!e || e.videoCount === 0) continue;                    // no recent measurable work
     const score = wv * Math.log1p(e.views) + wc * Math.log1p(e.comments) + wr * Math.log1p(e.reshares);
     if (!(score > 0)) continue;
+
+    // `cand.topics` is EITHER a plain slug array (unit tests / legacy callers) OR the
+    // {topic, uploads} array from the aggregation. Keep matchedTopics as slugs, and
+    // pick basisTopic = the matched topic the creator uploads MOST in (the reason we
+    // surface them). No uploads info (string shape) → just the first matched topic.
+    const rawTopics = cand.topics || [];
+    const matchedTopics = rawTopics.map((t) => (typeof t === 'string' ? t : t.topic)).filter(Boolean);
+    let basisTopic = matchedTopics[0] || null;
+    if (rawTopics.length && typeof rawTopics[0] === 'object') {
+      let best = -1;
+      for (const t of rawTopics) {
+        const u = Number(t.uploads) || 0;
+        if (t.topic && u > best) { best = u; basisTopic = t.topic; }
+      }
+    }
+
     scored.push({
       author,
       score: Math.round(score * 1000) / 1000,
       views: e.views, comments: e.comments, reshares: e.reshares, videoCount: e.videoCount,
-      matchedTopics: cand.topics || [],
+      matchedTopics,
+      basisTopic,
       sample: e.sample,
     });
   }
   scored.sort((a, b) => (b.score - a.score) || (b.views - a.views) || a.author.localeCompare(b.author));
   return scored.slice(0, limit);
+}
+
+/**
+ * Interleave score-ranked creators across their DOMINANT topic (round-robin), so one
+ * high-engagement topic can't monopolise a multi-topic interest's rail (e.g. gaming
+ * inside the "entertainment" rollup). Topics lead in order of their strongest creator,
+ * so the best creators still surface first. A single-topic interest collapses to one
+ * group — i.e. no change.
+ */
+function diversifyByTopic(rankedList, domByAuthor) {
+  const groups = new Map();
+  for (const c of rankedList) {
+    const t = domByAuthor.get(lc(c.author)) || '_';
+    if (!groups.has(t)) groups.set(t, []);
+    groups.get(t).push(c); // already score-desc
+  }
+  const topicOrder = [...groups.keys()].sort((a, b) => groups.get(b)[0].score - groups.get(a)[0].score);
+  const out = [];
+  for (let more = true; more; ) {
+    more = false;
+    for (const t of topicOrder) {
+      const g = groups.get(t);
+      if (g.length) { out.push(g.shift()); more = true; }
+    }
+  }
+  return out;
 }
 
 /**
@@ -138,21 +181,45 @@ async function getSuggestedCreators(db, { interests, followSet, excludeUser, lim
   // Candidate creators active in those topics in the 30d board (not hidden).
   const rows = await db.collection('leaderboard-topics-v2').aggregate([
     { $match: { window: '30d', topic: { $in: [...topics] }, video_uploads: { $gt: 0 }, user: { $nin: [...hiddenListSync(), ...LEADERBOARD_EXCLUDED_USERS] } } },
-    { $group: { _id: '$user', topics: { $addToSet: '$topic' } } },
+    // Keep the per-topic upload count (not just the set) so ranking can surface the
+    // topic MOST of the creator's recent videos fall under — the "why suggested" chip.
+    { $group: { _id: '$user', topics: { $push: { topic: '$topic', uploads: '$video_uploads' } } } },
   ]).toArray();
   if (!rows.length) return [];
 
+  // RELEVANCE GATE: only suggest a creator whose DOMINANT (most-uploaded, leaf) topic
+  // is one of the caller's interests. Candidacy above only requires a SINGLE upload in
+  // a matched topic, and ranking below is by whole-channel engagement — so without this
+  // a big off-topic channel (e.g. a gamer who posted one music video) qualifies for an
+  // unrelated interest and, on its gaming engagement, floods that rail. Restricting to
+  // leaf topics (TAGS_V2_TOPICS) so a rolled-up category row can't be the "dominant".
+  const interestLeaves = new Set([...topics].filter((t) => TAGS_V2_TOPICS.includes(t)));
+  const candidateUsers = rows.map((r) => r._id);
+  const domRows = await db.collection('leaderboard-topics-v2').aggregate([
+    { $match: { window: '30d', user: { $in: candidateUsers }, video_uploads: { $gt: 0 }, topic: { $in: TAGS_V2_TOPICS } } },
+    { $sort: { video_uploads: -1 } },
+    { $group: { _id: '$user', topic: { $first: '$topic' } } },
+  ]).toArray();
+  const domByUser = new Map(domRows.map((r) => [lc(r._id), r.topic]));
+
+  const relevant = rows.filter((r) => interestLeaves.has(domByUser.get(lc(r._id))));
+  if (!relevant.length) return [];
+
   const engagement = await getRecentCreatorEngagement(db);
-  // Rank up to `pool` (≥ limit); then, with a seed, take a seeded-random `limit` out of
-  // that pool so discover (seed + pool=20) shows a different slice than interests
-  // (deterministic top). Re-sorted by score so the row still reads best-first.
-  const poolSize = Math.max(limit, Number(pool) || 0);
-  const ranked = rankCandidates(
-    rows.map((r) => ({ author: r._id, topics: r.topics })),
+  // Score ALL relevant candidates, then interleave across dominant topics so no single
+  // topic monopolises a multi-topic interest's rail (single-topic interests are one
+  // group → unchanged).
+  const scored = rankCandidates(
+    relevant.map((r) => ({ author: r._id, topics: r.topics })),
     engagement,
-    { followSet, excludeUser, limit: poolSize },
+    { followSet, excludeUser, limit: relevant.length },
   );
-  if (!ranked.length) return [];
+  if (!scored.length) return [];
+  const diversified = diversifyByTopic(scored, domByUser);
+  // Take `pool` (≥ limit); a seed then picks a random `limit` out of it (discover),
+  // otherwise the deterministic top `limit` (interests).
+  const poolSize = Math.max(limit, Number(pool) || 0);
+  const ranked = diversified.slice(0, poolSize);
 
   let top;
   if (seed != null && ranked.length > limit) {
@@ -162,15 +229,19 @@ async function getSuggestedCreators(db, { interests, followSet, excludeUser, lim
     top = ranked.slice(0, limit);
   }
 
-  // Enrich the top slice with display name + avatar for the tile (one bounded query).
+  // Enrich the top slice with profile (name + avatar) for the tile. basisTopic is the
+  // creator's dominant topic — already computed above for the relevance gate, and now
+  // guaranteed to be one of the caller's interests (exactly the "why suggested" chip).
+  const topUsers = top.map((t) => t.author);
   const profs = await db.collection('hiveprofiles')
-    .find({ username: { $in: top.map((t) => t.author) } }, { projection: { username: 1, display_name: 1, profile_image: 1 } })
+    .find({ username: { $in: topUsers } }, { projection: { username: 1, display_name: 1, profile_image: 1 } })
     .toArray();
   const profByUser = new Map(profs.map((p) => [lc(p.username), p]));
   for (const t of top) {
     const p = profByUser.get(t.author);
     t.display_name = (p && p.display_name) || t.author;
     t.avatar = (p && p.profile_image) || `https://images.hive.blog/u/${t.author}/avatar`;
+    t.basisTopic = domByUser.get(t.author) || t.basisTopic || (t.matchedTopics && t.matchedTopics[0]) || null;
   }
   return top;
 }

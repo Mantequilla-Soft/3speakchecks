@@ -23,7 +23,7 @@
 const TAGS_V2_TREE = {
   'tech-science': ['technology', 'education', 'science', 'programming'],
   'crypto-finance': ['cryptocurrency', 'finance', 'business'],
-  'entertainment': ['music', 'gaming', 'lifestyle', 'vlog', 'comedy', 'story-time', 'commercial'],
+  'entertainment': ['music', 'gaming', 'film-tv', 'lifestyle', 'vlog', 'comedy', 'story-time', 'commercial'],
   'arts-diy': ['art', 'diy-crafts', 'photography'],
   'food-outdoor': ['nature', 'travel', 'food', 'pets', 'gardening'],
   'sports-health': ['sports', 'health', 'fitness'],
