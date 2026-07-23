@@ -261,6 +261,25 @@ module.exports = {
     COMMENT_SYNC_MAX_VIDEOS: parseInt(process.env.COMMENT_SYNC_MAX_VIDEOS) || 8000,     // hard cap per run (safety)
     COMMENT_CACHE_MS: parseInt(process.env.COMMENT_CACHE_MS) || 5 * 60 * 1000,          // in-process count-map TTL (follow feed)
 
+    // ─── Feed card stats (services/videoStats.js) ─────────────────────────────
+    // The payout / vote / comment numbers on a feed card used to be fetched by EVERY
+    // browser, one condenser_api.get_content per visible card — ~964KB and ~1.3s for a
+    // 24-card page, of which ~85% was the active_votes array we only ever counted.
+    // Instead the checker keeps them in `video-stats` (refreshed from Hive in the
+    // background, shared by all users) and stamps them into stats.* on feed responses,
+    // so the browser needs no Hive calls at all.
+    //
+    // OFF by default: with it off, responses are byte-identical to before and the
+    // frontend keeps its own fetch, so deploying this is inert until switched on.
+    VIDEO_STATS_ENABLED: parseBool(process.env.VIDEO_STATS_ENABLED, false),
+    // How stale a stored row may be before it's queued for a background refresh.
+    VIDEO_STATS_TTL_MIN: parseInt(process.env.VIDEO_STATS_TTL_MIN) || 20,
+    // Background drain cadence + how many posts one drain may fetch from Hive.
+    VIDEO_STATS_DRAIN_SEC: parseInt(process.env.VIDEO_STATS_DRAIN_SEC) || 20,
+    VIDEO_STATS_DRAIN_BATCH: parseInt(process.env.VIDEO_STATS_DRAIN_BATCH) || 120,
+    // Safety cap on the pending-refresh queue so a traffic spike can't grow it without bound.
+    VIDEO_STATS_QUEUE_MAX: parseInt(process.env.VIDEO_STATS_QUEUE_MAX) || 5000,
+
     // Accounts excluded from the LEADERBOARDS only (and the leaderboard-derived
     // creator suggestions) — e.g. bots/spam gaming the boards. This is NARROWER than
     // the site-wide hidden-creators list: these accounts still appear in feeds/search/
