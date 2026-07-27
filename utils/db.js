@@ -111,6 +111,12 @@ async function connectToMongo() {
                 // Hidden (moderation-visibility) creators — loaded as a cached set
                 // and consulted by every feed/search/leaderboard read.
                 ['contentcreators', { hidden: 1 }],
+                // Live-stream leaderboard foundation (see routes/streamStats.js) —
+                // aggregated per host later. stream-stats._id is streamId (auto-indexed).
+                ['stream-stats', { host: 1 }],
+                ['stream-boosts', { streamId: 1 }],
+                ['stream-boosts', { host: 1 }],
+                ['stream-boosts', { sender: 1 }],
             ];
             for (const [coll, key] of wanted) {
                 try { await db.collection(coll).createIndex(key, { background: true }); }

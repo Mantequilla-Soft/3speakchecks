@@ -44,6 +44,7 @@ const snapsRoutes = require('./routes/snaps');
 const playlistsFeedRoutes = require('./routes/playlistsFeed');
 const reviewsRoutes = require('./routes/reviews');
 const reportsRoutes = require('./routes/reports');
+const streamStatsRoutes = require('./routes/streamStats');
 
 const app = express();
 
@@ -95,6 +96,7 @@ app.use('/', snapsRoutes);
 app.use('/', playlistsFeedRoutes);
 app.use('/', reviewsRoutes);
 app.use('/', reportsRoutes);
+app.use('/', streamStatsRoutes);
 
 // Track whether heavy sync tasks are running
 let syncRunning = false;
