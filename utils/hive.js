@@ -112,6 +112,71 @@ async function fetchHiveRewards(authorPerms) {
     return results;
 }
 
+// Card stats (payout / vote count / comment count) — see fetchHiveVideoStats.
+const videoStatsCache = new Map();
+const VIDEO_STATS_CACHE_TTL = 10 * 60 * 1000;
+
+/**
+ * Fetch the three numbers a feed card shows — payout, vote count and comment
+ * count — for each post, via batched `bridge.get_post`.
+ *
+ * Uses bridge (hivemind) rather than condenser_api.get_content because
+ * get_content returns the FULL active_votes array — hundreds of voters per post,
+ * ~85% of the payload — which we only ever counted. bridge returns the
+ * already-computed `payout` (pending while unpaid, final once paid, so no
+ * last_payout branching), `stats.total_votes` and `children` directly. Verified
+ * to match get_content exactly on payout/votes/comments across a live feed page.
+ *
+ * A post whose batch failed is ABSENT from the returned map (never zeroed), so a
+ * transient RPC error can't overwrite a good stored value with 0.
+ */
+async function fetchHiveVideoStats(authorPerms, { batchSize = 20, ttl = VIDEO_STATS_CACHE_TTL } = {}) {
+    const results = new Map();
+    const toFetch = [];
+
+    for (const { author, permlink } of authorPerms) {
+        if (!author || !permlink) continue;
+        const key = `${author}/${permlink}`;
+        const cached = videoStatsCache.get(key);
+        if (cached && Date.now() - cached.timestamp < ttl) {
+            results.set(key, { reward: cached.reward, votes: cached.votes, comments: cached.comments });
+        } else {
+            toFetch.push({ author, permlink, key });
+        }
+    }
+
+    const batches = [];
+    for (let i = 0; i < toFetch.length; i += batchSize) {
+        batches.push({ offset: i, items: toFetch.slice(i, i + batchSize) });
+    }
+
+    await Promise.all(batches.map(async ({ offset, items }) => {
+        const rpcBatch = items.map((item, idx) => ({
+            jsonrpc: '2.0',
+            id: offset + idx,
+            method: 'bridge.get_post',
+            params: { author: item.author, permlink: item.permlink }
+        }));
+
+        const resultsArray = await hiveRpcBatch(rpcBatch);
+
+        for (const rpcResult of resultsArray) {
+            const post = rpcResult && rpcResult.result;
+            if (!post || !post.author || !post.permlink) continue;
+            const row = {
+                reward: Math.round((parseFloat(post.payout) || 0) * 1000) / 1000,
+                votes: (post.stats && post.stats.total_votes) || 0,
+                comments: post.children || 0
+            };
+            const key = `${post.author}/${post.permlink}`;
+            results.set(key, row);
+            videoStatsCache.set(key, { ...row, timestamp: Date.now() });
+        }
+    }));
+
+    return results;
+}
+
 // Fetch live display data for the current page (no cache for post-level data)
 async function fetchLivePageData(authorPerms) {
     const results = new Map();
@@ -318,6 +383,7 @@ module.exports = {
     hiveRpcBatch,
     hiveReputationToScore,
     fetchHiveRewards,
+    fetchHiveVideoStats,
     fetchLivePageData,
     fetchFollowerCounts,
     fetchCommentReplyCounts,

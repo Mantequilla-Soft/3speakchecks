@@ -43,6 +43,8 @@ const gdprAdminRoutes = require('./routes/gdprAdmin');
 const snapsRoutes = require('./routes/snaps');
 const playlistsFeedRoutes = require('./routes/playlistsFeed');
 const reviewsRoutes = require('./routes/reviews');
+const reportsRoutes = require('./routes/reports');
+const streamStatsRoutes = require('./routes/streamStats');
 
 const app = express();
 
@@ -63,6 +65,13 @@ app.use('/feeds', slimFeed);                       // every /feeds/* route is a 
 app.use(['/feed', '/videos/tag'], slimFeed);       // list routes inside the videos router
 // Shorts keep `hive_body` — it's their visible caption, not dead weight.
 app.use(['/shorts', '/shortssorted'], makeSlimFeed(SHORTS_HEAVY_FIELDS));
+
+// Stamp payout/vote/comment counts onto feed list items from our own `video-stats`
+// cache, so browsers no longer fetch them from Hive per card. No-op unless
+// VIDEO_STATS_ENABLED. Same list paths as slimFeed above.
+const { videoStatsMiddleware, scheduleVideoStats } = require('./services/videoStats');
+app.use('/feeds', videoStatsMiddleware);
+app.use(['/feed', '/videos/tag'], videoStatsMiddleware);
 
 // Mount routes
 app.use('/', healthRoutes);
@@ -86,6 +95,8 @@ app.use('/', leaderboardRoutes);
 app.use('/', snapsRoutes);
 app.use('/', playlistsFeedRoutes);
 app.use('/', reviewsRoutes);
+app.use('/', reportsRoutes);
+app.use('/', streamStatsRoutes);
 
 // Track whether heavy sync tasks are running
 let syncRunning = false;
@@ -242,6 +253,11 @@ async function startServer() {
     // stamp them into video-comment-counts, so the feeds can apply a comment boost
     // cheaply. In-process (network I/O, not CPU) — see services/commentCounts.js.
     scheduleCommentCounts();
+
+    // Feed card stats (payout/votes/comments): drain the lazily-built refresh queue
+    // from Hive into `video-stats`. Populated by what the feeds actually serve —
+    // see services/videoStats.js. No-op unless VIDEO_STATS_ENABLED.
+    scheduleVideoStats();
 
     app.listen(PORT, () => {
         console.log(`Server is running on port ${PORT}`);

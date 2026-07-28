@@ -32,6 +32,18 @@ const METRICS = [
   'video_watch_secs',
   'short_watch_secs',
   'tags_given',
+  // Livestream + boosts (rollup writes these; read 0 until the stream service
+  // calls the checker's /stream-stats/* endpoints). Each (window, metric) pair
+  // is indexed on the leaderboard collection, so sorting by any of these is an
+  // index scan just like the video metrics.
+  'streams',
+  'stream_secs',
+  'stream_peak_viewers',
+  'stream_viewers',
+  'boosts_received',
+  'boost_amount_received',
+  'boosts_given',
+  'boost_amount_given',
 ];
 
 // Watch-duration tracking only started on this date, so for the 30d/365d/all
