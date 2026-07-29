@@ -34,6 +34,7 @@ const { DISCOVER_AGE_STRATIFY, DISCOVER_AGE_WEIGHTS } = require('../utils/config
 const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
 const { getFollowSetForReq, applyFollowBoost } = require('../utils/followBoost');
 const { getSuggestedCreators } = require('../utils/suggestedCreators');
+const { attachTopicTags } = require('../utils/topicTag');
 const { SUGGEST_MAX_LIMIT } = require('../utils/config');
 const { getPool, hydrate } = require('../utils/discoverPool');
 const { getInterestPool } = require('../utils/interestPool');
@@ -1200,6 +1201,16 @@ router.get('/community/:id/new', async (req, res) => {
         const total = allVideos.length;
         const totalPages = Math.ceil(total / limit);
         const videos = allVideos.slice(skip, skip + limit);
+        // Display topic (`tag_v2`), same as the profile grid + home feeds — the
+        // community grid uses Card3 too. video_id (legacy) / _embedPermlink (embed)
+        // is the ASSET permlink for auto-tags; permlink is the HIVE permlink for
+        // viewer tags. Runs before the cleanup delete below.
+        await attachTopicTags(
+            db,
+            videos,
+            (v) => ({ author: v.owner, permlink: v.video_id || v._embedPermlink }),
+            (v) => ({ author: v.author || v.owner, permlink: v.permlink }),
+        );
         videos.forEach(v => { delete v._sortDate; delete v._source; });
 
         res.json({
@@ -1289,6 +1300,14 @@ router.get('/community/:id/trending', async (req, res) => {
         const total = rankedVideos.length;
         const totalPages = Math.ceil(total / limit);
         const videos = rankedVideos.slice(skip, skip + limit);
+        // Display topic (`tag_v2`) for Card3 — run BEFORE the cleanup delete strips
+        // _embedPermlink (the embed asset permlink used for auto-tags).
+        await attachTopicTags(
+            db,
+            videos,
+            (v) => ({ author: v.owner, permlink: v.video_id || v._embedPermlink }),
+            (v) => ({ author: v.author || v.owner, permlink: v.permlink }),
+        );
         videos.forEach(v => { delete v._views; delete v._sortDate; delete v._source; delete v._embedPermlink; delete v._rankScore; delete v.retention_mult; delete v.retention_relq; delete v.interest_match; });
 
         res.json({
