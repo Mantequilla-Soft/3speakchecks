@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
-const { confirmAndBan, unavailableCount, unavailableMatch } = require('../utils/unavailable');
+const { confirmAndBan, reinstateVideo, unavailableCount, unavailableMatch } = require('../utils/unavailable');
 const { hiddenFromFeedMatch } = require('../utils/hiddenFromFeed');
 const { nsfwFilter, nsfwFilterTags, nsfwFilterHiveTags, BANNED_FILTER } = require('../utils/filters');
 const { hiddenListSync, isHiddenSync } = require('../utils/hiddenCreators');
@@ -901,6 +901,29 @@ router.put('/video/listing', validateApiKey, async (req, res) => {
     } catch (error) {
         console.error('Error updating listing:', error);
         res.status(500).json({ success: false, error: 'Internal server error', message: 'Failed to update listing' });
+    }
+});
+
+// Clear a video's "unavailable"/deleted shadow-ban — called after its source file
+// is replaced with a fresh, playable one (see the Replace-video flow). Same
+// app-key auth as the other /video/* mutations. Idempotent: a no-op if the video
+// wasn't flagged.
+router.post('/video/reinstate', validateApiKey, async (req, res) => {
+    const db = getDb();
+    if (!ENABLE_MONGO_WRITES) {
+        return res.status(503).json({ success: false, error: 'Writes disabled', message: 'MongoDB writes are currently disabled' });
+    }
+    try {
+        const { owner, permlink } = req.body;
+        if (!owner || !permlink) {
+            return res.status(400).json({ success: false, error: 'Invalid request', message: 'owner and permlink are required' });
+        }
+        const cleared = await reinstateVideo(db, owner, permlink);
+        console.log(`[unavailable] reinstate ${owner}/${permlink} — changed:${cleared}`);
+        res.json({ success: true, message: cleared ? 'Video reinstated' : 'Nothing to clear', data: { owner, permlink, cleared } });
+    } catch (error) {
+        console.error('Error reinstating video:', error);
+        res.status(500).json({ success: false, error: 'Internal server error', message: 'Failed to reinstate video' });
     }
 });
 
