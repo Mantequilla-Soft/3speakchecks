@@ -38,7 +38,7 @@ const {
   DISCOVER_RETENTION_WEIGHT, DISCOVER_RETENTION_MIN_MULT, DISCOVER_RETENTION_MAX_MULT,
   RETENTION_COLLECTION,
 } = require('../utils/config');
-const { ageHours, freshness, newBoost } = require('../utils/discoverScore');
+const { ageHours, freshness, newBoost, recencyBoost } = require('../utils/discoverScore');
 const { retentionMultiplier } = require('../utils/retentionScore');
 const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
 const { commentBoost } = require('../utils/commentBoost');
@@ -287,9 +287,10 @@ async function run() {
 
       const f = freshness(hrs);
       const nb = newBoost(hrs);
+      const rb = recencyBoost(hrs);      // continuous "newer ranks higher" premium
       const cb = curationBoost(counts);
       const mb = commentBoost(commentEffective);
-      const base = f * nb * cb * mb * retMult;
+      const base = f * nb * rb * cb * mb * retMult;
 
       const doc = {
         owner: k.owner,
@@ -313,6 +314,7 @@ async function run() {
         retentionMult: Math.round(retMult * 1000) / 1000,
         freshness: Math.round(f * 1000) / 1000,
         newBoost: Math.round(nb * 1000) / 1000,
+        recencyBoost: Math.round(rb * 1000) / 1000,
         curationBoost: Math.round(cb * 1000) / 1000,
         commentBoost: Math.round(mb * 1000) / 1000,
         base: Math.round(base * 100000) / 100000,

@@ -103,6 +103,10 @@ module.exports = {
     // and firstUploads also use — those should stay on the gentler 7-day decay.
     // 2026-07-22: 96h (4 days) so followed creators' newest uploads sit higher.
     FOLLOW_FEED_HALFLIFE_H: parseFloat(process.env.FOLLOW_FEED_HALFLIFE_H ?? '96'),
+    // How far back /feeds/new-from-following looks for unwatched uploads by creators
+    // you follow. A week: long enough that a couple of days away still shows you what
+    // you missed, short enough that "new" still means new.
+    NEW_FROM_FOLLOWING_DAYS: parseInt(process.env.NEW_FROM_FOLLOWING_DAYS ?? '7', 10),
     // Interests feed gets a mild extra recency tilt on top of `base`'s freshness:
     //   × (1 + TILT · max(0, 1 − ageDays/DAYS))
     // A brand-new video ×1.35, tapering linearly to ×1.0 at 21 days+. Gentle — the
@@ -174,7 +178,26 @@ module.exports = {
     DISCOVER_AGE_HALFLIFE_Y: parseFloat(process.env.DISCOVER_AGE_HALFLIFE_Y ?? '1'),
     DISCOVER_AGE_FLOOR: parseFloat(process.env.DISCOVER_AGE_FLOOR ?? '0.25'),
     DISCOVER_NEW_GRACE_H: parseFloat(process.env.DISCOVER_NEW_GRACE_H ?? '12'),      // "really fresh" window
-    DISCOVER_NEW_BOOST: parseFloat(process.env.DISCOVER_NEW_BOOST ?? '1.15'),        // modest lift, tapering to 1.0
+    DISCOVER_NEW_BOOST: parseFloat(process.env.DISCOVER_NEW_BOOST ?? '1.15'),        // gentle first-traction nudge, tapers to 1
+
+    // ── RECENCY BOOST: a continuous recency premium in the SCORE, decoupled from the
+    // age bands ───────────────────────────────────────────────────────────────────
+    // A smooth multiplier folded into `base`: strongest for a brand-new upload, halving
+    // its extra lift every DISCOVER_RECENCY_HALFLIFE_H, back to ×1 after a few days.
+    //   recencyBoost = 1 + DISCOVER_RECENCY_BOOST · 0.5^(ageHours / DISCOVER_RECENCY_HALFLIFE_H)
+    //   defaults: 0h ×3.0, 10h ×2.4, 1d ×2.0, 2d ×1.5, 4d ×1.16, 7d ~×1.03.
+    // Unlike the <10h age band (which sets HOW MANY fresh videos a discover page holds),
+    // this sets HOW HIGH a recent video scores — so more-recent videos lead in the
+    // interests feed (pure score, no bands), the follow feed, AND the within-band order
+    // of discover, regardless of the other multipliers (curation ≤2.5, comment ≤1.8,
+    // retention ≤2.5) that would otherwise let an engaged older video outrank a fresh one.
+    // Continuous (not a <10h step), so "newer ranks higher" is a real gradient.
+    DISCOVER_RECENCY_BOOST: parseFloat(process.env.DISCOVER_RECENCY_BOOST ?? '2'),           // extra lift at age 0 (0 = off)
+    DISCOVER_RECENCY_HALFLIFE_H: parseFloat(process.env.DISCOVER_RECENCY_HALFLIFE_H ?? '18'), // how fast the premium fades
+    // Boundary (hours) of the dedicated ultra-fresh age BAND at the front of the discover
+    // distribution (its own guaranteed page share — see DISCOVER_AGE_WEIGHTS). Composition
+    // only; the recency premium above is what boosts the SCORE.
+    DISCOVER_ULTRAFRESH_HOURS: parseFloat(process.env.DISCOVER_ULTRAFRESH_HOURS ?? '10'),
     DISCOVER_INTEREST_MULTIPLIER: parseFloat(process.env.DISCOVER_INTEREST_MULTIPLIER ?? '2.5'), // > global 2.0
     // Retention is a PRIMARY driver here (trending only tilts it at 0.6). relQ is
     // deliberately compressed near 1.0 by the Bayesian prior (live range ≈
@@ -200,10 +223,14 @@ module.exports = {
     // too few videos hands its slots to the others (graceful backfill). The mix
     // holds at EVERY page depth, so pagination stays consistent.
     DISCOVER_AGE_STRATIFY: parseBool(process.env.DISCOVER_AGE_STRATIFY, true),
-    //                         <7d   7-30d  30d-6mo 6mo-1y  1y-2y  >2y
-    // 2026-07-22: tilted newer (was 0.50,0.20,0.12,0.08,0.06,0.04) — more <30d,
-    // fewer >6mo, so the page leans fresher. Older videos aren't gone, just rarer.
-    DISCOVER_AGE_WEIGHTS: (process.env.DISCOVER_AGE_WEIGHTS || '0.56, 0.22, 0.11, 0.06, 0.03, 0.02')
+    //                       <10h   10h-7d  7-30d  30d-6mo 6mo-1y  1y-2y  >2y
+    // 7 bands (2026-07-22): a dedicated ULTRA-FRESH <10h band was carved off the front
+    // of the old <7d 0.56 share — <10h now gets a guaranteed 0.16 of every page (at the
+    // TOP, since the scheduler front-loads high-weight bands), and 10h-7d keeps 0.40.
+    // Fresh total (<7d) is still 0.56; it's just split so brand-new uploads lead.
+    // A band that's short of videos (only ~15 exist <10h) backfills into the others.
+    // ⚠️ MUST stay aligned 1:1 with AGE_BAND_DAYS in utils/discoverScore.js.
+    DISCOVER_AGE_WEIGHTS: (process.env.DISCOVER_AGE_WEIGHTS || '0.16, 0.40, 0.22, 0.11, 0.06, 0.03, 0.02')
       .split(',').map((s) => parseFloat(s.trim())).filter((n) => Number.isFinite(n)),
 
     // ─── Curation signals: the MANUAL votes (utils/curation.js) ───────────────

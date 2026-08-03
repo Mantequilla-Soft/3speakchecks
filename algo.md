@@ -470,7 +470,7 @@ so a lively section lifts a video but a brigaded one can't run away. No record �
 > small tie-breaker, not a major factor, which is exactly what it should be.
 
 **Where:** folded into the discover/interests pool `base` by the discover worker
-(so `base = freshness × newBoost × curationBoost × commentBoost × retention`), and applied
+(so `base = freshness × newBoost × recencyBoost × curationBoost × commentBoost × retention`), and applied
 to the follow feed's rank at request time (one cached-map read). Trending is untouched.
 
 | Var | Default | Meaning |
@@ -514,7 +514,7 @@ math lives in `utils/discoverScore.js` (pure, no I/O).
 ## TLDR
 
 ```
-base           = freshness × newBoost × curationBoost × commentBoost × retention   (precomputed hourly)
+base           = freshness × newBoost × recencyBoost × curationBoost × commentBoost × retention   (precomputed hourly)
 discover_score = base × interest × follow × jitter                  (per request)
 ```
 then random picks from the lower half are interleaved into every 4th slot.
@@ -584,6 +584,25 @@ window (a hard cliff would drop a video ~43% the minute it crossed the boundary)
 newBoost = 1 + (DISCOVER_NEW_BOOST − 1) · max(0, 1 − ageHours/DISCOVER_NEW_GRACE_H)
 ```
 
+**2b. recencyBoost** — a **continuous** recency premium in the score, decoupled from the
+age bands. Strongest brand-new, its extra lift halving every `DISCOVER_RECENCY_HALFLIFE_H`
+(18h), back toward ×1 after a few days:
+```
+recencyBoost = 1 + DISCOVER_RECENCY_BOOST · 0.5^(ageHours / DISCOVER_RECENCY_HALFLIFE_H)
+```
+Live curve (strength 2): 0h ×2.97, 1.5h ×2.89, 10h ×2.4, 1d ×2.0, 2d ×1.5, 7d ~×1.03.
+
+This is the answer to a real gap: the **age band** decides HOW MANY fresh videos a discover
+page holds, but a *score* boost can't change that composition — so recency needs to live in
+the **score** to actually rank recent videos up. And it must be continuous ("newer = higher"
+as a gradient), not a `<10h` step, and strong enough to matter against the other multipliers
+(curation ≤2.5, comment ≤1.8, retention ≤2.5) that would otherwise let an engaged older video
+outrank a fresh one. It lifts recent videos on `base` everywhere ranking is score-driven: the
+**interests** feed (pure score, no bands — live it now leads with 1h-old videos), the
+**follow** feed, and the **within-band ordering** of discover. The `<10h` age band and this
+boost are the two independent levers: the band sets fresh *quantity* on the discover page, the
+recencyBoost sets fresh *rank*.
+
 **3. curationBoost** — the manual votes: reshares + playlist/Watch-Later saves + viewer
 tags, log-damped and hard-capped. Real curation signals, but popularity ones, so they lift
 and never run away. See *Curation signals* above; reshares kept their previous weight, so
@@ -623,14 +642,19 @@ The discover page is composed to an **explicit age distribution**, not left to e
 from freshness × exploration. `DISCOVER_AGE_WEIGHTS` is each age band's share of every
 page:
 
-| \<7d | 7–30d | 30d–6mo | 6mo–1y | 1y–2y | >2y |
-|---|---|---|---|---|---|
-| 56% | 22% | 11% | 6% | 3% | 2% |
+| **\<10h** | 10h–7d | 7–30d | 30d–6mo | 6mo–1y | 1y–2y | >2y |
+|---|---|---|---|---|---|---|
+| **16%** | 40% | 22% | 11% | 6% | 3% | 2% |
 
-*(2026-07-22: tilted newer, from `50/20/12/8/6/4`. Measured live after the change:
-56/23/10/6/2/2 on page 1.)*
+*(2026-07-22: tilted newer, from `50/20/12/8/6/4`, then 56/22/11/6/3/2. A dedicated
+ULTRA-FRESH `<10h` band was carved off the front of the old `<7d` 0.56 share — `<10h`
+now gets its own guaranteed 16%, front-loaded, so brand-new uploads LEAD the feed;
+`10h-7d` keeps 0.40. Measured live: `<10h` ≈ 17% of page 1. `<7d` total is still ~56%.
+A band short of videos backfills — only ~15 videos are `<10h` at any time, so its 16%
+is thin past the first page and flows to `10h-7d`.)*
 
-Bands are fixed at 7d / 30d / 6mo / 1y / 2y (`AGE_BAND_DAYS`). Within a band, videos
+Bands are fixed at 10h / 7d / 30d / 6mo / 1y / 2y (`AGE_BAND_DAYS`, the first from
+`DISCOVER_ULTRAFRESH_HOURS`). Within a band, videos
 stay in `discover_score` order — so **quality still picks WHICH videos of each age
 surface; the weights only pick HOW MANY**. "How much old content" is now a product
 dial, decoupled from "which old content is good", which is quality.
@@ -696,7 +720,7 @@ Live: **~0.12s** vs trendingSorted's ~1.5s.
 ## Debugging
 
 `?debug=1` preserves `discover_score`, `base`, `age_hours`, `freshness`,
-`new_boost`, `curation_boost`, `reshares`, `saves`, `viewer_tags`, `comment_boost`,
+`new_boost`, `recency_boost`, `curation_boost`, `reshares`, `saves`, `viewer_tags`, `comment_boost`,
 `comments`, `native_comments`, `follow_match`,
 `retention_mult`, `retention_relq`, `retention_viewers`, `interest_match` and
 `pool_src` in the response (stripped otherwise).
@@ -718,15 +742,18 @@ Live: **~0.12s** vs trendingSorted's ~1.5s.
 | `DISCOVER_FRESH_FLOOR` | 0.43 | where the fast decay bottoms out (~3.7 days) |
 | `DISCOVER_AGE_HALFLIFE_Y` | 1 | the long age tail's half-life (years); `0` = flat floor |
 | `DISCOVER_AGE_FLOOR` | 0.25 | tail floor — engages exactly at 2y; `FLOOR·this` = ancient freshness (0.107) |
-| `DISCOVER_NEW_GRACE_H` | 12 | "really fresh" window |
-| `DISCOVER_NEW_BOOST` | 1.15 | lift at age 0, tapering to 1.0 |
+| `DISCOVER_NEW_GRACE_H` | 12 | "really fresh" window (newBoost taper) |
+| `DISCOVER_NEW_BOOST` | 1.15 | gentle first-traction lift at age 0, tapering to 1.0 |
+| `DISCOVER_RECENCY_BOOST` | 2 | extra `base` lift at age 0 for the continuous recency premium (0 = off) |
+| `DISCOVER_RECENCY_HALFLIFE_H` | 18 | how fast that premium fades (its bonus halves every this-many hours) |
+| `DISCOVER_ULTRAFRESH_HOURS` | 10 | the `<10h` age BAND boundary (composition/quota only, not score) |
 | `DISCOVER_INTEREST_MULTIPLIER` | 2.5 | interest-match multiplier |
 | `DISCOVER_RETENTION_WEIGHT` | 1.5 | amplifies the relQ spread |
 | `DISCOVER_RETENTION_MIN_MULT` | 0.4 | retention lower bound |
 | `DISCOVER_RETENTION_MAX_MULT` | 2.5 | retention upper bound |
 | `DISCOVER_JITTER` | 0.15 | ±15% seeded per-video jitter |
 | `DISCOVER_AGE_STRATIFY` | true | compose the page to `DISCOVER_AGE_WEIGHTS`; `false` = legacy explore interleave |
-| `DISCOVER_AGE_WEIGHTS` | `0.56,0.22,0.11,0.06,0.03,0.02` | page share per band (\<7d / 7–30d / 30d–6mo / 6mo–1y / 1y–2y / >2y) |
+| `DISCOVER_AGE_WEIGHTS` | `0.16,0.40,0.22,0.11,0.06,0.03,0.02` | page share per band (**\<10h** / 10h–7d / 7–30d / 30d–6mo / 6mo–1y / 1y–2y / >2y) — MUST match `AGE_BAND_DAYS` length |
 | `DISCOVER_EXPLORE_EVERY` | 4 | legacy interleave only — every Nth slot = exploration pick |
 
 ---

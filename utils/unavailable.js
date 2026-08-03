@@ -199,10 +199,35 @@ async function unavailableCount() {
   return db.collection(UNAVAILABLE_COLLECTION).countDocuments();
 }
 
+/**
+ * Reinstate a video after its source file is replaced with a fresh, playable one:
+ *   - lift the `unavailable` shadow-ban + drop the audit row (inverse of writeBan);
+ *   - flip a `status:'deleted'` doc back to `'published'` so the "Deleted" badge
+ *     (Card3 reads `video.status === 'deleted'`) disappears.
+ * The `videos`/`embed-video` collections are shared with the embed service, so
+ * writing them here is the source of truth. Pools repopulate on their next cron
+ * rebuild. Returns whether anything was actually changed.
+ */
+async function reinstateVideo(db, owner, permlink) {
+  const now = new Date();
+  const eMatch = { $or: [{ owner, permlink }, { hive_author: owner, hive_permlink: permlink }] };
+  const liftBan = { $set: { unavailable: false, reinstatedAt: now }, $unset: { unavailableAt: '' } };
+  const undelete = { $set: { status: 'published', reinstatedAt: now } };
+  const [v1, e1, v2, e2, a] = await Promise.all([
+    db.collection('videos').updateMany({ owner, permlink, unavailable: true }, liftBan),
+    db.collection('embed-video').updateMany({ ...eMatch, unavailable: true }, liftBan),
+    db.collection('videos').updateMany({ owner, permlink, status: 'deleted' }, undelete),
+    db.collection('embed-video').updateMany({ ...eMatch, status: 'deleted' }, undelete),
+    db.collection(UNAVAILABLE_COLLECTION).deleteOne({ _id: `${owner}/${permlink}` }),
+  ]);
+  return (v1.modifiedCount + e1.modifiedCount + v2.modifiedCount + e2.modifiedCount + a.deletedCount) > 0;
+}
+
 module.exports = {
   UNAVAILABLE_COLLECTION,
   unavailableMatch,
   confirmAndBan,
+  reinstateVideo,
   verifyGone,
   extractCid,
   unavailableCount,
