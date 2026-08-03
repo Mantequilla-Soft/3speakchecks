@@ -7,6 +7,78 @@ const { ObjectId } = require('mongodb');
 const { COLLECTION_NAME } = require('../utils/config');
 const { BANNED_FILTER } = require('../utils/filters');
 
+const HIVE_ACCOUNT_RE = /^[a-z][a-z0-9.-]{2,15}$/;
+
+/**
+ * GET /user/:username/counts — the stat line under a profile's bio.
+ *
+ * ⚠️ These queries MIRROR the profile tabs, because a stat that disagrees with
+ * the tab under it is worse than no stat:
+ *  - videos = the same union `/api/my-videos` totals (legacy `videos` + embed
+ *    long-form). @meno is 8 embed + 123 legacy, @badadib the reverse, so
+ *    counting one collection understates most creators by an order of magnitude.
+ *  - shorts = the same query as `/shorts/:username`, which keys on `embed_url`
+ *    + `processed`. Shorts docs carry a NULL `hive_permlink`, so requiring it
+ *    (as the video feeds do) reported 2 of @meno's 70.
+ *
+ * No "member since": the oldest row we hold for @meno is 2025 while the account
+ * predates that, so any date here would be the age of our INDEX, not of the
+ * creator. Better to omit it than to state it wrongly.
+ */
+const countsCache = new Map();          // username -> { at, value }
+const COUNTS_TTL_MS = 5 * 60 * 1000;    // profiles are hot; these numbers move slowly
+
+router.get('/user/:username/counts', async (req, res) => {
+  try {
+    const username = String(req.params.username || '').trim().toLowerCase();
+    if (!HIVE_ACCOUNT_RE.test(username)) {
+      return res.status(400).json({ error: 'invalid username' });
+    }
+
+    const cached = countsCache.get(username);
+    if (cached && Date.now() - cached.at < COUNTS_TTL_MS) return res.json(cached.value);
+
+    const db = getDb();
+    const embedVideoCollection = db.collection('embed-video');
+    const sumOf = (field) => ({ $sum: { $ifNull: [`$${field}`, 0] } });
+    const tally = (col, match) => col.aggregate([
+      { $match: match },
+      { $group: { _id: null, n: { $sum: 1 }, views: sumOf('views') } },
+    ]).toArray().then((r) => r[0] || { n: 0, views: 0 });
+
+    const [embedVideos, embedShorts, legacyVideos] = await Promise.all([
+      // long-form embed uploads — /api/my-videos also drops rows with no Hive
+      // link, since those have nothing to open.
+      tally(embedVideoCollection, {
+        owner: username, status: 'published', short: false, listed_on_3speak: true,
+        hive_author: { $ne: null }, hive_permlink: { $ne: null }, ...BANNED_FILTER,
+      }),
+      // shorts — as /shorts/:username counts them (embed_url, NOT hive_permlink)
+      tally(embedVideoCollection, {
+        owner: username, status: 'published', short: true, processed: true,
+        embed_url: { $exists: true, $ne: null }, listed_on_3speak: { $ne: false },
+      }),
+      // legacy — /api/my-videos also excludes failed publishes
+      tally(db.collection('videos'), {
+        owner: username, status: 'published', publishFailed: { $ne: true }, ...BANNED_FILTER,
+      }),
+    ]);
+
+    const value = {
+      username,
+      videos: embedVideos.n + legacyVideos.n,
+      shorts: embedShorts.n,
+      views: embedVideos.views + embedShorts.views + legacyVideos.views,
+    };
+
+    countsCache.set(username, { at: Date.now(), value });
+    return res.json(value);
+  } catch (error) {
+    console.error('Error building user counts:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch user counts' });
+  }
+});
+
 // Read-only premium-status lookup against embed-users. Used by the
 // frontend to render a Pro badge next to the user's avatar (nav, bottom
 // bar, AuthorBadge under videos). Source of truth is the embed-users
