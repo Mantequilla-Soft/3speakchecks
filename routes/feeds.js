@@ -7,11 +7,12 @@ const { hiddenFromFeedMatch } = require('../utils/hiddenFromFeed');
 const { nsfwFilterTags, nsfwFilterHiveTags } = require('../utils/filters');
 const { hiddenListSync } = require('../utils/hiddenCreators');
 const { HIDDEN_AUTHORS, TRENDING_CANDIDATE_LIMIT, TRENDING_VIEWS_WEIGHT, TRENDING_VOTES_WEIGHT, TRENDING_COMMENTS_WEIGHT, TRENDING_REWARD_WEIGHT, TRENDING_RESHARE_WEIGHT, RESHARE_WEIGHT } = require('../utils/config');
-const { fetchHiveRewards, fetchLivePageData, mulberry32 } = require('../utils/hive');
+const { fetchHiveRewards, fetchLivePageData, mulberry32, getFollowingList } = require('../utils/hive');
 const { INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTags, tagsMatchInterests } = require('../utils/interests');
 const { applyRetention } = require('../utils/retentionRank');
 const { rankFeed, applyInterestBoost, filterForUser } = require('../utils/feedRank');
-const { getUserFilters, applyUserFilterQuery } = require('../utils/userFilters');
+const { getUserFilters, applyUserFilters, applyUserFilterQuery, normUser } = require('../utils/userFilters');
+const { NEW_FROM_FOLLOWING_DAYS } = require('../utils/config');
 const { RETENTION_FOLLOW_HALFLIFE_H, INTEREST_RECENCY_TILT, INTEREST_RECENCY_DAYS } = require('../utils/config');
 
 // Mild "favor newer" tilt for the interests feed, on top of `base`'s own freshness:
@@ -122,6 +123,138 @@ router.get('/interests', async (req, res) => {
     } catch (error) {
         console.error('Error building interests feed:', error);
         res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+/**
+ * GET /feeds/new-from-following — "New from creators you follow" rail on home.
+ *
+ * Creators the caller follows who uploaded in the last NEW_FROM_FOLLOWING_DAYS
+ * days and still have something the caller HASN'T watched, with the unwatched
+ * work split into shorts vs videos so the rail can render "3 shorts / 2 videos".
+ *
+ * Deliberately not a video feed: it returns creators, so the answer stays small
+ * (a few dozen rows) no matter how much those creators posted.
+ *
+ * Counting rules, and why:
+ *  - "Unwatched" reads the SAME watch_history the feeds use (_id
+ *    "viewer:owner:permlink"), so anything watched anywhere on 3Speak stops
+ *    counting here too.
+ *  - Dismissed creators/videos are dropped (utils/userFilters), like every feed.
+ *  - The caller's own uploads never count.
+ *  - Visibility matches the feeds exactly: shorts use `listed_on_3speak != false`,
+ *    videos use `listed_on_3speak == true` — the two feeds disagree on the
+ *    missing-field case, and a creator advertising "1 new video" that appears in
+ *    no feed would be a dead end.
+ *
+ * Query: ?currentuser=<viewer>&days&limit&nsfw
+ */
+router.get('/new-from-following', async (req, res) => {
+    try {
+        const db = getDb();
+        const viewer = normUser(req.query.currentuser || req.query.username);
+        if (!viewer) {
+            return res.status(400).json({ error: 'currentuser is required' });
+        }
+
+        const days = Math.min(Math.max(parseInt(req.query.days, 10) || NEW_FROM_FOLLOWING_DAYS, 1), 30);
+        const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
+
+        const followingList = await getFollowingList(viewer);
+        const authors = (followingList || []).map(normUser).filter((a) => a && a !== viewer);
+        if (!authors.length) {
+            return res.json({ creators: [], days, total_creators: 0, total_items: 0 });
+        }
+
+        const since = new Date(Date.now() - days * 86400000);
+        const hidden = hiddenListSync();
+
+        // ~320 uploads platform-wide in a 7-day window, so this cap sits far above
+        // anything a real following list produces. It's here so a pathological
+        // window (?days=30 on a huge follow list) can't pull an unbounded set.
+        const CANDIDATE_LIMIT = 1000;
+
+        const embedCollection = db.collection('embed-video');
+        const videosCollection = db.collection('videos');
+
+        const [embedDocs, legacyDocs] = await Promise.all([
+            embedCollection.find({
+                owner: { $in: authors, $nin: [...HIDDEN_AUTHORS, ...hidden] },
+                status: 'published',
+                hive_permlink: { $ne: null },
+                createdAt: { $gte: since },
+                $or: [
+                    { short: true, listed_on_3speak: { $ne: false } },
+                    { short: false, listed_on_3speak: true },
+                ],
+                ...nsfwFilterHiveTags(req), ...unavailableMatch(), ...hiddenFromFeedMatch(),
+            }, { projection: { owner: 1, hive_author: 1, hive_permlink: 1, short: 1, createdAt: 1 } })
+                .sort({ createdAt: -1 }).limit(CANDIDATE_LIMIT).toArray(),
+            videosCollection.find({
+                owner: { $in: authors, $nin: [...HIDDEN_AUTHORS, ...hidden] },
+                status: 'published',
+                created: { $gte: since },
+                ...nsfwFilterTags(req), ...unavailableMatch(), ...hiddenFromFeedMatch(),
+            }, { projection: { owner: 1, author: 1, permlink: 1, created: 1 } })
+                .sort({ created: -1 }).limit(CANDIDATE_LIMIT).toArray(),
+        ]);
+
+        // One shape for both collections. `owner` (not hive_author) is the key the
+        // feeds and the shorts player write into watch_history, so grouping and the
+        // seen-check both use it.
+        const items = [];
+        const seenKeys = new Set();
+        const push = (owner, permlink, isShort, created) => {
+            const o = normUser(owner);
+            if (!o || !permlink) return;
+            const key = `${o}/${permlink}`;
+            if (seenKeys.has(key)) return;      // an embed doc can also exist as a legacy doc
+            seenKeys.add(key);
+            items.push({ owner: o, permlink, short: !!isShort, created: created || null });
+        };
+        for (const d of legacyDocs) push(d.owner || d.author, d.permlink, false, d.created);
+        for (const d of embedDocs) push(d.owner || d.hive_author, d.hive_permlink, d.short, d.createdAt);
+
+        // Dismissed creators / videos, same as every feed.
+        const filters = await getUserFilters(db, viewer);
+        let fresh = applyUserFilters(items, filters, (v) => ({ owner: v.owner, permlink: v.permlink }));
+
+        // Already watched → not new to this viewer. Unconditional: unlike the feeds'
+        // optional "hide watched", what's left over IS the point of this rail.
+        if (fresh.length) {
+            const ids = fresh.map((v) => `${viewer}:${v.owner}:${v.permlink}`);
+            const watched = await db.collection('watch_history')
+                .find({ _id: { $in: ids } }, { projection: { _id: 1 } }).toArray();
+            const seen = new Set(watched.map((w) => w._id));
+            fresh = fresh.filter((v) => !seen.has(`${viewer}:${v.owner}:${v.permlink}`));
+        }
+
+        const byCreator = new Map();
+        for (const v of fresh) {
+            let row = byCreator.get(v.owner);
+            if (!row) {
+                row = { username: v.owner, shorts: 0, videos: 0, total: 0, latest_at: null };
+                byCreator.set(v.owner, row);
+            }
+            if (v.short) row.shorts++; else row.videos++;
+            row.total++;
+            const t = v.created ? new Date(v.created) : null;
+            if (t && !Number.isNaN(t.getTime()) && (!row.latest_at || t > row.latest_at)) row.latest_at = t;
+        }
+
+        // Newest activity first — the rail reads as "who just posted", not a ranking.
+        const creators = [...byCreator.values()]
+            .sort((a, b) => (b.latest_at?.getTime() || 0) - (a.latest_at?.getTime() || 0) || b.total - a.total);
+
+        return res.json({
+            creators: creators.slice(0, limit).map((c) => ({ ...c, latest_at: c.latest_at || undefined })),
+            days,
+            total_creators: creators.length,
+            total_items: fresh.length,
+        });
+    } catch (error) {
+        console.error('Error building new-from-following:', error);
+        return res.status(500).json({ error: 'Failed to fetch new uploads from your creators' });
     }
 });
 
@@ -285,6 +418,7 @@ router.get('/discover', async (req, res) => {
                 v.base = p.base;
                 v.freshness = p.freshness;
                 v.new_boost = p.newBoost;
+                v.recency_boost = p.recencyBoost;
                 v.curation_boost = p.curationBoost;
                 v.reshares = p.reshares;
                 v.saves = p.saves;

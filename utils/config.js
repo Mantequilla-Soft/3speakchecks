@@ -103,6 +103,10 @@ module.exports = {
     // and firstUploads also use — those should stay on the gentler 7-day decay.
     // 2026-07-22: 96h (4 days) so followed creators' newest uploads sit higher.
     FOLLOW_FEED_HALFLIFE_H: parseFloat(process.env.FOLLOW_FEED_HALFLIFE_H ?? '96'),
+    // How far back /feeds/new-from-following looks for unwatched uploads by creators
+    // you follow. A week: long enough that a couple of days away still shows you what
+    // you missed, short enough that "new" still means new.
+    NEW_FROM_FOLLOWING_DAYS: parseInt(process.env.NEW_FROM_FOLLOWING_DAYS ?? '7', 10),
     // Interests feed gets a mild extra recency tilt on top of `base`'s freshness:
     //   × (1 + TILT · max(0, 1 − ageDays/DAYS))
     // A brand-new video ×1.35, tapering linearly to ×1.0 at 21 days+. Gentle — the
