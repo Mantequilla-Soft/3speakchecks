@@ -17,13 +17,16 @@ const {
   DISCOVER_HALFLIFE_H, DISCOVER_FRESH_FLOOR, DISCOVER_NEW_GRACE_H,
   DISCOVER_NEW_BOOST, DISCOVER_JITTER, DISCOVER_EXPLORE_EVERY,
   DISCOVER_AGE_HALFLIFE_Y, DISCOVER_AGE_FLOOR,
+  DISCOVER_ULTRAFRESH_HOURS, DISCOVER_RECENCY_BOOST, DISCOVER_RECENCY_HALFLIFE_H,
 } = require('./config');
 
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 
 // Age-band upper bounds in DAYS, aligned 1:1 with DISCOVER_AGE_WEIGHTS.
-//   [0]<7d  [1]7–30d  [2]30d–6mo  [3]6mo–1y  [4]1y–2y  [5]>2y
-const AGE_BAND_DAYS = [7, 30, 182.5, 365, 730, Infinity];
+//   [0]<10h  [1]10h–7d  [2]7–30d  [3]30d–6mo  [4]6mo–1y  [5]1y–2y  [6]>2y
+// The first band is the ultra-fresh window (default 10h) so brand-new uploads get
+// their own guaranteed, front-loaded share of the page — see the weights in config.
+const AGE_BAND_DAYS = [(DISCOVER_ULTRAFRESH_HOURS || 10) / 24, 7, 30, 182.5, 365, 730, Infinity];
 const DAY_MS = 86400000;
 
 /** Which age band a `created` date falls in. Unknown/invalid date → the oldest band. */
@@ -87,6 +90,23 @@ function freshness(hrs, halfLifeH = DISCOVER_HALFLIFE_H, floor = DISCOVER_FRESH_
 function newBoost(hrs, graceH = DISCOVER_NEW_GRACE_H, boost = DISCOVER_NEW_BOOST) {
   if (!Number.isFinite(hrs) || !(graceH > 0)) return 1;
   return 1 + (boost - 1) * Math.max(0, 1 - hrs / graceH);
+}
+
+/**
+ * RECENCY boost: a CONTINUOUS recency premium folded into `base`, decoupled from the
+ * discrete age bands. Strongest for a brand-new upload, its extra lift halving every
+ * `halfLifeH`, back to ×1 after a few days:
+ *   recencyBoost = 1 + STRENGTH · 0.5^(hrs / halfLifeH)
+ *
+ * This is "newer ranks higher" as a real gradient — unlike newBoost (a mild <12h taper)
+ * or the <10h age band (composition, not score). It's what lifts recent videos on SCORE
+ * everywhere ranking is score-driven: the interests feed (no bands), the follow feed, and
+ * the within-band ordering of discover — so a recent video isn't left behind by an older
+ * one carrying strong curation / retention / comment multipliers.
+ */
+function recencyBoost(hrs, strength = DISCOVER_RECENCY_BOOST, halfLifeH = DISCOVER_RECENCY_HALFLIFE_H) {
+  if (!Number.isFinite(hrs) || !(strength > 0) || !(halfLifeH > 0)) return 1;
+  return 1 + strength * Math.pow(0.5, hrs / halfLifeH);
 }
 
 // The reshare boost used to live here. It is now one of three terms in the shared
@@ -240,6 +260,6 @@ function interleaveByAge(ranked, weights, now = Date.now()) {
 }
 
 module.exports = {
-  ageHours, freshness, newBoost, jitter, shuffle, weightedOrder,
+  ageHours, freshness, newBoost, recencyBoost, jitter, shuffle, weightedOrder,
   interleaveExploration, interleaveByAge, ageBandIndex, AGE_BAND_DAYS, clamp,
 };

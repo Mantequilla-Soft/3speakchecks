@@ -261,12 +261,14 @@ describe('weighted exploration', () => {
 
 describe('age-stratified interleave — compose the page to a target distribution', () => {
   const now = Date.now();
-  const WEIGHTS = [0.50, 0.20, 0.12, 0.08, 0.06, 0.04];
-  // Build a big score-sorted list with plenty in every band.
-  const daysForBand = [3, 20, 100, 280, 550, 1500];
+  // 7 bands: <10h, 10h-7d, 7-30d, 30d-6mo, 6mo-1y, 1y-2y, >2y.
+  const WEIGHTS = [0.16, 0.40, 0.22, 0.11, 0.06, 0.03, 0.02];
+  const NB = WEIGHTS.length;
+  // A representative age (days) for each band.
+  const daysForBand = [0.2, 3, 20, 100, 280, 550, 1500];
   const makeList = (perBand) => {
     const out = [];
-    for (let b = 0; b < 6; b++) {
+    for (let b = 0; b < NB; b++) {
       for (let k = 0; k < perBand; k++) {
         out.push({ id: `${b}-${k}`, band: b, created: new Date(now - daysForBand[b] * DAY) });
       }
@@ -276,7 +278,7 @@ describe('age-stratified interleave — compose the page to a target distributio
   };
 
   const bandMix = (page) => {
-    const c = [0, 0, 0, 0, 0, 0];
+    const c = new Array(NB).fill(0);
     for (const v of page) c[ageBandIndex(v.created, now)]++;
     return c.map((n) => n / page.length);
   };
@@ -313,25 +315,27 @@ describe('age-stratified interleave — compose the page to a target distributio
   });
 
   test('a thin/empty band backfills from the others (no gaps, still exactly-once)', () => {
-    // no >2y videos at all
+    // Only the fresher bands 0-4 have videos; 1y-2y and >2y are absent.
     const list = [];
     for (const b of [0, 1, 2, 3, 4]) for (let k = 0; k < 40; k++) {
       list.push({ id: `${b}-${k}`, created: new Date(now - daysForBand[b] * DAY) });
     }
     const out = interleaveByAge(list, WEIGHTS, now);
     expect(out).toHaveLength(list.length);
-    // the >2y quota flows to the most-behind weighted band (the 50% one), so the
-    // page skews fresher rather than leaving holes
+    // The absent bands' quota flows to the present bands, so the page skews fresher
+    // rather than leaving holes. The highest-weight present band (10h-7d, 0.40) leads.
     const mix = bandMix(out.slice(0, 48));
     expect(mix[5]).toBe(0);
-    expect(mix[0]).toBeGreaterThan(0.5);
+    expect(mix[6]).toBe(0);
+    expect(mix[1]).toBeGreaterThanOrEqual(0.4);
+    expect(mix[1]).toBeGreaterThan(mix[0]);
   });
 
   test('a zero-weight band still appears (exactly-once), just served last', () => {
-    const w = [1, 0, 0, 0, 0, 0]; // only fresh has weight
+    const w = [1, 0, 0, 0, 0, 0, 0]; // only the <10h band has weight
     const list = [
-      { id: 'a', created: new Date(now - 1 * DAY) },
-      { id: 'b', created: new Date(now - 1500 * DAY) },
+      { id: 'a', created: new Date(now - 5 * 3600 * 1000) }, // <10h → band 0 (weight 1)
+      { id: 'b', created: new Date(now - 1500 * DAY) },       // >2y  → band 6 (weight 0)
     ];
     const out = interleaveByAge(list, w, now);
     expect(out.map((v) => v.id)).toEqual(['a', 'b']);
@@ -346,17 +350,54 @@ describe('age-stratified interleave — compose the page to a target distributio
 
 describe('ageBandIndex', () => {
   const now = Date.now();
-  test('boundaries land in the expected band', () => {
-    expect(ageBandIndex(new Date(now - 1 * DAY), now)).toBe(0);
-    expect(ageBandIndex(new Date(now - 20 * DAY), now)).toBe(1);
-    expect(ageBandIndex(new Date(now - 100 * DAY), now)).toBe(2);
-    expect(ageBandIndex(new Date(now - 300 * DAY), now)).toBe(3);
-    expect(ageBandIndex(new Date(now - 600 * DAY), now)).toBe(4);
-    expect(ageBandIndex(new Date(now - 2000 * DAY), now)).toBe(5);
+  const HOUR = 3600 * 1000;
+  test('boundaries land in the expected band (7 bands, <10h first)', () => {
+    expect(ageBandIndex(new Date(now - 5 * HOUR), now)).toBe(0);   // <10h
+    expect(ageBandIndex(new Date(now - 1 * DAY), now)).toBe(1);    // 10h-7d
+    expect(ageBandIndex(new Date(now - 20 * DAY), now)).toBe(2);   // 7-30d
+    expect(ageBandIndex(new Date(now - 100 * DAY), now)).toBe(3);  // 30d-6mo
+    expect(ageBandIndex(new Date(now - 300 * DAY), now)).toBe(4);  // 6mo-1y
+    expect(ageBandIndex(new Date(now - 600 * DAY), now)).toBe(5);  // 1y-2y
+    expect(ageBandIndex(new Date(now - 2000 * DAY), now)).toBe(6); // >2y
   });
   test('an unknown/invalid date is treated as oldest', () => {
-    expect(ageBandIndex(null, now)).toBe(5);
-    expect(ageBandIndex(undefined, now)).toBe(5);
+    expect(ageBandIndex(null, now)).toBe(6);
+    expect(ageBandIndex(undefined, now)).toBe(6);
+  });
+});
+
+describe('recencyBoost — a continuous "newer ranks higher" premium', () => {
+  const { recencyBoost } = require('../utils/discoverScore');
+  test('strongest brand-new, decaying SMOOTHLY with age (not a step)', () => {
+    expect(recencyBoost(0)).toBeGreaterThan(recencyBoost(6));
+    expect(recencyBoost(6)).toBeGreaterThan(recencyBoost(24));
+    expect(recencyBoost(24)).toBeGreaterThan(recencyBoost(72));
+    expect(recencyBoost(24)).not.toBe(recencyBoost(0));   // NOT flat — a 1-day video differs from brand-new
+  });
+  test('halves its EXTRA lift every half-life', () => {
+    // recencyBoost = 1 + S·0.5^(hrs/H); the premium above 1 halves each half-life.
+    const H = 18; // matches the default
+    const p0 = recencyBoost(0, 2, H) - 1;
+    const p1 = recencyBoost(H, 2, H) - 1;
+    const p2 = recencyBoost(2 * H, 2, H) - 1;
+    expect(p1).toBeCloseTo(p0 / 2, 5);
+    expect(p2).toBeCloseTo(p0 / 4, 5);
+  });
+  test('fades toward ×1 for old content, never below 1', () => {
+    expect(recencyBoost(7 * 24)).toBeLessThan(1.1);
+    expect(recencyBoost(365 * 24)).toBeGreaterThanOrEqual(1);
+  });
+  test('lifts a recent video over an engaged older one on base', () => {
+    // recent, no engagement: freshness × recencyBoost
+    const recent = freshness(4) * recencyBoost(4);
+    // 3-day-old with strong curation + retention
+    const older = freshness(3 * 24) * recencyBoost(3 * 24) * 2 * 1.5;
+    expect(recent).toBeGreaterThan(older);
+  });
+  test('non-finite / disabled → neutral', () => {
+    expect(recencyBoost(Infinity)).toBe(1);
+    expect(recencyBoost(5, 0)).toBe(1);      // strength 0 = off
+    expect(recencyBoost(5, 2, 0)).toBe(1);   // half-life 0 = off
   });
 });
 
