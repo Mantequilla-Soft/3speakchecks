@@ -6,8 +6,98 @@ const { attachTopicTags } = require('../utils/topicTag');
 const { ObjectId } = require('mongodb');
 const { COLLECTION_NAME } = require('../utils/config');
 const { BANNED_FILTER } = require('../utils/filters');
+const { validateApiKey } = require('../utils/middleware');
+const { ENABLE_MONGO_WRITES } = require('../utils/config');
 
 const HIVE_ACCOUNT_RE = /^[a-z][a-z0-9.-]{2,15}$/;
+
+/**
+ * Channel trailer — the video that autoplays at the top of a profile's Overview.
+ *
+ * Stored on the creator's `embed-users` row (the per-creator settings doc) as
+ * `channel_trailer: { author, permlink, set_at }`. The frontend ALSO mirrors it
+ * into the user's Hive posting_json_metadata, so the choice survives this
+ * database; if the two ever disagree, this row wins because it's what the
+ * profile reads.
+ */
+const CREATORS = 'embed-users';
+
+// GET is public — every profile view needs it.
+router.get('/user/:username/trailer', async (req, res) => {
+  try {
+    const username = String(req.params.username || '').trim().toLowerCase();
+    if (!HIVE_ACCOUNT_RE.test(username)) return res.status(400).json({ error: 'invalid username' });
+    const doc = await getDb().collection(CREATORS).findOne(
+      { username },
+      { projection: { channel_trailer: 1 } },
+    );
+    return res.json({ username, trailer: doc?.channel_trailer || null });
+  } catch (error) {
+    console.error('Error reading channel trailer:', error.message);
+    return res.status(500).json({ error: 'Failed to read channel trailer' });
+  }
+});
+
+// Same app-key auth as the other creator mutations (/video/listing, /video/nsfw).
+// `permlink: null` clears it.
+router.put('/user/trailer', validateApiKey, async (req, res) => {
+  if (!ENABLE_MONGO_WRITES) {
+    return res.status(503).json({ success: false, error: 'Writes disabled' });
+  }
+  try {
+    const username = String(req.body?.username || '').trim().toLowerCase();
+    const permlink = req.body?.permlink == null ? null : String(req.body.permlink).trim();
+    const author = String(req.body?.author || username).trim().toLowerCase();
+    if (!HIVE_ACCOUNT_RE.test(username)) {
+      return res.status(400).json({ success: false, error: 'invalid username' });
+    }
+
+    const db = getDb();
+    if (permlink) {
+      // The app key is public, so prove the target is actually THIS creator's
+      // video before pinning it to their profile. Without this anyone holding
+      // the key could point any channel's trailer at any video.
+      //
+      // ⚠️ Ownership only — NOT publication state. The studio sets the trailer
+      // seconds after broadcasting, while the embed doc is still being linked to
+      // the Hive post: requiring status:'published' here rejected a legitimate
+      // request 12 seconds before the doc settled (badadib, 2026-08-04).
+      const [legacy, embed] = await Promise.all([
+        db.collection('videos').findOne(
+          { owner: username, permlink }, { projection: { _id: 1 } },
+        ),
+        db.collection('embed-video').findOne(
+          {
+            $or: [
+              { owner: username, permlink },              // asset id
+              { owner: username, hive_permlink: permlink },
+              { hive_author: author, hive_permlink: permlink },
+            ],
+          },
+          { projection: { _id: 1 } },
+        ),
+      ]);
+      if (!legacy && !embed) {
+        return res.status(404).json({ success: false, error: 'No published video of that user matches this permlink' });
+      }
+    }
+
+    const value = permlink ? { author, permlink, set_at: new Date() } : null;
+    await db.collection(CREATORS).updateOne(
+      { username },
+      value
+        ? { $set: { channel_trailer: value }, $setOnInsert: { username } }
+        : { $unset: { channel_trailer: '' }, $setOnInsert: { username } },
+      { upsert: true },
+    );
+
+    console.log(`Channel trailer for ${username} → ${permlink || '(cleared)'}`);
+    return res.json({ success: true, username, trailer: value });
+  } catch (error) {
+    console.error('Error setting channel trailer:', error.message);
+    return res.status(500).json({ success: false, error: 'Failed to set channel trailer' });
+  }
+});
 
 /**
  * GET /user/:username/counts — the stat line under a profile's bio.
