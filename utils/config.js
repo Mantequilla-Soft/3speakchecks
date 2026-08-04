@@ -357,4 +357,21 @@ module.exports = {
     COST_PER_24H_PROMOTION_HBD: parseFloat(process.env.COST_PER_24H_PROMOTION_HBD) || 0.5,
     // Hard cap on how far out promotedUntil can reach (days from now).
     MAX_PROMOTION_DAYS: parseInt(process.env.MAX_PROMOTION_DAYS) || 7,
+
+    // --- Thumbnail backfill (services/thumbnailSync.js) ---
+    // Repairs embed-video docs whose thumbnail_url is null but whose Hive post
+    // carries the image (livestream VODs, third-party embed-API uploads). Stopgap
+    // until the upstream publisher copies the thumbnail onto the doc itself.
+    THUMBNAIL_SYNC_ENABLED: parseBool(process.env.THUMBNAIL_SYNC_ENABLED, true),
+    THUMBNAIL_SYNC_INTERVAL_MIN: parseInt(process.env.THUMBNAIL_SYNC_INTERVAL_MIN) || 10,
+    // Docs per run. The backlog drains over successive runs rather than in one
+    // long burst, so a run never holds the RPC pool for more than a few seconds.
+    THUMBNAIL_SYNC_BATCH: parseInt(process.env.THUMBNAIL_SYNC_BATCH) || 60,
+    // A post with no image in its metadata is stamped and skipped for a while,
+    // otherwise every run would re-fetch the same permanent misses. Recent uploads
+    // get the short cadence (the enricher may still be catching up), older ones
+    // only an occasional recheck.
+    THUMBNAIL_SYNC_FRESH_DAYS: parseInt(process.env.THUMBNAIL_SYNC_FRESH_DAYS) || 2,
+    THUMBNAIL_SYNC_FRESH_RECHECK_MIN: parseInt(process.env.THUMBNAIL_SYNC_FRESH_RECHECK_MIN) || 30,
+    THUMBNAIL_SYNC_RECHECK_DAYS: parseInt(process.env.THUMBNAIL_SYNC_RECHECK_DAYS) || 7,
 };
