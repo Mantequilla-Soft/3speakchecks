@@ -34,6 +34,7 @@ const { jitter, interleaveExploration, interleaveByAge, freshness, ageHours } = 
 const { DISCOVER_AGE_STRATIFY, DISCOVER_AGE_WEIGHTS } = require('../utils/config');
 const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
 const { getFollowSetForReq, applyFollowBoost } = require('../utils/followBoost');
+const { getPremiumSet, applyPremiumBoost } = require('../utils/premiumBoost');
 const { getSuggestedCreators } = require('../utils/suggestedCreators');
 const { attachTopicTags } = require('../utils/topicTag');
 const { SUGGEST_MAX_LIMIT } = require('../utils/config');
@@ -96,6 +97,7 @@ router.get('/interests', async (req, res) => {
             discover_score: (Number(e.base) || 0) * interestRecencyTilt(e.created) * jitter(rng()),
         }));
         applyFollowBoost(scored, followSet, { scoreField: 'discover_score' });
+        applyPremiumBoost(scored, getPremiumSet(db), { scoreField: 'discover_score' });
 
         if (chrono) {
             scored.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
@@ -381,6 +383,7 @@ router.get('/discover', async (req, res) => {
         // Creators you follow rank higher here too — discover is still discovery, so
         // this only tilts (×1.6, below the 2.5 interest multiplier), never filters.
         applyFollowBoost(scored, followSet, { scoreField: 'discover_score' });
+        applyPremiumBoost(scored, getPremiumSet(db), { scoreField: 'discover_score' });
 
         if (chrono) {
             scored.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
@@ -545,6 +548,7 @@ router.get('/related/:author/:permlink', async (req, res) => {
             return { ...e, _relScore: score };
         });
         applyFollowBoost(scored, followSet, { scoreField: '_relScore' });
+        applyPremiumBoost(scored, getPremiumSet(db), { scoreField: '_relScore' });
         scored.sort((a, b) => b._relScore - a._relScore);
 
         // 5. Drop dismissed / already-watched, then take the page.
@@ -1033,6 +1037,7 @@ router.get('/trendingSorted', async (req, res) => {
         // Creators the caller follows rank higher (×FOLLOW_BOOST). A tilt, not a
         // filter — trending must stay trending, not turn into a follow feed.
         applyFollowBoost(candidateVideos, getFollowSetForReq(req), { scoreField: 'trending_score' });
+        applyPremiumBoost(candidateVideos, getPremiumSet(db), { scoreField: 'trending_score' });
 
         // Retention re-rank: multiply trending_score by each video's bounded
         // retention factor (cached in video-retention; no-op for videos without a

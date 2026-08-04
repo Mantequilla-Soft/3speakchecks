@@ -13,6 +13,7 @@ const {
   INTEREST_MULTIPLIER, parseInterests,
 } = require('./interests');
 const { applyRetention } = require('./retentionRank');
+const { getPremiumSet, applyPremiumBoost } = require('./premiumBoost');
 const { normUser, getUserFilters, applyUserFilters } = require('./userFilters');
 const { getWinners } = require('./effectiveTags');
 
@@ -115,6 +116,7 @@ async function rankFeed(db, req, videos, opts = {}) {
     return filterForUser(db, req, videos, wkey, opts.ukey || defaultUserKey);
   }
   await applyInterestBoost(db, req, videos, subKey, scoreField);
+  applyPremiumBoost(videos, getPremiumSet(db), { scoreField });
   await applyRetention(db, videos, { scoreField, keyFn: opts.retentionKeyFn });
   videos.sort((a, b) => (Number(b[scoreField]) || 0) - (Number(a[scoreField]) || 0));
   return filterForUser(db, req, videos, wkey, opts.ukey || defaultUserKey);

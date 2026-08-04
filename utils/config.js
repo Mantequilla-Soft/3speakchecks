@@ -266,6 +266,21 @@ module.exports = {
     // unauthenticated memory leak. 5k concurrent logged-in browsers is far past real.
     FOLLOW_BOOST_MAX_USERS: parseInt(process.env.FOLLOW_BOOST_MAX_USERS) || 5000,
 
+    // ─── Premium creator boost (utils/premiumBoost.js) ──────────────────────
+    // Videos by current Pro subscribers rank higher in every discovery feed, incl.
+    // shorts — a reach perk for paying for Pro (the creator, not the viewer). The
+    // boosted account is the video's Hive author, matched against embed-users rows
+    // flagged premium:true (kept in sync by services/premiumSubsSync.js). A plain
+    // score multiplier on top of the existing signals; <= 1 disables it.
+    PREMIUM_BOOST: parseFloat(process.env.PREMIUM_BOOST ?? '1'),                     // 1 = off; prod = 1.5
+    PREMIUM_BOOST_TTL_MS: parseInt(process.env.PREMIUM_BOOST_TTL_MS) || 5 * 60 * 1000,
+    PREMIUM_USERS_COLLECTION: process.env.PREMIUM_USERS_COLLECTION || 'embed-users',
+    // Blacklist (comma-separated usernames): premium users to EXCLUDE from the boost
+    // (the embed-users.premium flag is polluted with debug/testing accounts). Every other
+    // premium user is boosted automatically. Empty = boost every premium user.
+    PREMIUM_BOOST_BLACKLIST: (process.env.PREMIUM_BOOST_BLACKLIST || '')
+        .split(',').map((s) => s.trim().toLowerCase().replace(/^@/, '')).filter(Boolean),
+
     // ─── Comment boost (utils/commentBoost.js + services/commentCounts.js) ─────
     // Comment counts live ONLY on Hive (Mongo's stats.num_comments is empty on every
     // doc). So a background sync (in-process, every COMMENT_SYNC_INTERVAL_MIN) fetches
