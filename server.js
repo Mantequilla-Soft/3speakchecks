@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
 
-const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H } = require('./utils/config');
+const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN } = require('./utils/config');
 const { connectToMongo, getDb } = require('./utils/db');
 const { calculateAndFlagTrendingVideos } = require('./services/trending');
 const { syncHiveCommunities } = require('./services/communitySync');
@@ -11,6 +11,7 @@ const { denormalizeCommunityTitles } = require('./services/communityDenorm');
 const { startTagSyncWatcher } = require('./services/tagSync');
 const { syncAudioHiveLinks } = require('./services/audioHiveSync');
 const { syncEmbedCategories } = require('./services/embedCategorySync');
+const { syncThumbnails } = require('./services/thumbnailSync');
 const { syncPremiumFromSubs } = require('./services/premiumSubsSync');
 const { schedule: scheduleCollectSubs } = require('./services/collectSubscriptions');
 const { schedule: scheduleAudioPayouts } = require('./services/audioPayouts');
@@ -208,6 +209,21 @@ async function startServer() {
         }, 15 * 60 * 1000);
     }, 60 * 1000);
     console.log('Embed category sync scheduled every 15min (first run in 1min)');
+
+    // Backfill thumbnail_url from the Hive post for docs the upstream publisher
+    // left empty (livestream VODs, third-party embed-API uploads) — without it
+    // the card falls back to a constructed img.3speak.tv URL that 404s.
+    if (THUMBNAIL_SYNC_ENABLED) {
+        const thumbIntervalMs = THUMBNAIL_SYNC_INTERVAL_MIN * 60 * 1000;
+        setTimeout(() => {
+            syncThumbnails().catch(err => console.error('Thumbnail sync error:', err));
+            setInterval(() => {
+                if (syncRunning) return;
+                syncThumbnails().catch(err => console.error('Thumbnail sync error:', err));
+            }, thumbIntervalMs);
+        }, 90 * 1000);
+        console.log(`Thumbnail sync scheduled every ${THUMBNAIL_SYNC_INTERVAL_MIN}min (first run in 90s)`);
+    }
 
     // Sync VSC subscription status → embed-users.premium. Runs on a
     // tight 60s cadence so the 1-day pass expires within ±1min of its

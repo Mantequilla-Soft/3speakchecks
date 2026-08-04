@@ -6,6 +6,262 @@ const { attachTopicTags } = require('../utils/topicTag');
 const { ObjectId } = require('mongodb');
 const { COLLECTION_NAME } = require('../utils/config');
 const { BANNED_FILTER } = require('../utils/filters');
+const { validateApiKey } = require('../utils/middleware');
+const { ENABLE_MONGO_WRITES } = require('../utils/config');
+
+const HIVE_ACCOUNT_RE = /^[a-z][a-z0-9.-]{2,15}$/;
+
+/**
+ * Channel trailer — the video that autoplays at the top of a profile's Overview.
+ *
+ * Stored on the creator's `embed-users` row (the per-creator settings doc) as
+ * `channel_trailer: { author, permlink, set_at }`. The frontend ALSO mirrors it
+ * into the user's Hive posting_json_metadata, so the choice survives this
+ * database; if the two ever disagree, this row wins because it's what the
+ * profile reads.
+ */
+const CREATORS = 'embed-users';
+
+// GET is public — every profile view needs it.
+router.get('/user/:username/trailer', async (req, res) => {
+  try {
+    const username = String(req.params.username || '').trim().toLowerCase();
+    if (!HIVE_ACCOUNT_RE.test(username)) return res.status(400).json({ error: 'invalid username' });
+    const doc = await getDb().collection(CREATORS).findOne(
+      { username },
+      { projection: { channel_trailer: 1 } },
+    );
+    return res.json({ username, trailer: doc?.channel_trailer || null });
+  } catch (error) {
+    console.error('Error reading channel trailer:', error.message);
+    return res.status(500).json({ error: 'Failed to read channel trailer' });
+  }
+});
+
+// Same app-key auth as the other creator mutations (/video/listing, /video/nsfw).
+// `permlink: null` clears it.
+router.put('/user/trailer', validateApiKey, async (req, res) => {
+  if (!ENABLE_MONGO_WRITES) {
+    return res.status(503).json({ success: false, error: 'Writes disabled' });
+  }
+  try {
+    const username = String(req.body?.username || '').trim().toLowerCase();
+    const permlink = req.body?.permlink == null ? null : String(req.body.permlink).trim();
+    const author = String(req.body?.author || username).trim().toLowerCase();
+    if (!HIVE_ACCOUNT_RE.test(username)) {
+      return res.status(400).json({ success: false, error: 'invalid username' });
+    }
+
+    const db = getDb();
+    if (permlink) {
+      // The app key is public, so prove the target is actually THIS creator's
+      // video before pinning it to their profile. Without this anyone holding
+      // the key could point any channel's trailer at any video.
+      //
+      // ⚠️ Ownership only — NOT publication state. The studio sets the trailer
+      // seconds after broadcasting, while the embed doc is still being linked to
+      // the Hive post: requiring status:'published' here rejected a legitimate
+      // request 12 seconds before the doc settled (badadib, 2026-08-04).
+      const [legacy, embed] = await Promise.all([
+        db.collection('videos').findOne(
+          { owner: username, permlink }, { projection: { _id: 1 } },
+        ),
+        db.collection('embed-video').findOne(
+          {
+            $or: [
+              { owner: username, permlink },              // asset id
+              { owner: username, hive_permlink: permlink },
+              { hive_author: author, hive_permlink: permlink },
+            ],
+          },
+          { projection: { _id: 1 } },
+        ),
+      ]);
+      if (!legacy && !embed) {
+        return res.status(404).json({ success: false, error: 'No published video of that user matches this permlink' });
+      }
+    }
+
+    const value = permlink ? { author, permlink, set_at: new Date() } : null;
+    await db.collection(CREATORS).updateOne(
+      { username },
+      value
+        ? { $set: { channel_trailer: value }, $setOnInsert: { username } }
+        : { $unset: { channel_trailer: '' }, $setOnInsert: { username } },
+      { upsert: true },
+    );
+
+    console.log(`Channel trailer for ${username} → ${permlink || '(cleared)'}`);
+    return res.json({ success: true, username, trailer: value });
+  } catch (error) {
+    console.error('Error setting channel trailer:', error.message);
+    return res.status(500).json({ success: false, error: 'Failed to set channel trailer' });
+  }
+});
+
+/**
+ * GET /user/:username/counts — the stat line under a profile's bio.
+ *
+ * ⚠️ These queries MIRROR the profile tabs, because a stat that disagrees with
+ * the tab under it is worse than no stat:
+ *  - videos = the same union `/api/my-videos` totals (legacy `videos` + embed
+ *    long-form). @meno is 8 embed + 123 legacy, @badadib the reverse, so
+ *    counting one collection understates most creators by an order of magnitude.
+ *  - shorts = the same query as `/shorts/:username`, which keys on `embed_url`
+ *    + `processed`. Shorts docs carry a NULL `hive_permlink`, so requiring it
+ *    (as the video feeds do) reported 2 of @meno's 70.
+ *
+ * No "member since": the oldest row we hold for @meno is 2025 while the account
+ * predates that, so any date here would be the age of our INDEX, not of the
+ * creator. Better to omit it than to state it wrongly.
+ */
+const countsCache = new Map();          // username -> { at, value }
+const COUNTS_TTL_MS = 5 * 60 * 1000;    // profiles are hot; these numbers move slowly
+
+router.get('/user/:username/counts', async (req, res) => {
+  try {
+    const username = String(req.params.username || '').trim().toLowerCase();
+    if (!HIVE_ACCOUNT_RE.test(username)) {
+      return res.status(400).json({ error: 'invalid username' });
+    }
+
+    const cached = countsCache.get(username);
+    if (cached && Date.now() - cached.at < COUNTS_TTL_MS) return res.json(cached.value);
+
+    const db = getDb();
+    const embedVideoCollection = db.collection('embed-video');
+    const sumOf = (field) => ({ $sum: { $ifNull: [`$${field}`, 0] } });
+    const tally = (col, match) => col.aggregate([
+      { $match: match },
+      { $group: { _id: null, n: { $sum: 1 }, views: sumOf('views') } },
+    ]).toArray().then((r) => r[0] || { n: 0, views: 0 });
+
+    const [embedVideos, embedShorts, legacyVideos] = await Promise.all([
+      // long-form embed uploads — /api/my-videos also drops rows with no Hive
+      // link, since those have nothing to open.
+      tally(embedVideoCollection, {
+        owner: username, status: 'published', short: false, listed_on_3speak: true,
+        hive_author: { $ne: null }, hive_permlink: { $ne: null }, ...BANNED_FILTER,
+      }),
+      // shorts — as /shorts/:username counts them (embed_url, NOT hive_permlink)
+      tally(embedVideoCollection, {
+        owner: username, status: 'published', short: true, processed: true,
+        embed_url: { $exists: true, $ne: null }, listed_on_3speak: { $ne: false },
+      }),
+      // legacy — /api/my-videos also excludes failed publishes
+      tally(db.collection('videos'), {
+        owner: username, status: 'published', publishFailed: { $ne: true }, ...BANNED_FILTER,
+      }),
+    ]);
+
+    const value = {
+      username,
+      videos: embedVideos.n + legacyVideos.n,
+      shorts: embedShorts.n,
+      views: embedVideos.views + embedShorts.views + legacyVideos.views,
+    };
+
+    countsCache.set(username, { at: Date.now(), value });
+    return res.json(value);
+  } catch (error) {
+    console.error('Error building user counts:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch user counts' });
+  }
+});
+
+/**
+ * Bulk counts for up to 100 accounts, for lists of creators (followers /
+ * following). Same numbers as `/user/:username/counts` above — the $match
+ * clauses are copied deliberately, because a follower row that disagrees with
+ * the profile you land on is worse than no number at all.
+ *
+ * The point is that this is ONE aggregation per collection for the whole page
+ * rather than three per user: `owner` is indexed, so 100 accounts costs about
+ * twice a single account (~240ms vs ~110ms), where looping the per-user route
+ * would be 300 aggregations. Never call the single route in a loop for a list.
+ *
+ * Shares countsCache with the single route, so a profile visited right after
+ * appearing in a list is already warm (and vice versa).
+ */
+router.post('/users/counts', async (req, res) => {
+  try {
+    const raw = Array.isArray(req.body?.usernames) ? req.body.usernames : null;
+    if (!raw) return res.status(400).json({ error: 'usernames array required' });
+
+    const usernames = [...new Set(
+      raw.map((u) => String(u || '').trim().toLowerCase()).filter((u) => HIVE_ACCOUNT_RE.test(u)),
+    )].slice(0, 100);
+    if (usernames.length === 0) return res.json({ counts: {} });
+
+    const now = Date.now();
+    const counts = {};
+    const misses = [];
+    for (const u of usernames) {
+      const hit = countsCache.get(u);
+      if (hit && now - hit.at < COUNTS_TTL_MS) counts[u] = hit.value;
+      else misses.push(u);
+    }
+
+    if (misses.length > 0) {
+      const db = getDb();
+      const inMiss = { $in: misses };
+      // Group by owner so one pass covers every account in the page.
+      const tally = (col, match) => col.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: '$owner',
+            n: { $sum: 1 },
+            views: { $sum: { $ifNull: ['$views', 0] } },
+          },
+        },
+      ]).toArray();
+
+      const embedVideoCollection = db.collection('embed-video');
+      const [embedVideos, embedShorts, legacyVideos] = await Promise.all([
+        tally(embedVideoCollection, {
+          owner: inMiss, status: 'published', short: false, listed_on_3speak: true,
+          hive_author: { $ne: null }, hive_permlink: { $ne: null }, ...BANNED_FILTER,
+        }),
+        tally(embedVideoCollection, {
+          owner: inMiss, status: 'published', short: true, processed: true,
+          embed_url: { $exists: true, $ne: null }, listed_on_3speak: { $ne: false },
+        }),
+        tally(db.collection('videos'), {
+          owner: inMiss, status: 'published', publishFailed: { $ne: true }, ...BANNED_FILTER,
+        }),
+      ]);
+
+      const byOwner = (rows) => Object.fromEntries(rows.map((r) => [r._id, r]));
+      const ev = byOwner(embedVideos);
+      const es = byOwner(embedShorts);
+      const lv = byOwner(legacyVideos);
+
+      for (const u of misses) {
+        const a = ev[u] || { n: 0, views: 0 };
+        const b = es[u] || { n: 0, views: 0 };
+        const c = lv[u] || { n: 0, views: 0 };
+        // An account with nothing on 3Speak is a real answer (zeros), not a
+        // miss — cache it too so a follower list full of non-creators doesn't
+        // re-query every time.
+        const value = {
+          username: u,
+          videos: a.n + c.n,
+          shorts: b.n,
+          views: a.views + b.views + c.views,
+        };
+        countsCache.set(u, { at: now, value });
+        counts[u] = value;
+      }
+    }
+
+    res.set('Cache-Control', 'public, max-age=60');
+    return res.json({ counts });
+  } catch (error) {
+    console.error('Error building bulk user counts:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch user counts' });
+  }
+});
 
 // Read-only premium-status lookup against embed-users. Used by the
 // frontend to render a Pro badge next to the user's avatar (nav, bottom

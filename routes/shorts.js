@@ -16,6 +16,7 @@ const { getWinners } = require('../utils/effectiveTags');
 const { applyRetention } = require('../utils/retentionRank');
 const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
 const { getFollowSet, applyFollowBoost } = require('../utils/followBoost');
+const { getPremiumSet, applyPremiumBoost } = require('../utils/premiumBoost');
 
 // Endpoint to get shorts feed (original)
 router.get('/shorts', async (req, res) => {
@@ -669,6 +670,10 @@ router.get('/shortssorted', async (req, res) => {
             const followSet = getFollowSet(currentuser);
             const followSetPending = !!currentuser && followSet === null;
             applyFollowBoost(candidateShorts, followSet, {
+                scoreField: 'sort_score',
+                authorOf: hiveAuthor,
+            });
+            applyPremiumBoost(candidateShorts, getPremiumSet(db), {
                 scoreField: 'sort_score',
                 authorOf: hiveAuthor,
             });
