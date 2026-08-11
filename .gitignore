@@ -12,3 +12,5 @@ yarn-error.log*
 
 # Internal documentation (not for public repository)
 internal-docs/
+# env backups (may contain live credentials)
+.env.bak*

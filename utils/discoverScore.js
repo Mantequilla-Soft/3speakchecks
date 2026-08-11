@@ -259,7 +259,51 @@ function interleaveByAge(ranked, weights, now = Date.now()) {
   return out;
 }
 
+/**
+ * Compose the list so a guaranteed SHARE of every prefix goes to interest matches.
+ *
+ * A score multiplier cannot deliver top-of-feed prominence here, because `base`
+ * spans roughly 15x between its median and p99: a x3 boost lifts a median match
+ * to ~0.7, which still loses to the ~3% of non-matching videos scoring above
+ * that, and those are exactly the ones filling the first screen. Pushing the
+ * multiplier high enough to win would also float weak matches over genuinely
+ * strong other videos — buying position by wrecking quality.
+ *
+ * Position is the honest lever. For output slot i, the target match count is
+ * round((i+1) * share); a match is emitted whenever we are behind that target and
+ * one is left. So the ratio holds at the TOP as well as overall, rather than
+ * averaging out over a long tail.
+ *
+ * Both streams keep their incoming order, so whatever ranked and composed them
+ * (score, then age bands) still governs within each. Every item is emitted
+ * exactly once, so `total` and pagination stay correct.
+ *
+ * Deterministic: no RNG — the per-load seed already lives in discover_score.
+ */
+function interleaveByInterest(ranked, share, isMatch) {
+  if (!Array.isArray(ranked) || ranked.length < 2) return ranked;
+  const s = Number(share);
+  if (!(s > 0) || s >= 1) return ranked;          // 0 or >=1 → nothing to compose
+
+  const matches = [];
+  const rest = [];
+  for (const e of ranked) (isMatch(e) ? matches : rest).push(e);
+  if (!matches.length || !rest.length) return ranked;
+
+  const out = [];
+  let mi = 0;
+  let ri = 0;
+  while (mi < matches.length || ri < rest.length) {
+    if (mi >= matches.length) { out.push(rest[ri++]); continue; }
+    if (ri >= rest.length) { out.push(matches[mi++]); continue; }
+    const target = Math.round((out.length + 1) * s);
+    out.push(mi < target ? matches[mi++] : rest[ri++]);
+  }
+  return out;
+}
+
 module.exports = {
   ageHours, freshness, newBoost, recencyBoost, jitter, shuffle, weightedOrder,
-  interleaveExploration, interleaveByAge, ageBandIndex, AGE_BAND_DAYS, clamp,
+  interleaveExploration, interleaveByAge, interleaveByInterest,
+  ageBandIndex, AGE_BAND_DAYS, clamp,
 };

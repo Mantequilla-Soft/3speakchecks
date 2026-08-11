@@ -199,6 +199,20 @@ module.exports = {
     // only; the recency premium above is what boosts the SCORE.
     DISCOVER_ULTRAFRESH_HOURS: parseFloat(process.env.DISCOVER_ULTRAFRESH_HOURS ?? '10'),
     DISCOVER_INTEREST_MULTIPLIER: parseFloat(process.env.DISCOVER_INTEREST_MULTIPLIER ?? '2.5'), // > global 2.0
+    // Tiered interest boost, so discover reads as "mostly what I asked for, with
+    // adjacent things next" instead of one flat interest/not-interest split.
+    // EXACT covers everything the viewer SELECTED, including every topic under a
+    // picked category — choosing a category asks for all of it, so none of it is
+    // demoted. SIBLING is only the neighbourhood implied by picking a lone topic.
+    // EXACT > SIBLING > 1.0 must hold or the tiers stop meaning anything.
+    DISCOVER_INTEREST_EXACT_MULT: parseFloat(process.env.DISCOVER_INTEREST_EXACT_MULT ?? '3.0'),
+    DISCOVER_INTEREST_SIBLING_MULT: parseFloat(process.env.DISCOVER_INTEREST_SIBLING_MULT ?? '1.8'),
+    // Share of EVERY prefix of the discover feed reserved for interest matches.
+    // This is what actually delivers top-of-feed prominence: the multipliers above
+    // fight a ~15x spread in `base`, so the few non-matching videos at the top of
+    // that range take the first screen no matter how the boost is tuned. 0 or >=1
+    // disables the pass. Only applies when the viewer HAS interests.
+    DISCOVER_INTEREST_SHARE: parseFloat(process.env.DISCOVER_INTEREST_SHARE ?? '0.65'),
     // Retention is a PRIMARY driver here (trending only tilts it at 0.6). relQ is
     // deliberately compressed near 1.0 by the Bayesian prior (live range ≈
     // 0.63–1.24), so weight 1.0 would move a video only ~2x — a rounding error next

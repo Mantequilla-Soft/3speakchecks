@@ -25,6 +25,16 @@ const {
 
 const WATCH_LOG = process.env.WATCH_LOG_COLLECTION || 'view-durations';
 const WATCH_HEATMAP = process.env.WATCH_HEATMAP_COLLECTION || 'view-heatmaps';
+const EMBED_VIDEO_COLLECTION = 'embed-video';
+
+// A player-reported duration read too early (right at 'play', before HLS/VHS
+// reconciles the full manifest) can transiently land in `view-durations` as
+// only the buffered-so-far segment span — a real production case sent 6s for
+// a 120s video this way (fixed at the source in preview-player, but old rows
+// already carry the bad number, and any stray future miss stays possible). A
+// tracked duration this far below the video's real stored duration is far
+// more likely to be that race than a genuinely much-shorter remux.
+const DURATION_DISAGREEMENT_RATIO = 0.5; // tracked below 50% of the real duration is untrusted
 
 // replayIntensity from a coverage-bucket array: ~1.0 for a flat "everyone watched
 // it once" curve; >1 when some moments stick out (rewatched). max / mean(non-zero).
@@ -91,6 +101,28 @@ async function run() {
       return { videos: 0, ms: Date.now() - startedAt };
     }
 
+    // ── 1b. Guard against the mis-tracked-duration bug: swap in the video's
+    // real stored duration wherever the tracked one looks implausibly short.
+    // `duration` here already went through resolveDuration() at write time
+    // (see watchTracking.js), so this only catches OLD rows written before
+    // that guard existed, or a future bug elsewhere with the same shape.
+    const embedDocs = await db.collection(EMBED_VIDEO_COLLECTION)
+      .find({ $or: rows.map((r) => ({ owner: r.owner, permlink: r.permlink })) },
+        { projection: { owner: 1, permlink: 1, duration: 1 } })
+      .toArray();
+    const realDurationMap = new Map();
+    for (const d of embedDocs) {
+      if (Number.isFinite(d.duration) && d.duration > 0) realDurationMap.set(`${d.owner}/${d.permlink}`, d.duration);
+    }
+    let healedCount = 0;
+    for (const r of rows) {
+      const real = realDurationMap.get(`${r.owner}/${r.permlink}`);
+      if (real && r.duration > 0 && r.duration < real * DURATION_DISAGREEMENT_RATIO) {
+        r.duration = real;
+        healedCount++;
+      }
+    }
+
     // ── 2. replayIntensity from the heatmaps (one small doc per video) ──
     const heatKeys = rows.map((r) => ({ owner: r.owner, permlink: r.permlink }));
     const heatDocs = await db.collection(WATCH_HEATMAP)
@@ -148,7 +180,13 @@ async function run() {
     const del = await coll.deleteMany({ runAt: { $lt: runAt } });
 
     await client.close();
-    return { videos: rows.length, globalMean: Math.round(globalMean * 1000) / 1000, removed: del.deletedCount || 0, ms: Date.now() - startedAt };
+    return {
+      videos: rows.length,
+      globalMean: Math.round(globalMean * 1000) / 1000,
+      removed: del.deletedCount || 0,
+      healedDurations: healedCount,
+      ms: Date.now() - startedAt,
+    };
   } catch (err) {
     try { await client.close(); } catch { /* noop */ }
     throw err;

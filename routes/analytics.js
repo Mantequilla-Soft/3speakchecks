@@ -193,6 +193,41 @@ async function resolveAssetPermlink(db, owner, permlink) {
   return ev?.permlink || permlink;
 }
 
+// A player-reported duration read too early (right at 'play', before HLS/VHS
+// reconciles the full manifest) can land in `view-durations` as only the
+// buffered-so-far segment span — a real production case tracked 6s for a
+// 120s video this way (fixed at the source in preview-player, but old rows
+// keep the bad number, and any stray future miss stays possible). A tracked
+// duration this far below the video's real stored duration is far more
+// likely to be that race than a genuinely much-shorter remux, so analytics
+// substitutes the trusted stored duration for display/calculation instead.
+const DURATION_DISAGREEMENT_RATIO = 0.5; // tracked below 50% of the real duration is untrusted
+
+// Real duration for one video, checked against both collections the way
+// resolveVideoMeta does (embed-video first, then legacy videos).
+async function realDurationFor(db, owner, permlink) {
+  const ev = await db.collection('embed-video').findOne(
+    { owner, $or: [{ permlink }, { hive_permlink: permlink }] },
+    { projection: { duration: 1 } },
+  );
+  if (ev && Number.isFinite(ev.duration) && ev.duration > 0) return ev.duration;
+  const legacy = await db.collection('videos').findOne(
+    { owner, permlink }, { projection: { duration: 1 } },
+  );
+  if (legacy && Number.isFinite(legacy.duration) && legacy.duration > 0) return legacy.duration;
+  return null;
+}
+
+// Swap in `real` wherever `tracked` looks implausibly short next to it.
+// (For the multi-video overview, `resolveVideoMeta` already fetches each
+// video's real stored duration for other fields — reused here via fmtVideo
+// rather than a second per-video/batch query.)
+function healDuration(tracked, real) {
+  if (!real) return tracked;
+  if (Number.isFinite(tracked) && tracked > 0 && tracked < real * DURATION_DISAGREEMENT_RATIO) return real;
+  return tracked;
+}
+
 async function fetchHiveEngagement(refs) {
   const batch = refs.map((r, i) => ({
     jsonrpc: '2.0', id: i, method: 'condenser_api.get_content',
@@ -234,7 +269,11 @@ function fmtVideo(v, meta, eng) {
     title,
     thumbnail: m.thumbnail || null,
     short: !!m.short,
-    duration: v.duration || m.duration || 0,
+    // v.duration is the TRACKED (client-reported) duration from view-durations;
+    // m.duration is the video's real stored duration. Prefer the tracked value
+    // (it's what the viewer's timeline actually was) EXCEPT when it looks
+    // implausibly short next to the real one — see healDuration's comment.
+    duration: healDuration(v.duration, m.duration) || m.duration || 0,
     realViews: m.views || 0,
     sessions: v.sessions,
     viewers: v.viewers,
@@ -386,7 +425,15 @@ router.get(['/analytics/video', '/creator-stats/video'], async (req, res) => {
       .toArray();
     if (!rows.length) return res.json({ success: true, username, permlink: assetPermlink, sessions: 0 });
 
-    const duration = rows.reduce((m, r) => Math.max(m, r.videoDuration || 0), 0) || 1;
+    // $max across rows self-heals when only SOME rows carry the mis-tracked
+    // short duration, but is powerless when every row does (as happened in
+    // production — a duration read too early on every play, see
+    // preview-player's watchTracking.js). Cross-check against the video's
+    // real stored duration and prefer that when the tracked max looks
+    // implausibly short next to it.
+    const trackedDuration = rows.reduce((m, r) => Math.max(m, r.videoDuration || 0), 0) || 1;
+    const realDuration = await realDurationFor(db, username, assetPermlink);
+    const duration = healDuration(trackedDuration, realDuration) || 1;
     const sessions = rows.length;
     // Mirrors VIEWER_KEY: `sid` now, with the legacy viewerId/ip fallback for rows
     // written before the ingest change. One row per session, so for current rows
