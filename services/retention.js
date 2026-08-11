@@ -35,7 +35,7 @@ function runOnce() {
   }
   worker.once('message', (msg) => {
     if (msg && msg.ok) {
-      console.log(`[retention] scored ${msg.videos} videos in ${msg.ms}ms (globalMean=${msg.globalMean}, removed=${msg.removed})`);
+      console.log(`[retention] scored ${msg.videos} videos in ${msg.ms}ms (globalMean=${msg.globalMean}, removed=${msg.removed}, healedDurations=${msg.healedDurations || 0})`);
     } else {
       console.error('[retention] worker reported failure:', msg && msg.error);
     }

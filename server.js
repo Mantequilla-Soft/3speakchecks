@@ -46,6 +46,7 @@ const playlistsFeedRoutes = require('./routes/playlistsFeed');
 const reviewsRoutes = require('./routes/reviews');
 const reportsRoutes = require('./routes/reports');
 const streamStatsRoutes = require('./routes/streamStats');
+const subtitleProxyRoutes = require('./routes/subtitleProxy');
 
 const app = express();
 
@@ -97,6 +98,11 @@ app.use('/', snapsRoutes);
 app.use('/', playlistsFeedRoutes);
 app.use('/', reviewsRoutes);
 app.use('/', reportsRoutes);
+// Mounted BEFORE streamStatsRoutes: that router's auth gate (routes/streamStats.js)
+// is registered with router.use() and no path, so it unconditionally 401s every
+// request that reaches it — including ones meant for routes mounted after it.
+// Ordering this route first sidesteps that instead of touching streamStats.js.
+app.use('/', subtitleProxyRoutes);
 app.use('/', streamStatsRoutes);
 
 // Track whether heavy sync tasks are running
