@@ -8,7 +8,10 @@ const { nsfwFilterTags, nsfwFilterHiveTags } = require('../utils/filters');
 const { hiddenListSync } = require('../utils/hiddenCreators');
 const { HIDDEN_AUTHORS, TRENDING_CANDIDATE_LIMIT, TRENDING_VIEWS_WEIGHT, TRENDING_VOTES_WEIGHT, TRENDING_COMMENTS_WEIGHT, TRENDING_REWARD_WEIGHT, TRENDING_RESHARE_WEIGHT, RESHARE_WEIGHT } = require('../utils/config');
 const { fetchHiveRewards, fetchLivePageData, mulberry32, getFollowingList } = require('../utils/hive');
-const { INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTags, tagsMatchInterests } = require('../utils/interests');
+const {
+    INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTags, tagsMatchInterests,
+    resolveInterestTiers, interestTierForTag, interestTierMultiplier,
+} = require('../utils/interests');
 const { applyRetention } = require('../utils/retentionRank');
 const { rankFeed, applyInterestBoost, filterForUser } = require('../utils/feedRank');
 const { getUserFilters, applyUserFilters, applyUserFilterQuery, normUser } = require('../utils/userFilters');
@@ -25,13 +28,20 @@ function interestRecencyTilt(created) {
     const ageDays = Math.max(0, (Date.now() - t) / 86400000);
     return 1 + INTEREST_RECENCY_TILT * Math.max(0, 1 - ageDays / INTEREST_RECENCY_DAYS);
 }
-const { DISCOVER_INTEREST_MULTIPLIER } = require('../utils/config');
+const {
+    DISCOVER_INTEREST_MULTIPLIER,
+    DISCOVER_INTEREST_EXACT_MULT, DISCOVER_INTEREST_SIBLING_MULT,
+} = require('../utils/config');
+const DISCOVER_TIER_MULTS = {
+    exact: DISCOVER_INTEREST_EXACT_MULT,
+    sibling: DISCOVER_INTEREST_SIBLING_MULT,
+};
 const {
     RELATED_TOPIC_MULT, RELATED_INTEREST_MULT, RELATED_CREATOR_MULT,
     RELATED_CREATOR_POOL, RELATED_JITTER,
 } = require('../utils/config');
-const { jitter, interleaveExploration, interleaveByAge, freshness, ageHours } = require('../utils/discoverScore');
-const { DISCOVER_AGE_STRATIFY, DISCOVER_AGE_WEIGHTS } = require('../utils/config');
+const { jitter, interleaveExploration, interleaveByAge, interleaveByInterest, freshness, ageHours } = require('../utils/discoverScore');
+const { DISCOVER_AGE_STRATIFY, DISCOVER_AGE_WEIGHTS, DISCOVER_INTEREST_SHARE } = require('../utils/config');
 const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
 const { getFollowSetForReq, applyFollowBoost } = require('../utils/followBoost');
 const { getPremiumSet, applyPremiumBoost } = require('../utils/premiumBoost');
@@ -351,6 +361,9 @@ router.get('/discover', async (req, res) => {
         let candidates = allowNsfw ? pool : pool.filter((e) => !e.nsfw);
 
         const interestSet = parseInterests(req);
+        // Resolved once per request, not per video: picks split into topics vs
+        // categories, plus the sibling neighbourhood both imply.
+        const interestTiers = resolveInterestTiers(interestSet);
 
         // "Interests" feed variant: ONLY videos whose winning topic is in the
         // user's interests. The pool already mixes recent + retention-active + a
@@ -362,7 +375,11 @@ router.get('/discover', async (req, res) => {
             if (!interestSet.size) {
                 return res.json({ success: true, feed: 'interests', page, limit, total: 0, totalPages: 0, seed, videos: [] });
             }
-            candidates = candidates.filter((e) => e.winnerTag && interestSet.has(e.winnerTag));
+            // Expanded, not literal: picking the CATEGORY "tech-science" has to keep
+            // videos whose winner is `technology`/`science`/…, otherwise a category
+            // pick matches only the handful of videos tagged with the bare category
+            // itself (13 site-wide for tech-science) and the tab looks empty.
+            candidates = candidates.filter((e) => interestTierForTag(e.winnerTag, interestTiers) !== null);
         }
 
         // Per-user scoring: the pool already carries freshness × newBoost ×
@@ -374,11 +391,16 @@ router.get('/discover', async (req, res) => {
         const chrono = req.query.chrono === '1' || req.query.chrono === 'true';
         const followSet = getFollowSetForReq(req);
         const scored = candidates.map((e) => {
-            const match = interestSet.size && !!e.winnerTag && interestSet.has(e.winnerTag);
+            // Tiered rather than a flat interest/not-interest split: an exact pick
+            // outranks its neighbours, which outrank everything else. Pick
+            // `technology` and technology leads, the rest of tech-science follows,
+            // and the wider catalogue fills in behind — interests drive the feed,
+            // other topics only fill.
+            const tier = interestTierForTag(e.winnerTag, interestTiers);
             const score = (Number(e.base) || 0)
-                * (match ? DISCOVER_INTEREST_MULTIPLIER : 1)
+                * interestTierMultiplier(tier, DISCOVER_TIER_MULTS)
                 * jitter(rng());
-            return { ...e, interest_match: !!match, discover_score: score };
+            return { ...e, interest_match: tier !== null, interest_tier: tier, discover_score: score };
         });
         // Creators you follow rank higher here too — discover is still discovery, so
         // this only tilts (×1.6, below the 2.5 interest multiplier), never filters.
@@ -401,11 +423,21 @@ router.get('/discover', async (req, res) => {
         // within each band). This REPLACES the old head+explore interleave, which
         // couldn't hit an arbitrary target because its head slots were ~100% <30d.
         // interleaveExploration is kept for the legacy path / when stratify is off.
-        const finalEntries = chrono
+        const composed = chrono
             ? visible
             : (DISCOVER_AGE_STRATIFY
                 ? interleaveByAge(visible, DISCOVER_AGE_WEIGHTS)
                 : interleaveExploration(visible, rng, { weightOf: (e) => e.discover_score }));
+
+        // Then guarantee interest matches a SHARE of every prefix. The score boost
+        // alone cannot do this: `base` spans ~15x, so the handful of non-matching
+        // videos at the top of that range outrank a boosted median match and take
+        // the first screen. Runs AFTER the age pass, and since each stream keeps
+        // its incoming order, the age composition still governs within each.
+        // Skipped in chrono mode (algo off) and when the viewer has no interests.
+        const finalEntries = (chrono || !interestTiers.any)
+            ? composed
+            : interleaveByInterest(composed, DISCOVER_INTEREST_SHARE, (e) => e.interest_match);
 
         const total = finalEntries.length;
         const pageEntries = finalEntries.slice(skip, skip + limit);
