@@ -1299,11 +1299,64 @@ function transformEmbedVideoToLegacy(ev) {
             video_v2: ev.permlink,
             play_url: ev.manifest_cid ? `https://ipfs.3speak.tv/ipfs/${ev.manifest_cid}` : null,
         },
+        // 🔐 Supporters-only. Card renders a lock badge; the gate is what
+        // enforces access, so this is presentation only.
+        gated: ev.gated === true,
         _source: 'embed',
         _embedPermlink: ev.permlink,   // asset id — retention/interest key
         _sortDate: new Date(ev.createdAt || 0).getTime(),
     };
 }
+
+/* ────────────────────────────────────────────────────────────────────
+ * GET /feeds/creator-gated/:username
+ *
+ * A creator's supporters-only videos, newest first, for the profile page.
+ *
+ * Deliberately PUBLIC and unfiltered by viewer entitlement: the point of the
+ * shelf is to show non-subscribers what they are missing. Cards carry
+ * `gated: true` so the UI draws a lock, and playback is refused by the gate
+ * rather than by hiding the listing.
+ *
+ * Returns an empty array rather than 404 for a creator with no gated content,
+ * so the profile page can simply hide the section when the list is empty.
+ * ──────────────────────────────────────────────────────────────────── */
+router.get('/creator-gated/:username', async (req, res) => {
+    try {
+        const username = String(req.params.username || '').trim().toLowerCase().replace(/^@/, '');
+        if (!username || !/^[a-z0-9.-]{3,16}$/.test(username)) {
+            return res.status(400).json({ error: 'invalid username', videos: [] });
+        }
+
+        const limit = Math.min(parseInt(req.query.limit, 10) || 24, 100);
+        const db = await getDb();
+
+        // `$and` rather than a bare `$or`: unavailableMatch()/hiddenFromFeedMatch()
+        // spread their own keys in, and a second top-level `$or` would clobber
+        // this one silently.
+        const query = {
+            $and: [{ $or: [{ owner: username }, { hive_author: username }] }],
+            gated: true,
+            status: 'published',
+            hive_author: { $ne: null },
+            hive_permlink: { $ne: null },
+            ...unavailableMatch(),
+            ...hiddenFromFeedMatch(),
+        };
+
+        const docs = await db.collection('embed-video')
+            .find(query)
+            .sort({ createdAt: -1 })
+            .limit(limit)
+            .toArray();
+
+        const videos = docs.map(transformEmbedVideoToLegacy);
+        return res.json({ videos, count: videos.length });
+    } catch (err) {
+        console.error('GET /feeds/creator-gated error:', err.message);
+        return res.status(500).json({ error: 'internal', videos: [] });
+    }
+});
 
 function validateCommunityId(id) {
     return /^hive-\d+$/.test(String(id || '').trim());
@@ -1493,5 +1546,10 @@ router.get('/community/:id/trending', async (req, res) => {
         res.status(500).json({ success: false, error: 'Internal server error' });
     }
 });
+
+// Exposed for scripts/test-gated-feed-flag.js. The card mappers drop any field
+// they do not name explicitly, which is exactly the kind of regression a test
+// should catch rather than a reviewer.
+router.__testables = { transformEmbedVideoToLegacy };
 
 module.exports = router;
