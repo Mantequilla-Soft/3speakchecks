@@ -258,7 +258,7 @@ router.get('/', async (req, res) => {
                     hive_permlink: { $ne: null },
                     ...nsfwFilterHiveTags(req),
                     ...embedExtraFilters()
-                }, { projection: { score: { $meta: 'textScore' }, owner: 1, hive_author: 1, hive_permlink: 1, permlink: 1, hive_title: 1, originalFilename: 1, createdAt: 1, duration: 1, hive_tags: 1, thumbnail_url: 1, views: 1 } })
+                }, { projection: { score: { $meta: 'textScore' }, owner: 1, hive_author: 1, hive_permlink: 1, permlink: 1, hive_title: 1, originalFilename: 1, createdAt: 1, duration: 1, hive_tags: 1, thumbnail_url: 1, views: 1, gated: 1 } })
                 .sort(scoreSort).limit(maxPerCollection).toArray()
                 .then(docs => docs.map(d => ({
                     type: 'video',
@@ -292,7 +292,7 @@ router.get('/', async (req, res) => {
                     hive_author: { $nin: hiddenListSync() },
                     ...nsfwFilterHiveTags(req),
                     ...embedExtraFilters()
-                }, { projection: { score: { $meta: 'textScore' }, owner: 1, hive_author: 1, permlink: 1, hive_title: 1, embed_title: 1, originalFilename: 1, createdAt: 1, duration: 1, hive_tags: 1, thumbnail_url: 1, embed_url: 1, views: 1, short: 1 } })
+                }, { projection: { score: { $meta: 'textScore' }, owner: 1, hive_author: 1, permlink: 1, hive_title: 1, embed_title: 1, originalFilename: 1, createdAt: 1, duration: 1, hive_tags: 1, thumbnail_url: 1, embed_url: 1, views: 1, short: 1, gated: 1 } })
                 .sort(scoreSort).limit(maxPerCollection).toArray()
                 .then(docs => docs.map(d => ({
                     type: 'short',
@@ -431,7 +431,7 @@ router.get('/', async (req, res) => {
                             status: 'published',
                             hive_author: { $nin: hiddenListSync() },
                             ...nsfwFilterHiveTags(req)
-                        }, { projection: { owner: 1, hive_author: 1, hive_permlink: 1, permlink: 1, hive_title: 1, embed_title: 1, originalFilename: 1, createdAt: 1, duration: 1, hive_tags: 1, thumbnail_url: 1, embed_url: 1, views: 1, short: 1 } }).limit(50).toArray()
+                        }, { projection: { owner: 1, hive_author: 1, hive_permlink: 1, permlink: 1, hive_title: 1, embed_title: 1, originalFilename: 1, createdAt: 1, duration: 1, hive_tags: 1, thumbnail_url: 1, embed_url: 1, views: 1, short: 1, gated: 1 } }).limit(50).toArray()
                     ]);
 
                     const results = [];
