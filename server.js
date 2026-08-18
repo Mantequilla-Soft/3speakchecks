@@ -14,6 +14,7 @@ const { syncEmbedCategories } = require('./services/embedCategorySync');
 const { syncThumbnails } = require('./services/thumbnailSync');
 const { syncPremiumFromSubs } = require('./services/premiumSubsSync');
 const { schedule: scheduleCollectSubs } = require('./services/collectSubscriptions');
+const { schedule: scheduleVerifiedFollow } = require('./services/verifiedFollow');
 const { schedule: scheduleAudioPayouts } = require('./services/audioPayouts');
 const { schedule: scheduleListenConsolidation } = require('./services/listenConsolidation');
 const { schedule: scheduleScheduledPosts } = require('./services/scheduledPosts');
@@ -248,6 +249,11 @@ async function startServer() {
     // env (THREESPEAK_PRO_USERNAME + THREESPEAK_PRO_POSTING_KEY); no-op
     // and logs "disabled" when credentials aren't configured.
     scheduleCollectSubs();
+
+    // Verified-badge auto-follow: @VERIFIED_BADGE_ACCOUNT follows every
+    // contentcreators.verified creator it isn't already following. Self-gated on
+    // env (account + posting key); logs "disabled" when credentials aren't set.
+    scheduleVerifiedFollow();
 
     // Pay-per-listen weekly payout (period ends Sun 00:00 UTC, checked every
     // 12h with catch-up). Runs in DRY RUN until PPL_PAYOUT_ACTIVE_KEY is set.
