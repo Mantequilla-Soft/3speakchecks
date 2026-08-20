@@ -33,6 +33,21 @@ const DOMAIN_NO_PROTO = PAGE_DOMAIN.replace(/^https?:\/\//, '');
 const VIDEO_CDN = (process.env.VIDEO_CDN_DOMAIN || 'https://threespeakvideo.b-cdn.net').replace(/\/$/, '');
 const BUNNY_IPFS_CDN = (process.env.BUNNY_IPFS_CDN || 'https://4everland.io').replace(/\/$/, '');
 const IMAGE_CDN = (process.env.IMAGE_CDN_DOMAIN || 'https://images.3speak.tv').replace(/\/$/, '');
+// Audio uploads are a single file on IPFS, which is exactly what a podcast
+// client wants. Embed-pipeline video is HLS, which most of them can't play —
+// see buildItem for how each is offered.
+const AUDIO_CDN = (process.env.RSS_AUDIO_CDN || 'https://hotipfs-3speak-1.b-cdn.net/ipfs').replace(/\/$/, '');
+const HLS_GATEWAY = (process.env.RSS_HLS_GATEWAY || 'https://ipfs.3speak.tv/ipfs').replace(/\/$/, '');
+
+// Podcast clients key playback off the enclosure's MIME type.
+const AUDIO_MIME = {
+    mp3: 'audio/mpeg', m4a: 'audio/mp4', mp4: 'audio/mp4',
+    aac: 'audio/aac', ogg: 'audio/ogg', oga: 'audio/ogg',
+    opus: 'audio/opus', wav: 'audio/wav', flac: 'audio/flac', webm: 'audio/webm',
+};
+
+// How many episodes a feed carries, across all three sources combined.
+const FEED_LIMIT = parseInt(process.env.RSS_FEED_LIMIT, 10) || 30;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -74,13 +89,101 @@ function getVideoPlayUrl(video) {
 }
 
 /**
- * Build a single <item> element for one video.
+ * One episode shape, whatever collection it came from. `media` is a file a
+ * podcast client can download and play; `hls` is a stream only the Podcasting
+ * 2.0 clients understand. An item may have either, both, or (for older embed
+ * uploads with no progressive file) only the stream.
+ */
+function fromLegacyVideo(v) {
+    return {
+        kind: 'video',
+        owner: v.owner,
+        permlink: v.permlink,
+        title: v.title || '',
+        description: v.description || '',
+        created: v.created,
+        duration: v.duration || 0,
+        isNsfw: !!v.isNsfwContent,
+        thumb: getThumbnailUrl(v).baseThumbUrl,
+        media: { url: getVideoPlayUrl(v), type: 'video/mp4', length: parseInt(v.size) || 0 },
+        hls: null,
+    };
+}
+
+// Everything published through the embed pipeline since 2026 lives here. The
+// feeds read only the legacy `videos` collection before this, which is why they
+// went quiet mid-year while the channels kept uploading.
+function fromEmbedVideo(ev) {
+    return {
+        kind: 'video',
+        owner: ev.hive_author || ev.owner,
+        permlink: ev.hive_permlink,
+        title: ev.hive_title || ev.originalFilename || '',
+        description: ev.hive_body || '',
+        created: ev.createdAt,
+        duration: ev.duration || 0,
+        isNsfw: !!ev.isNsfwContent,
+        thumb: ev.thumbnail_url || `${IMAGE_CDN}/${ev.permlink}/thumbnails/default.png`,
+        media: null,                                   // HLS only, no single file
+        hls: ev.manifest_cid ? `${HLS_GATEWAY}/${ev.manifest_cid}` : null,
+    };
+}
+
+// The one content type that is a podcast episode in the literal sense: a single
+// audio file, already on a CDN, with a real MIME type.
+function fromAudio(a) {
+    const fmt = String(a.format || '').toLowerCase();
+    return {
+        kind: 'audio',
+        owner: a.owner,
+        permlink: a.post_permlink,
+        title: a.title || a.originalFilename || '',
+        description: a.description || '',
+        created: a.createdAt,
+        duration: Math.round(a.duration || 0),
+        isNsfw: !!a.isNsfwContent,
+        thumb: a.thumbnail_url || `https://images.hive.blog/u/${a.owner}/avatar/large`,
+        media: a.audio_cid
+            ? { url: `${AUDIO_CDN}/${a.audio_cid}`, type: AUDIO_MIME[fmt] || 'audio/mpeg', length: parseInt(a.size) || 0 }
+            : null,
+        hls: null,
+    };
+}
+
+/** hh:mm:ss for <itunes:duration>. */
+function hms(totalSeconds) {
+    const s = Math.max(0, Math.round(Number(totalSeconds) || 0));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    const pad = (n) => String(n).padStart(2, '0');
+    return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
+}
+
+/**
+ * Build a single <item> element for one episode.
  */
 function buildItem(video, itunesAuthor) {
-    const videoPlayUrl = getVideoPlayUrl(video);
-    const { baseThumbUrl } = getThumbnailUrl(video);
+    const baseThumbUrl = video.thumb;
     const watchLink = `${PAGE_PROTOCOL}://${DOMAIN_NO_PROTO}/watch?v=${video.owner}/${video.permlink}`;
     const hiveDomain = 'hive.blog';
+
+    // A stream-only episode still belongs in the feed: RSS readers link it, and
+    // Podcasting 2.0 clients can play the alternateEnclosure. Emitting an
+    // <enclosure> pointing at an .m3u8 instead would hand every classic client a
+    // download it cannot play.
+    const media = video.media;
+    const enclosure = media
+        ? [{ enclosure: { _attr: { url: media.url, length: media.length || 0, type: media.type } } }]
+        : [];
+    const alternate = video.hls
+        ? [{
+            'podcast:alternateEnclosure': [
+                { _attr: { type: 'application/x-mpegURL', default: media ? 'false' : 'true' } },
+                { 'podcast:source': { _attr: { uri: video.hls } } },
+            ],
+        }]
+        : [];
 
     return {
         item: [
@@ -109,17 +212,12 @@ function buildItem(video, itunesAuthor) {
                     }
                 }
             },
-            { 'itunes:explicit': video.isNsfwContent ? 'yes' : 'clean' },
+            { 'itunes:explicit': video.isNsfw ? 'yes' : 'clean' },
             { 'itunes:image': { _attr: { href: baseThumbUrl } } },
-            {
-                'enclosure': {
-                    _attr: {
-                        url: videoPlayUrl,
-                        length: parseInt(video.size) || 0,
-                        type: 'video/mp4'
-                    }
-                }
-            }
+            { 'podcast:medium': video.kind === 'audio' ? 'music' : 'video' },
+            ...(video.duration > 0 ? [{ 'itunes:duration': hms(video.duration) }] : []),
+            ...enclosure,
+            ...alternate
         ]
     };
 }
@@ -339,12 +437,45 @@ router.get('/:username.xml', async (req, res) => {
         const creatorsCollection = db.collection('contentcreators');
         const settingsCollection = db.collection('podcastsettings');
 
-        // Fetch up to 15 most recent published videos for the channel
-        const videos = await videosCollection
-            .find({ owner: username, status: 'published' })
-            .sort({ created: -1 })
-            .limit(15)
-            .toArray();
+        // A channel's published work lives in three collections now: the legacy
+        // `videos`, everything uploaded through the embed pipeline, and audio.
+        // Read all three and merge by date — reading only the first is what left
+        // these feeds frozen at whenever a creator last used the old uploader.
+        const [legacyRaw, embedRaw, audioRaw] = await Promise.all([
+            videosCollection
+                .find({ owner: username, status: 'published' })
+                .sort({ created: -1 }).limit(FEED_LIMIT).toArray(),
+            db.collection('embed-video')
+                .find({
+                    hive_author: username,
+                    status: 'published',
+                    short: false,                       // a short is not an episode
+                    listed_on_3speak: true,
+                    hive_permlink: { $ne: null },
+                })
+                .sort({ createdAt: -1 }).limit(FEED_LIMIT).toArray(),
+            db.collection('embed-audio')
+                .find({ owner: username, post_permlink: { $ne: null } })
+                .sort({ createdAt: -1 }).limit(FEED_LIMIT).toArray(),
+        ]);
+
+        // Same Hive post in both video collections (an embed upload can leave a
+        // legacy row too) — keep one, preferring the embed row's newer fields.
+        const seen = new Set();
+        const videos = [
+            ...embedRaw.map(fromEmbedVideo),
+            ...legacyRaw.map(fromLegacyVideo),
+            ...audioRaw.map(fromAudio),
+        ]
+            .filter((v) => {
+                if (!v.permlink || !v.owner) return false;
+                const key = `${v.owner}/${v.permlink}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            })
+            .sort((a, b) => new Date(b.created) - new Date(a.created))
+            .slice(0, FEED_LIMIT);
 
         if (videos.length === 0) {
             // No published videos — return a minimal valid empty feed
