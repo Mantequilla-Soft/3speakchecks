@@ -588,6 +588,10 @@ router.get('/api/my-videos', async (req, res) => {
                     updated_at: ev.updatedAt || ev.createdAt || new Date().toISOString(),
                     duration: ev.duration || 0,
                     tags: ev.hive_tags || [],
+                    // 🔐 Supporters-only. Cards draw a lock from this, so a gated
+                    // video listed without it is indistinguishable from a public
+                    // one — including to its own creator on their profile.
+                    gated: ev.gated === true,
                     images: {
                         thumbnail: ev.thumbnail_url || `https://img.3speak.tv/${ev.permlink}/thumbnail.png`,
                         poster: ev.thumbnail_url || `https://img.3speak.tv/${ev.permlink}/poster.jpg`
@@ -613,8 +617,24 @@ router.get('/api/my-videos', async (req, res) => {
                 };
             });
 
-        // Merge and sort by date descending
-        const allVideos = [...legacyVideos, ...embedVideos];
+        // Merge, preferring the embed row when the same Hive post exists in both
+        // collections. A video published through the embed pipeline can also
+        // carry a legacy `videos` row, and a plain concat listed it twice: the
+        // profile grid then renders two cards with the same React key (which is
+        // unsupported and can drop one), and the totals over-count.
+        //
+        // The embed row wins because it is the one carrying the newer fields —
+        // `gated` among them, so the legacy copy would show a supporters-only
+        // video with no lock.
+        const byKey = new Map();
+        for (const v of embedVideos) {
+            byKey.set(`${v.author || v.owner}/${v.permlink}`, v);
+        }
+        for (const v of legacyVideos) {
+            const key = `${v.author || v.owner}/${v.permlink}`;
+            if (!byKey.has(key)) byKey.set(key, v);
+        }
+        const allVideos = [...byKey.values()];
         allVideos.sort((a, b) => b._sortDate - a._sortDate);
 
         const total = allVideos.length;

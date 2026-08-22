@@ -107,6 +107,11 @@ async function hydrate(db, entries) {
         },
         stats: { total_hive_reward: 0, num_votes: 0, num_comments: 0 },
         views: ev.views || 0,   // DISPLAY only — never scored
+        // 🔐 Supporters-only (paid) video. Card renders a lock badge; the gate
+        // is what actually enforces access, so this is presentation only and
+        // safe to expose. Normalised to a boolean because this object is built
+        // field by field rather than spread, so anything not named here is lost.
+        gated: ev.gated === true,
         _pool: e,
       });
     } else {

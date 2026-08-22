@@ -26,6 +26,7 @@
     "jsonwebtoken": "^9.0.3",
     "mongodb": "^6.1.0",
     "node-cron": "^4.2.1",
+    "web-push": "^3.6.7",
     "xml": "^1.0.1"
   },
   "devDependencies": {

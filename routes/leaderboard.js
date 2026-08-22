@@ -66,9 +66,31 @@ function parseLimit(v, def, max) {
   return Math.min(n, max);
 }
 
+const WINDOW_DAYS = { '7d': 7, '30d': 30, '365d': 365 };
+const TRACKED_SINCE_MS = Date.parse(`${WATCH_TRACKED_SINCE}T00:00:00.000Z`);
+
 // Watch metrics are only meaningful back to WATCH_TRACKED_SINCE; say so per board.
-function metaFor(window, metric) {
-  const partial = metric.endsWith('_watch_secs') && window !== '7d';
+//
+// A window is "partial" only while it actually reaches back PAST the day watch
+// tracking started, which stops being true as the calendar moves: 30d covered
+// itself from 2026-08-05, 365d does on 2027-07-06. So this is measured against
+// the window's real start date rather than listed per window — the old
+// `window !== '7d'` was true forever and kept telling people the 30d board was
+// short of data long after it wasn't.
+//
+// `from` is the window start the aggregator stored on the row; without one
+// (routes that answer before reading a row) it falls back to today minus the
+// window length. All-time always predates tracking.
+function metaFor(window, metric, from = null) {
+  let partial = false;
+  if (metric.endsWith('_watch_secs')) {
+    if (window === 'all') {
+      partial = true;
+    } else {
+      const startMs = from ? Date.parse(from) : Date.now() - (WINDOW_DAYS[window] || 0) * 86400000;
+      partial = Number.isFinite(startMs) ? startMs < TRACKED_SINCE_MS : true;
+    }
+  }
   return {
     watch_tracked_since: WATCH_TRACKED_SINCE,
     partial_watch_data: partial,
@@ -130,7 +152,7 @@ router.get('/leaderboard', async (req, res) => {
       from: first ? first.from : null,
       to: first ? first.to : null,
       updated_at: first ? first.updated_at : null,
-      ...metaFor(window, metric),
+      ...metaFor(window, metric, first ? first.from : null),
       entries: docs.map((d, i) => ({ rank: skip + i + 1, ...normalize(d) })),
     });
   } catch (err) {
@@ -161,7 +183,7 @@ router.get('/leaderboard/summary', async (req, res) => {
         .toArray();
       return [metric, {
         metric,
-        ...metaFor(window, metric),
+        ...metaFor(window, metric, docs[0] ? docs[0].from : null),
         entries: docs.map((d, i) => ({ rank: i + 1, ...normalize(d) })),
       }];
     }));

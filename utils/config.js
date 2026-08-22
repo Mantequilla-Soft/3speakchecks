@@ -403,4 +403,132 @@ module.exports = {
     THUMBNAIL_SYNC_FRESH_DAYS: parseInt(process.env.THUMBNAIL_SYNC_FRESH_DAYS) || 2,
     THUMBNAIL_SYNC_FRESH_RECHECK_MIN: parseInt(process.env.THUMBNAIL_SYNC_FRESH_RECHECK_MIN) || 30,
     THUMBNAIL_SYNC_RECHECK_DAYS: parseInt(process.env.THUMBNAIL_SYNC_RECHECK_DAYS) || 7,
+
+    // --- Ad platform: intake, approval gate, inventory forecast ---
+    // Advertisers apply, a human approves, and only an approved record can hold a
+    // campaign later. See routes/advertise.js + services/adInventory.js.
+    ADVERTISERS_COLLECTION: process.env.ADVERTISERS_COLLECTION || 'ad_advertisers',
+    AD_INVENTORY_COLLECTION: process.env.AD_INVENTORY_COLLECTION || 'ad_inventory_snapshot',
+    // Ads run network-wide by default; a creator row with adsEnabled:false opts out
+    // and is excluded from BOTH serving and the forecast, so we never sell what we
+    // have promised not to use.
+    AD_CREATOR_PREFS_COLLECTION: process.env.AD_CREATOR_PREFS_COLLECTION || 'ad_creator_prefs',
+    AD_INVENTORY_ENABLED: parseBool(process.env.AD_INVENTORY_ENABLED, true),
+    AD_INVENTORY_INTERVAL_H: parseInt(process.env.AD_INVENTORY_INTERVAL_H) || 6,
+    AD_INVENTORY_WINDOW_DAYS: parseInt(process.env.AD_INVENTORY_WINDOW_DAYS) || 30,
+    // Engagement floor. Measured 2026-08-20: 18% of all sessions ended inside five
+    // seconds. Those are not impressions and must not be counted as inventory.
+    AD_MIN_ENGAGED_SECONDS: parseFloat(process.env.AD_MIN_ENGAGED_SECONDS) || 3,
+    // Candidate slot positions in seconds. 0 = pre-roll. Mid-roll is listed first
+    // deliberately: 46% of sessions end inside 15s, so a pre-roll spends most of
+    // its inventory on people who were about to leave anyway.
+    AD_SLOT_POSITIONS: (process.env.AD_SLOT_POSITIONS || '30,60,120,0')
+        .split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n) && n >= 0),
+    // How long an ad runs. A slot only exists on a video with room for the ad AND
+    // content after it — nobody buys a mid-roll that runs into the credits.
+    AD_LENGTH_SECONDS: parseInt(process.env.AD_LENGTH_SECONDS) || 15,
+    // Bot/autoplay heuristic: this many sessions in the window with an average
+    // session this short means the traffic is not people. Excluded from sellable
+    // inventory and REPORTED in the admin snapshot rather than silently dropped.
+    AD_SUSPECT_MIN_SESSIONS: parseInt(process.env.AD_SUSPECT_MIN_SESSIONS) || 50,
+    AD_SUSPECT_MAX_AVG_SECONDS: parseFloat(process.env.AD_SUSPECT_MAX_AVG_SECONDS) || 5,
+    AD_APPLY_MAX_PER_WINDOW: parseInt(process.env.AD_APPLY_MAX_PER_WINDOW) || 3,
+    // One-time fee for us producing the spot, on top of the flight price. Charged
+    // once per campaign, not per day, and folded into the same on-chain payment so
+    // an advertiser sends one transfer rather than two.
+    AD_PRODUCTION_FEE_HBD: parseFloat(process.env.AD_PRODUCTION_FEE_HBD) || 25,
+    // Accounts allowed to sign a creator's ad preference ON THEIR BEHALF, via the
+    // posting authority the creator granted them. HiveSigner and Butter Auth
+    // sessions hold no client-side key, so without this the users least able to
+    // sign would be the only ones unable to turn ads off on their own videos.
+    // Kept to the account 3Speak actually signs with — creators have granted the
+    // same authority to peakd.app, ecency.app and others, but we never sign as
+    // those, so admitting them would only widen the blast radius.
+    AD_SIGNING_DELEGATES: (process.env.AD_SIGNING_DELEGATES || 'threespeak')
+        .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+
+    // --- Beta gate ---
+    // 'off'    every /advertise route except the operator admin surface 404s.
+    // 'beta'   readable, but only ADS_BETA_USERS may APPLY or change an ad setting.
+    // 'public' open to everyone.
+    //
+    // The frontend has a matching flag, but that one only hides the UI — anyone can
+    // read a Vite bundle or flip a localStorage key. THIS is the gate that actually
+    // holds, because both write paths carry a Hive signature, so the account is
+    // proven rather than claimed. Note that 'beta' still leaves the audience figures
+    // readable to anyone who knows the URL; use 'off' if that matters.
+    ADS_STAGE: ['off', 'beta', 'public'].includes(String(process.env.ADS_STAGE || '').toLowerCase())
+        ? String(process.env.ADS_STAGE).toLowerCase()
+        : 'beta',
+    // Share of ad revenue that goes to the creator side of the split. The creator
+    // decides how much of it goes to the community the video was posted in; they
+    // keep the rest. Both halves are optional — a creator who sets 0 keeps the lot.
+    // Named rather than hardcoded because 50 otherwise ends up written into the
+    // route, the signing endpoint, the UI and the message format independently.
+    AD_CREATOR_POOL_PCT: (() => {
+        const n = parseFloat(process.env.AD_CREATOR_POOL_PCT);
+        return Number.isFinite(n) && n >= 0 && n <= 100 ? n : 50;
+    })(),
+    // What the community gets when a creator has never touched the setting. An
+    // even split of the pool: the creator opted into neither number, so defaulting
+    // to "I keep everything" is as much of an assumption as any other, and this one
+    // at least matches how the split is described. A creator who explicitly sets 0
+    // keeps 0 — that stored zero must never be read as "unset".
+    AD_DEFAULT_COMMUNITY_PCT: (() => {
+        const n = parseFloat(process.env.AD_DEFAULT_COMMUNITY_PCT);
+        return Number.isInteger(n) && n >= 0 ? n : 25;
+    })(),
+    // --- Booking, payment, serving, payout ---
+    AD_CAMPAIGNS_COLLECTION: process.env.AD_CAMPAIGNS_COLLECTION || 'ad_campaigns',
+    AD_CREATIVES_COLLECTION: process.env.AD_CREATIVES_COLLECTION || 'ad_creatives',
+    AD_PAYMENTS_COLLECTION: process.env.AD_PAYMENTS_COLLECTION || 'ad_payments',
+    AD_IMPRESSIONS_COLLECTION: process.env.AD_IMPRESSIONS_COLLECTION || 'ad_impressions',
+    AD_PAYOUTS_COLLECTION: process.env.AD_PAYOUTS_COLLECTION || 'ad_payouts',
+    // Where advertisers send HBD/HIVE. Defaults to the promotion account so this
+    // works out of the box, but it is a SEPARATE setting on purpose: ad money and
+    // promotion money are different books and will want to be told apart.
+    AD_PAYMENT_ACCOUNT: process.env.AD_PAYMENT_ACCOUNT || process.env.PROMOTION_ACCOUNT || 'threespeakfund',
+    // Flat tenancy, per day, per slot. Not a CPM: at ~271 deliverable plays a day a
+    // per-impression price would quote numbers too small to mean anything, and it
+    // rewards padding the count instead of finding the right audience.
+    AD_PRICE_PER_DAY_HBD: parseFloat(process.env.AD_PRICE_PER_DAY_HBD) || 5,
+    AD_MIN_CAMPAIGN_DAYS: parseInt(process.env.AD_MIN_CAMPAIGN_DAYS) || 7,
+    AD_MAX_CAMPAIGN_DAYS: parseInt(process.env.AD_MAX_CAMPAIGN_DAYS) || 90,
+    // A viewer sees at most one ad per this window, per campaign. Without it a
+    // binge session would carry the same spot a dozen times and burn the audience.
+    AD_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_FREQUENCY_CAP_MINUTES) || 30,
+    // An impression counts once the viewer has actually watched this much of the
+    // spot. Measured server-side from segment fetches, never a client pixel.
+    AD_IMPRESSION_MIN_SECONDS: parseFloat(process.env.AD_IMPRESSION_MIN_SECONDS) || 2,
+    AD_SESSION_TTL_MINUTES: parseInt(process.env.AD_SESSION_TTL_MINUTES) || 240,
+    // Payouts. OFF by default: a payout run that transfers real HBD must be turned
+    // on deliberately, never by deploying a default.
+    AD_PAYOUTS_ENABLED: parseBool(process.env.AD_PAYOUTS_ENABLED, false),
+    AD_PAYOUTS_LIVE: parseBool(process.env.AD_PAYOUTS_LIVE, false),
+    AD_PAYOUT_INTERVAL_H: parseInt(process.env.AD_PAYOUT_INTERVAL_H) || 24,
+    AD_PAYOUT_MIN_HBD: parseFloat(process.env.AD_PAYOUT_MIN_HBD) || 0.01,
+    // Payouts settle by PERIOD, not per campaign. Dividing a single campaign's fee
+    // by its own impressions made a creator's rate depend on which campaign the
+    // rotation happened to give them: 10 plays of a short expensive flight paid 20x
+    // the same 10 plays of a long cheap one. Pooling every campaign's accrued
+    // revenue over a fixed window gives one rate per period for everyone, and pays
+    // on a predictable cadence instead of whenever some advertiser's flight ends.
+    AD_PAYOUT_PERIOD_DAYS: parseInt(process.env.AD_PAYOUT_PERIOD_DAYS) || 7,
+    AD_PAYOUT_PERIODS_COLLECTION: process.env.AD_PAYOUT_PERIODS_COLLECTION || 'ad_payout_periods',
+
+    // 🚨 SERVING ALLOWLIST. While this is non-empty, ads run ONLY on videos owned by
+    // these accounts — every other creator's videos carry nothing, no matter what a
+    // campaign booked or what the client asks for. Enforced in utils/adEligibility.js
+    // (the single decision point) so no caller can route around it, and applied to
+    // the inventory forecast too: we must never sell what we will not serve.
+    // Empty = no restriction. Set to `badadib` for the first live trial.
+    ADS_ALLOWED_OWNERS: (process.env.ADS_ALLOWED_OWNERS === undefined ? 'badadib' : process.env.ADS_ALLOWED_OWNERS)
+        .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+
+    // Keep in step with ALWAYS_ON_TEST_USERS in the frontend's utils/config.js.
+    ADS_BETA_USERS: (process.env.ADS_BETA_USERS || 'badadib,meno,tibfox,coolmole')
+        .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+    AD_CATEGORIES: (process.env.AD_CATEGORIES
+        || 'defi,exchange,gaming,nft,infrastructure,dao,media,education,event,tooling,other')
+        .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
 };

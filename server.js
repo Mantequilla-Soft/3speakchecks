@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
 
-const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN } = require('./utils/config');
+const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN, AD_INVENTORY_ENABLED, AD_INVENTORY_INTERVAL_H } = require('./utils/config');
 const { connectToMongo, getDb } = require('./utils/db');
 const { calculateAndFlagTrendingVideos } = require('./services/trending');
 const { syncHiveCommunities } = require('./services/communitySync');
@@ -14,11 +14,15 @@ const { syncEmbedCategories } = require('./services/embedCategorySync');
 const { syncThumbnails } = require('./services/thumbnailSync');
 const { syncPremiumFromSubs } = require('./services/premiumSubsSync');
 const { schedule: scheduleCollectSubs } = require('./services/collectSubscriptions');
+const { schedule: scheduleVerifiedFollow } = require('./services/verifiedFollow');
 const { schedule: scheduleAudioPayouts } = require('./services/audioPayouts');
 const { schedule: scheduleListenConsolidation } = require('./services/listenConsolidation');
 const { schedule: scheduleScheduledPosts } = require('./services/scheduledPosts');
 const { schedule: scheduleWatchRetention } = require('./services/watchRetention');
 const { scheduleRetention } = require('./services/retention');
+const adInventory = require('./services/adInventory');
+const adPayouts = require('./services/adPayouts');
+const adCreativeSync = require('./services/adCreativeSync');
 const { scheduleDiscover } = require('./services/discover');
 const { scheduleCommentCounts } = require('./services/commentCounts');
 
@@ -31,6 +35,10 @@ const shortsRoutes = require('./routes/shorts');
 const audioRoutes = require('./routes/audio');
 const feedsRoutes = require('./routes/feeds');
 const rssRoutes = require('./routes/rss');
+const pushRoutes = require('./routes/push');
+const pushNotify = require('./services/pushNotify');
+const pushHive = require('./services/pushHive');
+const webPush = require('./utils/webPush');
 const verifyRoutes = require('./routes/verify');
 const scheduledPostsRoutes = require('./routes/scheduledPosts');
 const communitiesRoutes = require('./routes/communities');
@@ -47,6 +55,9 @@ const reviewsRoutes = require('./routes/reviews');
 const reportsRoutes = require('./routes/reports');
 const streamStatsRoutes = require('./routes/streamStats');
 const subtitleProxyRoutes = require('./routes/subtitleProxy');
+const advertiseRoutes = require('./routes/advertise');
+const adCampaignRoutes = require('./routes/adCampaigns');
+const adServeRoutes = require('./routes/adServe');
 
 const app = express();
 
@@ -103,6 +114,14 @@ app.use('/', reportsRoutes);
 // request that reaches it — including ones meant for routes mounted after it.
 // Ordering this route first sidesteps that instead of touching streamStats.js.
 app.use('/', subtitleProxyRoutes);
+app.use('/advertise', advertiseRoutes);   // same reason as above: must precede streamStatsRoutes
+app.use('/advertise', adCampaignRoutes);  // booking + payment, same mount, same ordering rule
+// Ad SERVING lives at /m, deliberately not under /advertise: every URL the browser
+// fetches during playback has to be indistinguishable from ordinary streaming, and
+// a path containing "advertise" is the easiest possible thing for a filter list to
+// match. See the header of routes/adServe.js.
+app.use('/m', adServeRoutes);
+app.use('/push', pushRoutes);             // same ordering rule as above
 app.use('/', streamStatsRoutes);
 
 // Track whether heavy sync tasks are running
@@ -249,6 +268,11 @@ async function startServer() {
     // and logs "disabled" when credentials aren't configured.
     scheduleCollectSubs();
 
+    // Verified-badge auto-follow: @VERIFIED_BADGE_ACCOUNT follows every
+    // contentcreators.verified creator it isn't already following. Self-gated on
+    // env (account + posting key); logs "disabled" when credentials aren't set.
+    scheduleVerifiedFollow();
+
     // Pay-per-listen weekly payout (period ends Sun 00:00 UTC, checked every
     // 12h with catch-up). Runs in DRY RUN until PPL_PAYOUT_ACTIVE_KEY is set.
     scheduleAudioPayouts();
@@ -266,6 +290,43 @@ async function startServer() {
     // Retention ranking: score every video from its watch-duration data in a
     // worker thread every RETENTION_INTERVAL_MIN; feeds multiply their score by it.
     scheduleRetention();
+
+    // "Someone you follow posted" push notifications. Cheap (two indexed finds
+    // plus one HTTPS call per subscriber with a match), so it runs on the main
+    // thread. Silent no-op until VAPID keys are configured.
+    if (pushNotify && webPush.isConfigured()) {
+        const pushIntervalMs = Math.max(1, parseInt(process.env.PUSH_INTERVAL_MIN, 10) || 3) * 60 * 1000;
+        webPush.ensureIndexes().catch((e) => console.warn('[push] index setup:', e.message));
+        setTimeout(() => {
+            pushNotify.runOnce().catch((e) => console.error('[push] first run:', e.message));
+            setInterval(() => pushNotify.runOnce().catch((e) => console.error('[push] run:', e.message)), pushIntervalMs);
+            // Hive's own notifications (replies, mentions, follows…). Separate
+            // interval: this one costs a Hive call per subscriber, so it runs
+            // less often than the upload check, which is two indexed finds.
+            const hiveIntervalMs = Math.max(1, parseInt(process.env.PUSH_HIVE_INTERVAL_MIN, 10) || 5) * 60 * 1000;
+            pushHive.runOnce().catch((e) => console.error('[push] hive first run:', e.message));
+            setInterval(() => pushHive.runOnce().catch((e) => console.error('[push] hive run:', e.message)), hiveIntervalMs);
+        }, 90 * 1000);   // after boot, so it never competes with the first feed requests
+        console.log(`Push notifications scheduled every ${pushIntervalMs / 60000} min`);
+    } else {
+        console.log('Push notifications disabled (no VAPID keys)');
+    }
+
+    // Ad inventory forecast. Reads only aggregate watch data and writes one cached
+    // document; cheap enough to run on the main thread, unlike the retention worker.
+    if (AD_INVENTORY_ENABLED) {
+        const adIntervalMs = Math.max(1, AD_INVENTORY_INTERVAL_H) * 60 * 60 * 1000;
+        setTimeout(() => {
+            adInventory.runOnce();
+            setInterval(() => adInventory.runOnce(), adIntervalMs);
+        }, 2 * 60 * 1000);   // 2 min after boot, so it never competes with the first feed requests
+        console.log(`Ad inventory forecast scheduled every ${AD_INVENTORY_INTERVAL_H}h (first run in 2 min)`);
+    } else {
+        console.log('Ad inventory forecast disabled (AD_INVENTORY_ENABLED=false)');
+    }
+
+    adPayouts.schedule();
+    adCreativeSync.schedule();
 
     // Discover pool: union recent + a fresh random slice of the transcription-tagged
     // back catalogue + still-watched videos, precomputing each one's base score.

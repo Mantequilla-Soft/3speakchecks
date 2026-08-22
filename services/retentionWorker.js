@@ -6,7 +6,8 @@
  *
  * Pipeline (see algo.md for the plain-English + full version):
  *   1. Aggregate view-durations (recent window, junk sessions dropped) → per-video
- *      { viewers(distinct IP), sessions, avgPct, completionRate, hookRate, avgContentSec, duration }.
+ *      { viewers(distinct session id — see the confidence-key note below), sessions,
+ *        avgPct, completionRate, hookRate, avgContentSec, duration }.
  *   2. Aggregate view-heatmaps → per-video replayIntensity.
  *   3. rawQuality → Bayesian shrink toward the global mean → length-normalize
  *      within duration band → relQ. Bulk-upsert one doc per video, keyed _id=owner/permlink.
@@ -26,6 +27,16 @@ const {
 const WATCH_LOG = process.env.WATCH_LOG_COLLECTION || 'view-durations';
 const WATCH_HEATMAP = process.env.WATCH_HEATMAP_COLLECTION || 'view-heatmaps';
 const EMBED_VIDEO_COLLECTION = 'embed-video';
+const LEGACY_VIDEO_COLLECTION = 'videos';
+
+// Statuses where the player does NOT serve the video: it answers with a short
+// PLACEHOLDER notice clip ("this video was deleted / is still processing / failed").
+// See getVideoSource() in the player's server.js — same status list.
+const PLACEHOLDER_STATUSES = new Set([
+  'delete', 'deleted', 'self_deleted',
+  'encoding_ipfs', 'ipfs_pinning', 'uploaded',
+  'encoding_failed', 'failed',
+]);
 
 // A player-reported duration read too early (right at 'play', before HLS/VHS
 // reconciles the full manifest) can transiently land in `view-durations` as
@@ -60,7 +71,7 @@ async function run() {
 
   try {
     // ── 1. Per-video watch metrics (the aggregation runs on the Mongo server) ──
-    const rows = await db.collection(WATCH_LOG).aggregate([
+    let rows = await db.collection(WATCH_LOG).aggregate([
       // Junk-session filter on the SAME coalesced value used downstream — matching
       // `contentSeconds` alone would silently drop older watchedSeconds-only rows.
       { $match: {
@@ -70,7 +81,15 @@ async function run() {
       { $group: {
         _id: { owner: '$owner', permlink: '$permlink' },
         sessions: { $sum: 1 },
-        viewers: { $addToSet: { $ifNull: ['$viewerId', '$ip'] } }, // distinct viewers = confidence (viewerId; IP for legacy rows)
+        // Confidence key. The GDPR sweep (2026-07-15) removed BOTH `viewerId` and
+        // `ip` from this collection — and backfilled them out of history — so those
+        // two branches now match nothing and `sid` is the only identifier left. With
+        // one row per session this makes `viewers` effectively a SESSION count (a
+        // viewer who replays counts twice); routes/analytics.js made the same trade.
+        // Without the `sid` fallback the $addToSet is empty on every video, viewers
+        // is 0, bayesShrink() returns the global mean verbatim and EVERY relQ lands
+        // on exactly 1.0 — the whole ranking silently no-ops. Keep the fallback.
+        viewers: { $addToSet: { $ifNull: ['$viewerId', { $ifNull: ['$ip', '$sid'] }] } },
         sumPct: { $sum: { $ifNull: ['$watchedPct', 0] } },
         completed: { $sum: { $cond: [{ $gte: [{ $ifNull: ['$watchedPct', 0] }, RETENTION_COMPLETION_PCT] }, 1, 0] } },
         // The LOW bar — "watched a meaningful chunk", not "finished". Credits the
@@ -99,6 +118,32 @@ async function run() {
     if (!rows.length) {
       await client.close();
       return { videos: 0, ms: Date.now() - startedAt };
+    }
+
+    // ── 1a. Drop videos the player cannot actually serve. A deleted/failed/still-
+    // encoding video keeps its watch page: the player answers with a ~6s PLACEHOLDER
+    // notice clip instead of the content, the visitor watches that clip to the end,
+    // and the tracker logs it against the ORIGINAL duration — 6s of a 135s video =
+    // 4.4% watched. So a dead video does not merely score badly, it scores like the
+    // worst-retained video on the site, and it drags the global mean (the Bayesian
+    // prior EVERY video is shrunk toward) and its band mean down with it. Measured
+    // 2026-08-20: 1121 of 5385 tracked videos, 3469 sessions (13% of the dataset).
+    // Legacy videos live in `videos`, newer ones in `embed-video`; check both.
+    const statusOf = new Map();
+    for (const coll of [LEGACY_VIDEO_COLLECTION, EMBED_VIDEO_COLLECTION]) {
+      const docs = await db.collection(coll)
+        .find({ $or: rows.map((r) => ({ owner: r.owner, permlink: r.permlink })) },
+          { projection: { owner: 1, permlink: 1, status: 1 } })
+        .toArray();
+      // embed-video is the newer record and runs second, so it wins on a conflict.
+      for (const d of docs) statusOf.set(`${d.owner}/${d.permlink}`, String(d.status || '').toLowerCase());
+    }
+    const beforeFilter = rows.length;
+    rows = rows.filter((r) => !PLACEHOLDER_STATUSES.has(statusOf.get(`${r.owner}/${r.permlink}`)));
+    const droppedPlaceholders = beforeFilter - rows.length;
+    if (!rows.length) {
+      await client.close();
+      return { videos: 0, droppedPlaceholders, ms: Date.now() - startedAt };
     }
 
     // ── 1b. Guard against the mis-tracked-duration bug: swap in the video's
@@ -182,6 +227,7 @@ async function run() {
     await client.close();
     return {
       videos: rows.length,
+      droppedPlaceholders,
       globalMean: Math.round(globalMean * 1000) / 1000,
       removed: del.deletedCount || 0,
       healedDurations: healedCount,
