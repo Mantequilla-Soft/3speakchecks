@@ -35,10 +35,13 @@ const router = express.Router();
 const { getDb } = require('../utils/db');
 const { adDecision } = require('../utils/adEligibility');
 const {
-  AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_IMPRESSIONS_COLLECTION,
+  AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_IMPRESSIONS_COLLECTION, ADVERTISERS_COLLECTION,
   AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, ADS_STAGE,
+  AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT,
 } = require('../utils/config');
-const { STATES, CREATIVE_STATES, servableReason, ensureAdIndexes } = require('../utils/adModel');
+const { STATES, CREATIVE_STATES, servableReason, ensureAdIndexes, slotSecondsFor } = require('../utils/adModel');
+const { formatOf } = require('../utils/adFormats');
+const { burnSegment } = require('../services/adBurner');
 
 const SESSIONS = process.env.AD_SESSIONS_COLLECTION || 'ad_sessions';
 const FETCH_TIMEOUT_MS = parseInt(process.env.AD_FETCH_TIMEOUT_MS, 10) || 6000;
@@ -166,9 +169,22 @@ async function loadAdSegments(adManifestUrl) {
  * and the retention data the ad forecast is built from would be poisoned by the ads
  * it sells.
  */
-function splice(contentText, contentBaseUrl, adSegments, position, sid, publicBase) {
+/**
+ * @param slot {{ slotPercent?: number, slotPosition?: number }} where the break was
+ *   booked. A percentage is resolved against THIS playlist's own total duration,
+ *   summed from its EXTINF tags — the manifest in hand is the only trustworthy
+ *   statement of how long the video is, and it is the same playlist the break is
+ *   about to be cut into. A stored duration can disagree with the media.
+ */
+function splice(contentText, contentBaseUrl, adSegments, slot, sid, publicBase) {
   const lines = contentText.split(/\r?\n/);
   const abs = (u) => { try { return new URL(u, contentBaseUrl).href; } catch { return u; } };
+
+  const totalSeconds = lines.reduce((sum, l) => {
+    const m = l.match(/^#EXTINF:\s*([\d.]+)/i);
+    return sum + (m ? parseFloat(m[1]) || 0 : 0);
+  }, 0);
+  const position = slotSecondsFor(slot, totalSeconds);
 
   const adBlock = [];
   adBlock.push('#EXT-X-DISCONTINUITY');
@@ -233,6 +249,161 @@ function splice(contentText, contentBaseUrl, adSegments, position, sid, publicBa
   return { text: out.join('\n'), adStartAt: insertedAt, adDurationSeconds };
 }
 
+/**
+ * Absolutise a media playlist against its own base, without splicing anything.
+ *
+ * `splice()` already does this on its way past, but a playback that carries only a
+ * banner never reaches splice() — and a playlist handed back with relative segment
+ * paths would resolve them against THIS origin, which is not where the video is.
+ */
+function absolutise(text, baseUrl) {
+  const abs = (u) => { try { return new URL(u, baseUrl).href; } catch { return u; } };
+  return text.split(/\r?\n/).map((raw) => {
+    const line = raw.trim();
+    if (!line) return raw;
+    if (!line.startsWith('#')) return abs(line);
+    return raw.replace(/URI="([^"]+)"/i, (full, u) => (/^https?:\/\//i.test(u) ? full : `URI="${abs(u)}"`));
+  }).join('\n');
+}
+
+/**
+ * Point the segments a banner covers at this origin, so burned bytes can be served
+ * for them. Nothing else about the playlist changes: same count, same EXTINF, same
+ * order — only some URLs differ.
+ *
+ * 🚨 MUST run BEFORE the roll is spliced in. A banner's position is a percentage of
+ * the CONTENT, and once a roll is inserted the playlist's own elapsed time includes
+ * ad time — the same banner would then land seconds earlier than it was sold. Doing
+ * it first also means splice()'s boundary maths is untouched, because substituting a
+ * URL changes no duration.
+ *
+ * Returns the covered segments' ORIGINAL urls, which is what the burn reads. They are
+ * stored on the session rather than encoded into the URL on purpose: a URL that named
+ * its own source would let anyone hand this box an arbitrary address to fetch and
+ * re-encode, which is a server-side request forgery and a CPU exhaustion in one.
+ */
+function applyBanner(text, session, sid, publicBase, variantKey) {
+  const bookedAt = slotSecondsFor(session.banner, totalOf(text));
+  const bookedSeconds = Number(session.banner.seconds) || 0;
+
+  // Which segments the banner is painted onto. Two rules, and both matter:
+  //
+  //   START on the first boundary AT OR AFTER the booked position, exactly as
+  //   splice() places a break. Painting from the boundary BEFORE it would show the
+  //   banner earlier than the placement that was sold.
+  //
+  //   COVER THE FEWEST SEGMENTS that reach the booked length. The old rule covered
+  //   every segment the window merely touched, which is fine on a long video with
+  //   short segments and awful otherwise: on a 28s video with 8.3s segments, a
+  //   3-second banner straddling a boundary took TWO of the four segments — 59% of
+  //   the video — where one segment (30%) more than covers the 3 seconds sold.
+  //
+  // A whole segment is still the floor: the burn cannot paint half of one. So a
+  // short banner on a long-segment video always over-delivers somewhat, and the
+  // creator's video carries it for that long. That is the cost of being in the
+  // picture rather than over it.
+  const durations = [];
+  text.split(/\r?\n/).forEach((l) => {
+    const m = l.match(/^#EXTINF:\s*([\d.]+)/i);
+    if (m) durations.push(parseFloat(m[1]) || 0);
+  });
+  let acc = 0;
+  const starts = durations.map((d) => { const s = acc; acc += d; return s; });
+  let firstIdx = starts.findIndex((st) => st >= bookedAt - 1e-6);
+  // Booked past the last boundary (a late slot on a short video): use the last
+  // segment rather than dropping the placement.
+  if (firstIdx < 0) firstIdx = Math.max(0, durations.length - 1);
+  let lastIdx = firstIdx;
+  let span = durations[firstIdx] || 0;
+  while (span < bookedSeconds - 1e-6 && lastIdx + 1 < durations.length) {
+    lastIdx += 1;
+    span += durations[lastIdx];
+  }
+
+  const covered = [];
+  // Where the banner is ACTUALLY on screen. A burn paints whole segments — there is
+  // no way to change half of one — so a 3-second banner inside a 6-second segment is
+  // visible for the whole six. The booked figure is what was PAID for; this is what
+  // a viewer sees, and it is the one the click target has to follow. Reporting the
+  // booked window left the banner visible for seconds after its target had gone,
+  // so a viewer clicking the ad in front of them hit plain video.
+  let realStart = null;
+  let realEnd = null;
+
+  let elapsed = 0;
+  let pending = null;
+  let segIndex = -1;
+  const out = text.split(/\r?\n/).map((raw) => {
+    const line = raw.trim();
+    const m = line.match(/^#EXTINF:\s*([\d.]+)/i);
+    if (m) { pending = parseFloat(m[1]) || 0; return raw; }
+    if (!line || line.startsWith('#')) return raw;
+
+    segIndex += 1;
+    const segStart = elapsed;
+    const segEnd = elapsed + (pending || 0);
+    if (pending != null) { elapsed = segEnd; pending = null; }
+
+    // Any segment the banner window touches. A banner is not cut at a boundary the
+    // way a break is: it is painted onto whichever frames it overlaps, so a window
+    // that clips two segments covers both of them.
+    if (segIndex >= firstIdx && segIndex <= lastIdx) {
+      const i = covered.length;
+      covered.push(line);
+      if (realStart === null) realStart = segStart;
+      realEnd = segEnd;
+      return `${publicBase}/m/${sid}/s/${variantKey}/${i}`;
+    }
+    return raw;
+  }).join('\n');
+
+  return {
+    text: out,
+    covered,
+    // Segment-aligned, exactly as splice() reports where the break really landed
+    // rather than where it was booked.
+    startAt: realStart === null ? bookedAt : realStart,
+    durationSeconds: realStart === null ? 0 : realEnd - realStart,
+  };
+}
+
+/** Total duration a media playlist declares, summed from its own EXTINF tags. */
+function totalOf(text) {
+  return text.split(/\r?\n/).reduce((sum, l) => {
+    const m = l.match(/^#EXTINF:\s*([\d.]+)/i);
+    return sum + (m ? parseFloat(m[1]) || 0 : 0);
+  }, 0);
+}
+
+/**
+ * Where a banner will sit in the frame: the BOX it is fitted into, plus the shape of
+ * the creative that goes in it.
+ *
+ * The fit itself is deliberately NOT done here. `widthPct` is a percentage of the
+ * frame's width and `maxHeightPct` of its height, so the box's true aspect depends on
+ * the frame's — and the frame's is not known at session time, least of all across
+ * variants. The player knows it exactly (videoWidth/videoHeight), so the player fits.
+ *
+ * That the fit matters at all is because the player puts a click target here: a
+ * 1344x240 strip in a 768x108 box lands 604x108, and a target covering the whole box
+ * would open an advertiser's site from 82px of frame either side with no ad in it.
+ *
+ * Must mirror filterGraph() in services/adBurner.js, which does the same fit in
+ * pixels against a frame it can measure.
+ */
+function bannerPlacement(creative) {
+  const iw = Number(creative && creative.imageWidth);
+  const ih = Number(creative && creative.imageHeight);
+  return {
+    widthPct: AD_BANNER_WIDTH_PCT,
+    maxHeightPct: AD_BANNER_MAX_HEIGHT_PCT,
+    bottomPct: AD_BANNER_MARGIN_PCT,
+    // The creative's own shape. Null when it was never probed — the player then
+    // falls back to the box, which is correct but generous.
+    aspect: (iw > 0 && ih > 0) ? Math.round((iw / ih) * 10000) / 10000 : null,
+  };
+}
+
 function publicBaseOf(req) {
   const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
   const host = req.headers['x-forwarded-host'] || req.headers.host;
@@ -276,6 +447,15 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
 
     const db = getDb();
     const now = new Date();
+
+    // How long THIS video is, for campaigns that target video length. Looked up
+    // rather than taken from the request: the client could otherwise claim any
+    // duration and place itself inside a window the advertiser paid to exclude.
+    // `{ permlink, owner }` is a unique index, so this is a point read.
+    const video = await db.collection('embed-video')
+      .findOne({ permlink, owner }, { projection: { duration: 1 } });
+    const videoSeconds = Number(video && video.duration) || null;
+
     const candidates = await db.collection(AD_CAMPAIGNS_COLLECTION).find({
       status: { $in: [STATES.SCHEDULED, STATES.RUNNING] },
       startAt: { $lte: now },
@@ -304,6 +484,17 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       if (servableReason(c, creative)) return false;
       if (recent.has(String(c._id))) return false;
       if (c.markets && c.markets.length && country && !c.markets.includes(country)) return false;
+
+      // Video-length targeting. A campaign that asked for a window does NOT serve
+      // on a video whose length we could not establish: paying for a placement you
+      // explicitly excluded is worse than missing an impression, and an unknown
+      // duration is not evidence of a match. Campaigns with no window are
+      // unaffected either way.
+      if (c.minVideoSeconds || c.maxVideoSeconds) {
+        if (!videoSeconds) return false;
+        if (c.minVideoSeconds && videoSeconds < c.minVideoSeconds) return false;
+        if (c.maxVideoSeconds && videoSeconds > c.maxVideoSeconds) return false;
+      }
       return true;
     });
     if (!eligible.length) return res.json({ ad: null, reason: 'no_eligible_campaign' });
@@ -312,40 +503,141 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // same run, so evening out delivery is the fair split of scarce inventory —
     // an auction would be the wrong instinct here, there is nothing to bid on.
     eligible.sort((a, b2) => (a.deliveredImpressions || 0) - (b2.deliveredImpressions || 0));
-    const campaign = eligible[0];
-    const creative = byCampaign.get(String(campaign._id));
 
+    // One placement per FORMAT, not one per playback. A roll and a banner are
+    // different surfaces that do not compete for the same moment, so a playback can
+    // carry both — from different advertisers — without the viewer ever seeing two
+    // ads at once. They are picked independently so a banner is never displaced by a
+    // roll that happened to sort first.
+    const pickFor = (key) => eligible.find((c) => formatOf(c).key === key) || null;
+    const campaign = pickFor('video_roll');
+    const bannerCampaign = pickFor('video_banner');
+    if (!campaign && !bannerCampaign) return res.json({ ad: null, reason: 'no_eligible_campaign' });
+
+    const creative = campaign ? byCampaign.get(String(campaign._id)) : null;
+    const bannerCreative = bannerCampaign ? byCampaign.get(String(bannerCampaign._id)) : null;
+
+    // Who each ad is from, for the disclosure. Read from the product rather than
+    // copied onto the campaign at booking, so updating a logo fixes every booking at
+    // once. `reference` is a unique index, so these are point reads, and only for
+    // placements that were actually chosen.
+    const refs = [campaign?.advertiserRef, bannerCampaign?.advertiserRef].filter(Boolean);
+    const brands = new Map(
+      (await db.collection(ADVERTISERS_COLLECTION).find(
+        { reference: { $in: refs } },
+        { projection: { reference: 1, hiveAccount: 1, projectName: 1, logoUrl: 1, slogan: 1, website: 1 } },
+      ).toArray()).map((d) => [d.reference, d]),
+    );
+    const brandDoc = campaign ? brands.get(campaign.advertiserRef) : null;
+    const bannerBrand = bannerCampaign ? brands.get(bannerCampaign.advertiserRef) : null;
+    const websiteOf = (d) => (d && /^https?:\/\//i.test(String(d.website || '')) ? String(d.website) : null);
+
+    const publicBase = publicBaseOf(req);
     const sid = crypto.randomBytes(16).toString('hex');
     await db.collection(SESSIONS).insertOne({
       sid,
-      campaignId: campaign._id,
-      creativeId: creative._id,
-      adManifestUrl: creative.manifestUrl,
+      // The ROLL placement. Null when this playback carries only a banner — every
+      // reader downstream already has to cope with a session whose splice produced
+      // nothing, so an absent roll is not a new shape.
+      campaignId: campaign ? campaign._id : null,
+      creativeId: creative ? creative._id : null,
+      adManifestUrl: creative ? creative.manifestUrl : null,
       // Stored unwrapped: the scope check on nested playlists is only meaningful
       // against the manifest's real origin.
       contentManifestUrl: unwrapProxiedManifest(contentManifestUrl),
-      slotPosition: campaign.slotPosition,
+      // Both carried verbatim: percent for anything booked since slots became
+      // relative, seconds for older flights. slotSecondsFor() picks.
+      slotPercent: campaign ? (campaign.slotPercent ?? null) : null,
+      slotPosition: campaign ? (campaign.slotPosition ?? null) : null,
+
+      // The BANNER placement. Everything the burn and its measurement need, resolved
+      // now: the creative can be edited or a campaign paused mid-playback, and a
+      // session that changed shape underneath a playing manifest would produce a
+      // different picture for the same seek.
+      banner: bannerCampaign && bannerCreative ? {
+        campaignId: bannerCampaign._id,
+        creativeId: bannerCreative._id,
+        imageUrl: bannerCreative.imageUrl,
+        slotPercent: bannerCampaign.slotPercent ?? null,
+        slotPosition: bannerCampaign.slotPosition ?? null,
+        seconds: Number(bannerCampaign.spotSeconds) || 0,
+        clickUrl: websiteOf(bannerBrand),
+      } : null,
+
       owner,
       permlink,
       viewer,
       capId,
       country,
+      // Where a click goes. Kept server-side rather than handed to the page: it
+      // makes the click countable, and it means the destination is decided by the
+      // approved advertiser record rather than by whatever the client was told.
+      clickUrl: websiteOf(brandDoc),
       startedAt: new Date(),
       expiresAt: new Date(Date.now() + AD_SESSION_TTL_MINUTES * 60 * 1000),
     });
 
+    const brandOf = (doc, camp, path) => ({
+      account: (doc && doc.hiveAccount) || null,
+      productName: (doc && doc.projectName) || (camp && camp.projectName) || null,
+      logoUrl: (doc && doc.logoUrl) || null,
+      slogan: (doc && doc.slogan) || null,
+      // An opaque URL on our own origin, not the advertiser's. The real destination
+      // lives on the session; this is what makes the click countable, and it keeps
+      // the pattern consistent with every other URL here — nothing a filter list
+      // can match.
+      clickUrl: websiteOf(doc) ? `${publicBase}/m/${sid}/${path}` : null,
+    });
+
     res.set('Cache-Control', 'no-store');
     res.json({
-      ad: {
-        manifestUrl: `${publicBaseOf(req)}/m/${sid}.m3u8`,
-        position: campaign.slotPosition,
+      // The manifest is returned whenever ANY placement was made, because a banner
+      // lives inside the playlist exactly as a roll does — the player loads one
+      // source either way and never learns which placements it carries.
+      ad: campaign ? {
+        manifestUrl: `${publicBase}/m/${sid}.m3u8`,
+        // Informational only — the player takes the real cut point from /m/:sid/i
+        // once the splice has happened, because that is the number the manifest
+        // actually landed on.
+        positionPercent: campaign.slotPercent ?? null,
+        position: campaign.slotPosition ?? null,
         durationSeconds: creative.durationSeconds,
         // The player shows a Sponsored label over this range. Disclosure is
         // required by EU and US advertising rules, and a label in the player
         // chrome is not something a filter list removes without breaking playback.
         label: 'Sponsored',
         advertiser: campaign.projectName || null,
-      },
+        // Everything the overlay draws. Sent as one object so the player renders
+        // whatever is present and simply leaves out what is not: a product with no
+        // logo or slogan still gets a correct, complete disclosure.
+        brand: brandOf(brandDoc, campaign, 'c'),
+      } : null,
+
+      // A banner needs no overlay and no label from the player: both are already in
+      // the picture. What the player gets is the manifest to load (when there is no
+      // roll to carry it), where the banner runs so a click target can sit over it,
+      // and where a click goes.
+      banner: bannerCampaign && bannerCreative ? {
+        manifestUrl: `${publicBase}/m/${sid}.m3u8`,
+        positionPercent: bannerCampaign.slotPercent ?? null,
+        durationSeconds: Number(bannerCampaign.spotSeconds) || 0,
+        advertiser: bannerCampaign.projectName || null,
+        brand: brandOf(bannerBrand, bannerCampaign, 'bc'),
+        // WHERE IT WAS BURNED, as percentages of the video frame.
+        //
+        // Sent rather than left for the player to know, because the player cannot
+        // know: the banner is in the pixels, and the only thing that can say where
+        // it put them is the thing that put them there. A client-side copy of these
+        // numbers would drift from services/adBurner.js the first time either
+        // changed, and the click target would quietly stop covering the ad.
+        //
+        // A box, not a point: the creative is FITTED inside it, so a wide strip
+        // fills it and a square lands smaller and centred. The player's target
+        // covers the box, which is never larger than the banner's own footprint
+        // plus a little dead space either side of a narrow creative.
+        placement: bannerPlacement(bannerCreative),
+      } : null,
+
       reason: null,
     });
   } catch (err) {
@@ -396,14 +688,40 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
       return res.send(rewritten);
     }
 
-    const adSegments = await loadAdSegments(session.adManifestUrl);
-    const spliced = splice(content.text, content.url, adSegments, session.slotPosition, sid, publicBase);
-    // Record where the cut actually fell so the player can ask for it. Written on
-    // every variant fetch, which is harmless — they all splice at the same boundary.
-    await getDb().collection(SESSIONS).updateOne({ sid }, {
-      $set: { adStartAt: spliced.adStartAt, adDurationSeconds: spliced.adDurationSeconds },
-    }).catch(() => { /* the manifest still serves without it */ });
-    return res.send(spliced.text);
+    let text = absolutise(content.text, content.url);
+    const mark = {};
+
+    // BANNER FIRST — see applyBanner. Its window is content-relative, and splicing a
+    // roll in ahead of it would move it.
+    if (session.banner && session.banner.imageUrl) {
+      const variantKey = crypto.createHash('sha1').update(content.url).digest('hex').slice(0, 12);
+      const b = applyBanner(text, session, sid, publicBase, variantKey);
+      if (b.covered.length) {
+        text = b.text;
+        // The originals this variant's burns read from. Keyed by variant so a player
+        // switching resolution mid-playback gets the right source for each.
+        mark[`bannerSegs.${variantKey}`] = b.covered;
+        mark.bannerStartAt = b.startAt;
+        mark.bannerDurationSeconds = b.durationSeconds;
+      }
+    }
+
+    // A banner-only playback has no roll to splice: the playlist is already correct.
+    if (session.adManifestUrl) {
+      const adSegments = await loadAdSegments(session.adManifestUrl);
+      const spliced = splice(text, content.url, adSegments, session, sid, publicBase);
+      text = spliced.text;
+      // Record where the cut actually fell so the player can ask for it. Written on
+      // every variant fetch, which is harmless — they all splice at the same boundary.
+      mark.adStartAt = spliced.adStartAt;
+      mark.adDurationSeconds = spliced.adDurationSeconds;
+    }
+
+    if (Object.keys(mark).length) {
+      await getDb().collection(SESSIONS).updateOne({ sid }, { $set: mark })
+        .catch(() => { /* the manifest still serves without it */ });
+    }
+    return res.send(text);
   } catch (err) {
     console.error('[ad-serve] manifest failed:', err && err.message);
     // FAIL OPEN, always. A broken splice must never cost the viewer their video —
@@ -434,9 +752,234 @@ router.get('/:sid/i', servingVisible, async (req, res) => {
       // guessing, because a wrong offset silently corrupts watch data.
       adStartAt: typeof session.adStartAt === 'number' ? session.adStartAt : null,
       adDurationSeconds: session.adDurationSeconds || null,
+      // Where the banner runs, so a click target can be positioned over it. Same
+      // contract as the break: null until a variant has been rendered, because only
+      // the stitcher knows which segments it actually landed on.
+      bannerStartAt: typeof session.bannerStartAt === 'number' ? session.bannerStartAt : null,
+      // The BURNED span, not the booked one — see applyBanner. Null until a variant
+      // has been rendered, because only the stitcher knows which segments it landed
+      // on, and a target placed on the booked window disappears while the banner is
+      // still on screen.
+      bannerDurationSeconds: typeof session.bannerDurationSeconds === 'number'
+        ? session.bannerDurationSeconds
+        : null,
     });
   } catch (err) {
     res.status(500).json({ error: 'unavailable' });
+  }
+});
+
+/* ─── GET /m/:sid/c — the click-through ───────────────────────────────── */
+// Counts the click, then sends the viewer on. Done as a redirect rather than a bare
+// link so a click is measurable at all — an advertiser paying for a spot will ask how
+// many people followed it, and "we don't know" is not an answer. The destination
+// comes from the approved advertiser record, never from the request.
+router.get('/:sid/c', servingVisible, async (req, res) => {
+  try {
+    const sid = str(req.params.sid, 64);
+    if (!/^[0-9a-f]{32}$/.test(sid)) return res.status(400).send('bad session');
+    const db = getDb();
+    const session = await db.collection(SESSIONS).findOne({ sid });
+    if (!session || !session.clickUrl) return res.status(404).send('not found');
+
+    // Counted once per session, same transition guard the completion uses: a viewer
+    // who clicks, comes back and clicks again is one interested person, not two.
+    try {
+      // 🚨 Scoped by campaignId, not by sid alone. A playback can now carry a roll
+      // AND a banner, so `{ sid, clicked: { $ne: true } }` could match the BANNER's
+      // impression and attribute this click to the wrong advertiser.
+      const r = await db.collection(AD_IMPRESSIONS_COLLECTION).updateOne(
+        { sid, campaignId: session.campaignId, clicked: { $ne: true } },
+        {
+          $set: {
+            campaignId: session.campaignId,
+            owner: session.owner,
+            permlink: session.permlink,
+            clicked: true,
+            clickedAt: new Date(),
+          },
+          $setOnInsert: { at: new Date(), started: true, payoutId: null },
+        },
+        { upsert: true },
+      );
+      if (r.upsertedCount === 1 || r.modifiedCount === 1) {
+        await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
+          { _id: session.campaignId }, { $inc: { clicks: 1 } },
+        );
+      }
+    } catch (e) {
+      if (e?.code !== 11000) console.error('[ad-serve] click write failed:', e && e.message);
+    }
+
+    res.set('Cache-Control', 'no-store');
+    return res.redirect(302, session.clickUrl);
+  } catch (err) {
+    console.error('[ad-serve] click failed:', err && err.message);
+    return res.status(502).send('unavailable');
+  }
+});
+
+/**
+ * Record a delivery. Extracted because a roll and a banner measure identically and
+ * must keep doing so — the counter behind billing, delivery reporting and payout
+ * cannot mean two different things depending on which surface produced it.
+ *
+ * Keyed on (sid, campaignId), not sid: one playback can now carry two campaigns.
+ */
+async function recordDelivery({ db, sid, campaignId, facts, completed }) {
+  if (!campaignId) return;
+  const impressions = db.collection(AD_IMPRESSIONS_COLLECTION);
+  const key = { sid, campaignId };
+  try {
+    if (!completed) {
+      await impressions.updateOne(
+        key,
+        { $set: facts, $setOnInsert: { at: new Date(), started: true, payoutId: null } },
+        { upsert: true },
+      );
+      return;
+    }
+    // Count the completion ONCE. Players re-request segments (a seek back into the
+    // break, a retry after a network blip), and the campaign counter is what
+    // delivery reporting and payout are computed from — an increment per fetch would
+    // bill an advertiser for one play several times over.
+    //
+    // The `completed: { $ne: true }` filter is the transition guard: it matches only
+    // an impression that has not already been closed. On a replay it matches nothing
+    // and the upsert attempts an insert, which the unique index rejects — that
+    // duplicate-key error IS the "already counted" signal, so it is caught rather
+    // than logged as a failure.
+    let first = false;
+    try {
+      const r = await impressions.updateOne(
+        { ...key, completed: { $ne: true } },
+        {
+          $set: { ...facts, completed: true, completedAt: new Date() },
+          $setOnInsert: { at: new Date(), started: true, payoutId: null },
+        },
+        { upsert: true },
+      );
+      first = r.upsertedCount === 1 || r.modifiedCount === 1;
+    } catch (e) {
+      if (e?.code !== 11000) throw e;   // already completed → not a failure
+    }
+    if (first) {
+      await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
+        { _id: campaignId },
+        { $inc: { deliveredImpressions: 1 }, $set: { status: STATES.RUNNING, updatedAt: new Date() } },
+      );
+    }
+  } catch (e) {
+    console.error('[ad-serve] impression write failed:', e && e.message);
+  }
+}
+
+/* ─── GET /m/:sid/s/:vk/:i — a segment with the banner burned into it ──── */
+/**
+ * The banner's delivery path. These are the ONLY bytes under /m that do not 302 to
+ * the CDN, because a burned segment exists nowhere else — see services/adBurner.js
+ * for why that is affordable and when it stops being.
+ *
+ * Measured like a roll: the first covered segment starts the impression, the last
+ * completes it. A viewer who never reaches the banner never fetches these, so an
+ * unwatched banner is correctly never counted.
+ *
+ * FAILS OPEN. If the burn fails for any reason the ORIGINAL segment is served
+ * instead — the viewer keeps their video and we lose an impression, which is the
+ * right way round.
+ */
+router.get('/:sid/s/:vk/:i', servingVisible, async (req, res) => {
+  let original = null;
+  try {
+    const sid = str(req.params.sid, 64);
+    const vk = str(req.params.vk, 16);
+    const i = parseInt(req.params.i, 10);
+    if (!/^[0-9a-f]{32}$/.test(sid) || !/^[0-9a-f]{6,16}$/.test(vk) || !Number.isInteger(i) || i < 0) {
+      return res.status(400).send('bad request');
+    }
+
+    const db = getDb();
+    const session = await db.collection(SESSIONS).findOne({ sid });
+    if (!session || !session.banner) return res.status(404).send('expired');
+
+    const list = (session.bannerSegs || {})[vk];
+    if (!Array.isArray(list) || i >= list.length) return res.status(404).send('not found');
+    original = list[i];
+
+    await recordDelivery({
+      db,
+      sid,
+      campaignId: session.banner.campaignId,
+      facts: {
+        campaignId: session.banner.campaignId,
+        owner: session.owner,
+        permlink: session.permlink,
+        country: session.country || null,
+      },
+      completed: i === list.length - 1,
+    });
+
+    const burned = await burnSegment({
+      segmentUrl: original,
+      imageUrl: session.banner.imageUrl,
+    });
+    if (!burned) return res.redirect(302, original);
+
+    res.set('Content-Type', 'video/mp2t');
+    // The bytes for this (segment, creative) never change, and a viewer seeking back
+    // over the banner should not make us serve them twice.
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    return res.sendFile(burned);
+  } catch (err) {
+    console.error('[ad-serve] burned segment failed:', err && err.message);
+    if (original) return res.redirect(302, original);
+    return res.status(502).send('unavailable');
+  }
+});
+
+/* ─── GET /m/:sid/bc — the banner's click-through ─────────────────────── */
+// Separate from /c because a playback can carry two advertisers and a click has to
+// be attributed to the right one. Same contract otherwise: counted once, destination
+// read from the approved advertiser record.
+router.get('/:sid/bc', servingVisible, async (req, res) => {
+  try {
+    const sid = str(req.params.sid, 64);
+    if (!/^[0-9a-f]{32}$/.test(sid)) return res.status(400).send('bad session');
+    const db = getDb();
+    const session = await db.collection(SESSIONS).findOne({ sid });
+    if (!session || !session.banner || !session.banner.clickUrl) return res.status(404).send('not found');
+    // Counted once per campaign per session, exactly as the spot's click is: a
+    // viewer who clicks, comes back and clicks again is one interested person, not
+    // two. Upserted for the same reason too — a click that arrives without an
+    // impression on record (a failed segment write, an odd retry order) is still a
+    // click, and losing it would under-report the one number an advertiser checks.
+    try {
+      const r = await db.collection(AD_IMPRESSIONS_COLLECTION).updateOne(
+        { sid, campaignId: session.banner.campaignId, clicked: { $ne: true } },
+        {
+          $set: {
+            campaignId: session.banner.campaignId,
+            owner: session.owner,
+            permlink: session.permlink,
+            clicked: true,
+            clickedAt: new Date(),
+          },
+          $setOnInsert: { at: new Date(), started: true, payoutId: null },
+        },
+        { upsert: true },
+      );
+      if (r.upsertedCount === 1 || r.modifiedCount === 1) {
+        await db.collection(AD_CAMPAIGNS_COLLECTION)
+          .updateOne({ _id: session.banner.campaignId }, { $inc: { clicks: 1 } });
+      }
+    } catch (e) {
+      if (e?.code !== 11000) console.error('[ad-serve] banner click write failed:', e && e.message);
+    }
+    res.set('Cache-Control', 'no-store');
+    return res.redirect(302, session.banner.clickUrl);
+  } catch (err) {
+    console.error('[ad-serve] banner click failed:', err && err.message);
+    return res.status(502).send('unavailable');
   }
 });
 
@@ -451,63 +994,24 @@ router.get('/:sid/:n', servingVisible, async (req, res) => {
     const session = await db.collection(SESSIONS).findOne({ sid });
     if (!session) return res.status(404).send('expired');
 
+    if (!session.adManifestUrl) return res.status(404).send('no spot on this session');
     const segments = await loadAdSegments(session.adManifestUrl);
     const seg = n === 'a' ? segments[0] : segments[segments.length - 1];
 
     // Record BEFORE redirecting: the bytes are about to be served either way, and
     // a redirect that fails to record is an ad we gave away.
-    const started = n === 'a' || n === 'ab';
-    const completed = n === 'b' || n === 'ab';
-    const impressions = db.collection(AD_IMPRESSIONS_COLLECTION);
-    const facts = {
+    await recordDelivery({
+      db,
+      sid,
       campaignId: session.campaignId,
-      owner: session.owner,
-      permlink: session.permlink,
-      country: session.country || null,
-    };
-    try {
-      if (!completed) {
-        await impressions.updateOne(
-          { sid },
-          { $set: facts, $setOnInsert: { at: new Date(), started: true, payoutId: null } },
-          { upsert: true },
-        );
-      } else {
-        // Count the completion ONCE. Players re-request segments (a seek back into
-        // the break, a retry after a network blip), and the campaign counter is
-        // what delivery reporting and payout are computed from — an increment per
-        // fetch would bill an advertiser for one play several times over.
-        //
-        // The `completed: { $ne: true }` filter is the transition guard: it matches
-        // only an impression that has not already been closed. On a replay it
-        // matches nothing and the upsert attempts an insert, which the unique index
-        // on `sid` rejects — that duplicate-key error IS the "already counted"
-        // signal, so it is caught rather than logged as a failure.
-        let firstCompletion = false;
-        try {
-          const r = await impressions.updateOne(
-            { sid, completed: { $ne: true } },
-            {
-              $set: { ...facts, completed: true, completedAt: new Date() },
-              $setOnInsert: { at: new Date(), started: true, payoutId: null },
-            },
-            { upsert: true },
-          );
-          firstCompletion = r.upsertedCount === 1 || r.modifiedCount === 1;
-        } catch (e) {
-          if (e?.code !== 11000) throw e;   // already completed → not a failure
-        }
-
-        if (firstCompletion) {
-          await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
-            { _id: session.campaignId },
-            { $inc: { deliveredImpressions: 1 }, $set: { status: STATES.RUNNING, updatedAt: new Date() } },
-          );
-        }
-      }
-    } catch (e) {
-      console.error('[ad-serve] impression write failed:', e && e.message);
-    }
+      facts: {
+        campaignId: session.campaignId,
+        owner: session.owner,
+        permlink: session.permlink,
+        country: session.country || null,
+      },
+      completed: n === 'b' || n === 'ab',
+    });
 
     res.set('Cache-Control', 'no-store');
     return res.redirect(302, seg.url);

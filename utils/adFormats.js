@@ -1,0 +1,307 @@
+/**
+ * The ad FORMAT registry: what kinds of ad can be bought, and what each one implies.
+ *
+ * There is one product per entry, and every difference between products is a field
+ * here rather than an `if (format === …)` somewhere downstream. Booking, pricing,
+ * validation, serving, payout and the rate card all read this table, so adding a
+ * fourth format is an entry plus a rate in config.js — not a fourth code path
+ * threaded through six files.
+ *
+ * 🚨 LEGACY CAMPAIGNS CARRY NO `format` FIELD. Every campaign booked before formats
+ * existed is a video roll, and `formatOf()` is the ONLY place that decision is made.
+ * Reading `campaign.format` directly anywhere else would silently reinterpret those
+ * bookings as some other product — the same trap `slotPosition` vs `slotPercent`
+ * already set once in adModel.js, and it is worth not falling into twice.
+ *
+ * WHAT THE FIELDS MEAN
+ *   creativeKind    the asset a campaign of this format must supply before it can
+ *                   serve. A roll needs an encoded video; a banner needs a still.
+ *   surface         where it runs. 'watch' formats are decided per playback against
+ *                   a creator's video; 'upload' runs in the upload flow instead, and
+ *                   has no video and no creator behind it at all.
+ *   creatorCredit   WHO the creator half of the revenue is owed to, and WHEN. Not a
+ *                   boolean: the two surfaces owe different people on different
+ *                   terms, and collapsing that into yes/no is how the wrong account
+ *                   gets paid.
+ *
+ *                     'video_owner'          the owner of the video the ad ran on.
+ *                                            Payable as soon as delivery completes —
+ *                                            they supplied the inventory, the ad has
+ *                                            run, nothing further is pending.
+ *
+ *                     'uploader_on_publish'  the viewer who WATCHED it, and only once
+ *                                            the upload that ad gated is actually
+ *                                            published. Nobody supplied inventory
+ *                                            here; the platform is buying a finished
+ *                                            upload, and pays only when it gets one.
+ *                                            A watched-then-abandoned upload owes
+ *                                            nothing, which is the entire point —
+ *                                            it rewards the conversion, not the
+ *                                            sitting through.
+ *
+ *                     null                   nobody; the platform keeps the fee.
+ *   payoutPool      which pool a delivery's revenue and its impression land in.
+ *                   Pools are settled INDEPENDENTLY: own revenue, own impression
+ *                   count, own rate, own carry-forward.
+ *
+ *                   Pooling exists to stop a per-CAMPAIGN lottery — 50 HBD over 7
+ *                   days and 50 HBD over 90 days pay twenty times differently per
+ *                   play, so whichever flight the rotation happened to hand you
+ *                   decided your rate. Splitting by pool does not bring that back:
+ *                   every campaign inside a pool still pools together. It only stops
+ *                   money crossing between audiences that have nothing to do with
+ *                   each other.
+ *
+ *                   Which is the whole argument. An advertiser buying the upload
+ *                   gate is paying to reach creators about to publish. Measured on
+ *                   live numbers, pooling that with watch inventory sent the
+ *                   uploader 5% of what was paid to reach them and gave the other
+ *                   95% to people who had no part in delivering that audience.
+ *                   Split, they get the 50% creator share the platform is built on.
+ *
+ *                   🚨 Roll and banner deliberately SHARE the 'watch' pool. A creator
+ *                   does not choose which format runs on their video, and a banner
+ *                   impression is worth about a third of a roll impression — separate
+ *                   pools would pay two creators very differently for the identical
+ *                   play, which is precisely the lottery above.
+ *   positioned      whether the booking picks a slotPercent. The upload gate plays
+ *                   at one fixed moment, so a position would be a field the
+ *                   advertiser fills in that changes nothing.
+ *   burnsIn         whether the creative ends up in the video's own pixels rather
+ *                   than in the page. See services/adBurner.js.
+ *   creativeSpec    what the asset has to BE, when the format constrains it. Lives
+ *                   here so the rate card can publish it, the attach route can
+ *                   enforce it and the booking page can state it, all from one
+ *                   definition. Null where the format has no shape requirement.
+ */
+const {
+  AD_LENGTH_SECONDS,
+  AD_PRICE_PER_SECOND_DAY_HBD,
+  AD_BANNER_PRICE_PER_SECOND_DAY_HBD,
+  AD_BANNER_MAX_SECONDS,
+  AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD,
+  AD_BANNER_MIN_ASPECT, AD_BANNER_MAX_ASPECT,
+  AD_BANNER_MIN_WIDTH, AD_BANNER_MAX_WIDTH, AD_BANNER_MAX_HEIGHT,
+  AD_BANNER_RECOMMENDED,
+} = require('./config');
+const { CREATIVE_KINDS } = require('./adCreativeKinds');
+
+/**
+ * Who the creator half of a delivery is owed to. See the header.
+ *
+ * UPLOADER_ON_PUBLISH is the only CONDITIONAL one: the impression is recorded when
+ * the spot is watched, but it is not payable then and may never become payable. See
+ * utils/adCredit.js for the lifecycle that decides.
+ */
+/**
+ * The settlement pools. A format names the one it belongs to; a future format either
+ * joins an existing pool or declares a new one, and the payout run picks it up by
+ * iterating what the registry actually uses rather than a list kept somewhere else.
+ */
+const PAYOUT_POOLS = Object.freeze({
+  WATCH: 'watch',     // ads served against somebody's video; paid to its owner
+  UPLOAD: 'upload',   // the upload gate; paid to the creator who converted
+});
+
+const CREATOR_CREDIT = Object.freeze({
+  VIDEO_OWNER: 'video_owner',
+  UPLOADER_ON_PUBLISH: 'uploader_on_publish',
+});
+
+const FORMATS = Object.freeze({
+  /**
+   * The original product: a spot spliced into the middle of someone's video.
+   */
+  video_roll: Object.freeze({
+    key: 'video_roll',
+    label: 'Video spot',
+    blurb: 'A short spot inside the video, at the point of the video you choose.',
+    creativeKind: CREATIVE_KINDS.VIDEO,
+    surface: 'watch',
+    creatorCredit: CREATOR_CREDIT.VIDEO_OWNER,
+    payoutPool: PAYOUT_POOLS.WATCH,
+    positioned: true,
+    burnsIn: false,
+    maxSeconds: AD_LENGTH_SECONDS,
+    ratePerSecondDayHbd: AD_PRICE_PER_SECOND_DAY_HBD,
+  }),
+
+  /**
+   * A strip along the bottom of the frame, burned into the video's own pixels for
+   * the seconds it runs. Not an overlay in the page: an overlay is one CSS rule
+   * away from being hidden, and the whole point of this format is that it is not.
+   */
+  video_banner: Object.freeze({
+    key: 'video_banner',
+    label: 'Player banner',
+    blurb: 'A banner across the bottom of the video, from the point you choose. It is part of the picture, not a layer over it.',
+    creativeKind: CREATIVE_KINDS.IMAGE,
+    surface: 'watch',
+    creatorCredit: CREATOR_CREDIT.VIDEO_OWNER,
+    payoutPool: PAYOUT_POOLS.WATCH,
+    positioned: true,
+    burnsIn: true,
+    maxSeconds: AD_BANNER_MAX_SECONDS,
+    ratePerSecondDayHbd: AD_BANNER_PRICE_PER_SECOND_DAY_HBD,
+    // A banner is fitted into a box roughly 7:1 on a 16:9 frame. Anything much
+    // squarer lands small and centred with video showing either side, which is
+    // technically fine and visibly not what the advertiser had in mind.
+    creativeSpec: Object.freeze({
+      minWidth: AD_BANNER_MIN_WIDTH,
+      maxWidth: AD_BANNER_MAX_WIDTH,
+      maxHeight: AD_BANNER_MAX_HEIGHT,
+      minAspect: AD_BANNER_MIN_ASPECT,
+      maxAspect: AD_BANNER_MAX_ASPECT,
+      recommended: AD_BANNER_RECOMMENDED,
+    }),
+  }),
+
+  /**
+   * Plays before a creator may upload. No video underneath it and nobody supplying
+   * inventory, which is why `positioned` is meaningless here — it is the only thing
+   * on screen, at the only moment it can run.
+   *
+   * The creator half goes to the person who WATCHED it, and only once they publish
+   * the upload it gated. That turns the gate from a toll into a deal: sit through a
+   * spot, finish your upload, get paid. It pays for the finished video rather than
+   * for the waiting, so an abandoned upload costs us nothing and a completed one is
+   * the thing we actually wanted more of.
+   */
+  upload_gate: Object.freeze({
+    key: 'upload_gate',
+    label: 'Pre-upload spot',
+    blurb: 'A spot creators watch before they can upload. Small, high-intent audience: everyone who sees it is about to publish.',
+    creativeKind: CREATIVE_KINDS.VIDEO,
+    surface: 'upload',
+    creatorCredit: CREATOR_CREDIT.UPLOADER_ON_PUBLISH,
+    payoutPool: PAYOUT_POOLS.UPLOAD,
+    positioned: false,
+    burnsIn: false,
+    maxSeconds: AD_LENGTH_SECONDS,
+    ratePerSecondDayHbd: AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD,
+  }),
+});
+
+/** The format every campaign booked before formats existed is on. */
+const DEFAULT_FORMAT = 'video_roll';
+
+const FORMAT_KEYS = Object.freeze(Object.keys(FORMATS));
+
+/**
+ * The format record for a campaign — the single place a missing `format` is read as
+ * the legacy default. Always returns a record, never undefined, so no caller has to
+ * guard: an unrecognised value (a format retired after campaigns were booked on it)
+ * also lands on the default rather than throwing mid-serve.
+ */
+function formatOf(campaign) {
+  const key = String((campaign && campaign.format) || '').trim();
+  return FORMATS[key] || FORMATS[DEFAULT_FORMAT];
+}
+
+/** The pool a campaign settles into. Same legacy-default guarantee as formatOf(). */
+function payoutPoolOf(campaign) {
+  return formatOf(campaign).payoutPool;
+}
+
+/** Every pool actually in use, derived from the registry rather than kept in step by hand. */
+function activePools() {
+  return [...new Set(FORMAT_KEYS.map((k) => FORMATS[k].payoutPool))];
+}
+
+/** Is this a format that can be booked right now? Used to validate incoming bookings. */
+function isBookableFormat(key) {
+  return Object.prototype.hasOwnProperty.call(FORMATS, String(key || '').trim());
+}
+
+/**
+ * The rate for one format, for one advertiser, in HBD per second of ad per day.
+ *
+ * A negotiated rate is stored per advertiser. It used to be a single number because
+ * there was a single product; now it can be either that bare number (which applies
+ * to the video roll it was agreed for, and ONLY that one) or a per-format map. A
+ * bare legacy number must not silently become the banner rate too — that would hand
+ * an advertiser a discount on a product nobody negotiated.
+ */
+function rateFor(advertiser, formatKey) {
+  const fmt = FORMATS[String(formatKey || '').trim()] || FORMATS[DEFAULT_FORMAT];
+  const custom = advertiser && advertiser.rates && advertiser.rates[fmt.key];
+  const n = Number(custom);
+  if (Number.isFinite(n) && n > 0) return n;
+
+  // The pre-formats field, which was only ever agreed for the video roll.
+  if (fmt.key === DEFAULT_FORMAT) {
+    const legacy = Number(
+      advertiser && (advertiser.pricePerSecondDayHbd ?? advertiser.pricePerDayHbd),
+    );
+    if (Number.isFinite(legacy) && legacy > 0) return legacy;
+  }
+  return fmt.ratePerSecondDayHbd;
+}
+
+/** The rate card: every bookable format with this advertiser's rate applied. */
+function rateCard(advertiser) {
+  return FORMAT_KEYS.map((key) => {
+    const f = FORMATS[key];
+    const rate = rateFor(advertiser, key);
+    return {
+      key: f.key,
+      label: f.label,
+      blurb: f.blurb,
+      creativeKind: f.creativeKind,
+      surface: f.surface,
+      positioned: f.positioned,
+      maxSeconds: f.maxSeconds,
+      creativeSpec: f.creativeSpec || null,
+      ratePerSecondDayHbd: rate,
+      rateIsCustom: rate !== f.ratePerSecondDayHbd,
+      creatorCredit: f.creatorCredit,
+      payoutPool: f.payoutPool,
+    };
+  });
+}
+
+/**
+ * Does this asset satisfy the format's shape requirement? Returns a sentence to show
+ * the advertiser, or null when it is fine.
+ *
+ * Phrased as the thing to do rather than the thing that is wrong: "make it wider" is
+ * actionable, "invalid aspect ratio" is not.
+ */
+function creativeSpecError(formatKey, { width, height }) {
+  const spec = (FORMATS[String(formatKey || '').trim()] || {}).creativeSpec;
+  if (!spec) return null;
+  const w = Number(width);
+  const h = Number(height);
+  // Unknown dimensions are not a failure. The probe is best-effort and a creative
+  // whose size we could not read still fits inside the box at serve time — refusing
+  // it would turn a missing measurement into a blocked advertiser.
+  if (!(w > 0) || !(h > 0)) return null;
+
+  if (w < spec.minWidth) {
+    return `That image is ${w}px wide. A banner needs to be at least ${spec.minWidth}px `
+      + `or it will look soft on a full-size player. ${spec.recommended} works well.`;
+  }
+  // Shape BEFORE size. A 1080x1080 square trips the height cap too, but "the most a
+  // banner can be is 4000x1000" is a baffling thing to be told about a square — the
+  // reason it cannot be a banner is that it is not a strip, and that is what to say.
+  const aspect = w / h;
+  if (aspect < spec.minAspect) {
+    return `That image is ${aspect.toFixed(1)}:1. A banner is a strip across the bottom `
+      + `of the video, so it needs to be at least ${spec.minAspect}:1 — otherwise it is `
+      + `drawn small and centred with the video showing either side. ${spec.recommended} works well.`;
+  }
+  if (aspect > spec.maxAspect) {
+    return `That image is ${aspect.toFixed(1)}:1, which is too long and thin to read at `
+      + `player size. Keep it under ${spec.maxAspect}:1 — ${spec.recommended} works well.`;
+  }
+  if (w > spec.maxWidth || h > spec.maxHeight) {
+    return `That image is ${w}x${h}. The most a banner can be is `
+      + `${spec.maxWidth}x${spec.maxHeight} — ${spec.recommended} works well.`;
+  }
+  return null;
+}
+
+module.exports = {
+  FORMATS, FORMAT_KEYS, DEFAULT_FORMAT, CREATOR_CREDIT, PAYOUT_POOLS,
+  formatOf, payoutPoolOf, activePools, isBookableFormat, rateFor, rateCard, creativeSpecError,
+};

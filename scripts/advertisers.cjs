@@ -127,6 +127,33 @@ withDb(async (db) => {
     console.log(`  contact     ${a.contact}`);
     console.log(`  submitted   ${date(a.createdAt)}`);
     console.log(`\n  what they want to run:\n    ${String(a.creativeConcept || '').replace(/\n/g, '\n    ')}`);
+
+    // Asked on the application form now, not only at booking. Worth surfacing here:
+    // "they have no video and want us to make one" changes what approving them means.
+    if (a.production && a.production.requested) {
+      console.log(`\n  ⚑ WANTS US TO MAKE THE SPOT — brief:\n    ${String(a.production.brief || '').replace(/\n/g, '\n    ')}`);
+    }
+
+    // Spots can be attached while the application is still pending, so the reviewer
+    // can watch what would actually run before deciding on the advertiser.
+    const spots = await db.collection(CREATIVES)
+      .find({ advertiserRef: a.reference }).sort({ createdAt: 1 }).toArray();
+    if (spots.length) {
+      console.log(`\n  attached before review (${spots.length}):`);
+      spots.forEach((c) => {
+        const what = c.kind === 'image'
+          ? `image  ${c.imageUrl}`
+          : `video  ${c.durationSeconds || '?'}s  ${c.manifestUrl ? 'encoded' : 'still encoding'}`;
+        console.log(`    ${pad(c.status, 10)} ${what}`);
+        if (c.kind !== 'image' && c.owner && c.permlink) {
+          console.log(`               watch: https://3speak.tv/embed/${c.owner}/${c.permlink}`);
+          console.log(`               approve-spot ${c.embedId}`);
+        }
+      });
+    } else {
+      console.log('\n  attached before review: nothing yet');
+    }
+
     if (a.applicantNote) console.log(`\n  note shown to them: ${a.applicantNote}`);
     if (a.reviewerNote) console.log(`  internal note:      ${a.reviewerNote}`);
     return;

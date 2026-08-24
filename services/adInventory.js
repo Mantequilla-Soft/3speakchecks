@@ -50,7 +50,7 @@ const {
   AD_CREATOR_PREFS_COLLECTION,
   AD_INVENTORY_WINDOW_DAYS,
   AD_MIN_ENGAGED_SECONDS,
-  AD_SLOT_POSITIONS,
+  AD_SLOT_PERCENTS,
   AD_LENGTH_SECONDS,
   AD_SUSPECT_MIN_SESSIONS,
   AD_SUSPECT_MAX_AVG_SECONDS,
@@ -113,8 +113,12 @@ async function findOptedOutAccounts(db) {
  * video to be long enough to still have content after the ad — nobody wants a
  * mid-roll that runs into the credits.
  */
-function slotPipeline(position, since, ownerFilter) {
-  const minDuration = position + AD_LENGTH_SECONDS;
+function slotPipeline(percent, since, ownerFilter, duration) {
+  // The break sits at `percent` of the way through, so the reach test is against
+  // each video's OWN duration rather than one absolute number for the catalogue.
+  // A video still has to be at least as long as the spot, or there is nothing to
+  // splice the ad into.
+  const reachedTarget = { $multiply: [{ $ifNull: ['$videoDuration', 0] }, percent / 100] };
   const match = {
     updatedAt: { $gte: since },
     ...ownerFilter,
@@ -122,8 +126,16 @@ function slotPipeline(position, since, ownerFilter) {
     $expr: {
       $and: [
         { $gte: [ENGAGED, AD_MIN_ENGAGED_SECONDS] },
-        { $gte: [{ $ifNull: ['$videoDuration', 0] }, minDuration] },
-        position > 0 ? { $gte: [REACHED, position] } : { $literal: true },
+        { $gte: [{ $ifNull: ['$videoDuration', 0] }, AD_LENGTH_SECONDS] },
+        percent > 0 ? { $gte: [REACHED, reachedTarget] } : { $literal: true },
+        // Optional video-length targeting. An advertiser who bought "only videos
+        // between 3 and 20 minutes" must be forecast against those videos alone,
+        // or the number their refund is measured against describes inventory they
+        // deliberately excluded.
+        duration && duration.min > 0
+          ? { $gte: [{ $ifNull: ['$videoDuration', 0] }, duration.min] } : { $literal: true },
+        duration && duration.max > 0
+          ? { $lte: [{ $ifNull: ['$videoDuration', 0] }, duration.max] } : { $literal: true },
       ],
     },
   };
@@ -203,13 +215,13 @@ async function computeSnapshot() {
   const countryRows = facet.countries || [];
 
   const slots = [];
-  for (const position of AD_SLOT_POSITIONS) {
+  for (const percent of AD_SLOT_PERCENTS) {
     const [row] = await db.collection(WATCH_LOG)
-      .aggregate(slotPipeline(position, since, ownerFilter), { allowDiskUse: true }).toArray();
+      .aggregate(slotPipeline(percent, since, ownerFilter), { allowDiskUse: true }).toArray();
     const sessions = (row && row.sessions) || 0;
     slots.push({
-      position,
-      kind: position === 0 ? 'pre-roll' : 'mid-roll',
+      percent,
+      kind: percent === 0 ? 'pre-roll' : 'mid-roll',
       sessions,
       videos: (row && row.videos) || 0,
       perDay: Math.round((sessions / windowDays) * 10) / 10,
@@ -293,4 +305,42 @@ async function getSnapshot() {
   return getDb().collection(AD_INVENTORY_COLLECTION).findOne({ _id: 'current' });
 }
 
-module.exports = { runOnce, getSnapshot, computeSnapshot };
+/**
+ * Sessions per day that a SPECIFIC booking would have reached over the last window.
+ *
+ * The stored snapshot answers this for the network as a whole, which stops being
+ * the right answer the moment a campaign narrows itself — a flight restricted to
+ * long videos reaches far fewer sessions than the rate card advertises. Since this
+ * number is what an under-delivery refund is measured against, it has to describe
+ * the inventory that was actually bought.
+ *
+ * Runs one aggregation at booking time. Returns null if it cannot be computed, and
+ * the caller falls back to the snapshot rather than inventing a figure.
+ */
+async function forecastPerDay({ percent, minVideoSeconds, maxVideoSeconds }) {
+  try {
+    const db = getDb();
+    const windowDays = AD_INVENTORY_WINDOW_DAYS;
+    const since = new Date(Date.now() - windowDays * DAY_MS);
+    // Same exclusion list the snapshot uses, so a targeted forecast and the rate
+    // card are computed on the same pool and can be compared. Deliberately NOT the
+    // serving allowlist, for the reason set out at the top of this file.
+    const [suspects, optedOut] = await Promise.all([
+      findSuspectAccounts(db, since),
+      findOptedOutAccounts(db),
+    ]);
+    const excludedOwners = Array.from(new Set([...suspects.map((x) => x.owner), ...optedOut]));
+    const ownerFilter = { owner: { $nin: excludedOwners } };
+    const [row] = await db.collection(WATCH_LOG).aggregate(
+      slotPipeline(percent, since, ownerFilter, { min: minVideoSeconds, max: maxVideoSeconds }),
+      { allowDiskUse: true },
+    ).toArray();
+    const sessions = (row && row.sessions) || 0;
+    return Math.round((sessions / windowDays) * 10) / 10;
+  } catch (err) {
+    console.error('[adInventory] targeted forecast failed:', err && err.message);
+    return null;
+  }
+}
+
+module.exports = { runOnce, getSnapshot, computeSnapshot, forecastPerDay };
