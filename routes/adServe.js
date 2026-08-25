@@ -80,6 +80,29 @@ function overRateLimit(ip) {
   return b.count > AD_SESSION_RATE_PER_MIN;
 }
 
+/**
+ * A stable, opaque handle for one campaign, so a client can remember "I have already
+ * seen this ad" without us handing out database ids it could enumerate.
+ *
+ * The per-campaign frequency cap has always existed server-side, but it keys on the
+ * viewer or on capId — and capId is per PAGE LOAD by design, so for anyone not signed
+ * in the cap never survived navigating to the next video, and one advertiser could
+ * follow a viewer down a whole session. This closes that, and it stays per AD: a
+ * different advertiser is still free to appear immediately.
+ */
+function adKeyOf(campaignId) {
+  return crypto.createHash('sha1').update(String(campaignId)).digest('hex').slice(0, 12);
+}
+
+/** Keys a client says it has already been shown. Only ever ADDS to the exclusion set. */
+function claimedAdKeys(body) {
+  return new Set(
+    (Array.isArray(body.recentAdKeys) ? body.recentAdKeys : [])
+      .filter((k) => typeof k === 'string' && /^[0-9a-f]{12}$/.test(k))
+      .slice(0, 40),
+  );
+}
+
 /** The caller's address, for rate limiting only. Never stored, never returned. */
 function callerIp(req) {
   const xri = req.headers['x-real-ip'];
@@ -710,12 +733,13 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
           .find({ ...capKey2, startedAt: { $gte: since2 } }, { projection: { campaignId: 1 } }).toArray();
         recent2 = new Set(rows2.map((r) => String(r.campaignId)));
       }
+      const claimedKeys2 = claimedAdKeys(b);
 
       const fit = cands.filter((c) => {
         if (!c.advertiserRef || !ok2.has(c.advertiserRef)) return false;
         const cr = byC.get(String(c._id));
         if (servableReason(c, cr)) return false;
-        if (recent2.has(String(c._id))) return false;
+        if (recent2.has(String(c._id)) || claimedKeys2.has(adKeyOf(c._id))) return false;
         if (c.markets && c.markets.length && country && !c.markets.includes(country)) return false;
         return true;
       }).sort((x, y) => (x.deliveredImpressions || 0) - (y.deliveredImpressions || 0));
@@ -763,6 +787,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
           manifestUrl: `${base2}/m/${sid2}/short.m3u8`,
           durationSeconds: Number(pickCr.durationSeconds) || Number(pickC.spotSeconds) || null,
           label: 'Sponsored',
+          adKey: adKeyOf(pickC._id),
           advertiser: brandDoc2 ? brandDoc2.projectName : null,
           brand: brandDoc2 ? {
             account: brandDoc2.hiveAccount || null,
@@ -811,6 +836,10 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       recent = new Set(rows.map((r) => String(r.campaignId)));
     }
 
+    // A forged list can only cost a client ads, never earn it any, so it is trusted
+    // exactly as far as it can do harm — which is not at all.
+    const claimedKeys = claimedAdKeys(b);
+
     // 🚨 THE APPROVAL GATE. It used to sit at booking time — a campaign could only be
     // created by an already-approved advertiser, so serving never had to ask. Now that
     // anyone can fill the whole form in one go and be reviewed afterwards, the gate has
@@ -831,7 +860,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       if (!c.advertiserRef || !approvedRefs.has(c.advertiserRef)) return false;
       const creative = byCampaign.get(String(c._id));
       if (servableReason(c, creative)) return false;
-      if (recent.has(String(c._id))) return false;
+      if (recent.has(String(c._id)) || claimedKeys.has(adKeyOf(c._id))) return false;
       if (c.markets && c.markets.length && country && !c.markets.includes(country)) return false;
 
       // Video-length targeting. A campaign that asked for a window does NOT serve
@@ -958,6 +987,9 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         // required by EU and US advertising rules, and a label in the player
         // chrome is not something a filter list removes without breaking playback.
         label: 'Sponsored',
+        // Opaque, stable per campaign. The client remembers it so the per-AD cap
+        // survives navigating to the next video, which capId cannot do.
+        adKey: adKeyOf(campaign._id),
         advertiser: campaign.projectName || null,
         // Everything the overlay draws. Sent as one object so the player renders
         // whatever is present and simply leaves out what is not: a product with no
@@ -971,6 +1003,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       // and where a click goes.
       banner: bannerCampaign && bannerCreative ? {
         manifestUrl: `${publicBase}/m/${sid}.m3u8`,
+        adKey: adKeyOf(bannerCampaign._id),
         positionPercent: bannerCampaign.slotPercent ?? null,
         durationSeconds: Number(bannerCampaign.spotSeconds) || 0,
         advertiser: bannerCampaign.projectName || null,

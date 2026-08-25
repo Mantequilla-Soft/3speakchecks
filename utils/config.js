@@ -630,14 +630,22 @@ module.exports = {
     AD_SHORTS_RECOMMENDED: process.env.AD_SHORTS_RECOMMENDED || '1080x1920',
 
     // --- Anti-fraud + viewer comfort (routes/adServe.js) ---
-    // How long after ANY ad before this viewer is offered another one. The existing
-    // frequency cap is per CAMPAIGN, so five videos could carry five different
-    // advertisers back to back — this is the one that stops that.
-    // ⚠️ Delivery drops when this is on, and adPayouts.js measures under-delivery
-    // against the forecastImpressions written at BOOKING time, so flights quoted
-    // before it was enabled will refund more. services/adInventory.js needs to
-    // account for it before this is treated as the long-term default.
-    AD_COOLDOWN_MINUTES: parseInt(process.env.AD_COOLDOWN_MINUTES) || 10,
+    // How long after ANY ad — whoever it was for — before this viewer is offered
+    // another. 🚨 OFF by default (0), deliberately.
+    //
+    // The complaint it was built for was "five videos, five different advertisers in
+    // a row", but the honest fix for that turned out to be per-AD, not per-viewer:
+    // AD_FREQUENCY_CAP_MINUTES has always stopped the SAME advertiser repeating, it
+    // just could not survive navigation for anyone not signed in, because capId is
+    // per page load. Ads now carry an opaque adKey the client remembers, which closes
+    // that without silencing the whole surface.
+    //
+    // A blanket cooldown on top of that costs real delivery, and adPayouts.js
+    // measures under-delivery against the forecastImpressions written at BOOKING
+    // time — so every flight sold before it was switched on refunds more. Leave it at
+    // 0 unless someone deliberately wants fewer ads per viewer AND the inventory
+    // forecast has been taught to expect it.
+    AD_COOLDOWN_MINUTES: parseInt(process.env.AD_COOLDOWN_MINUTES) || 0,
     // Refuse a burned/ad segment that is being pulled faster than its own playlist
     // says it can be watched. A real player asks for segment N roughly N segment-
     // durations in; a script asks for all of them at once. Costs a genuine viewer
