@@ -34,7 +34,7 @@ const {
   AD_PRODUCTION_FEE_HBD, ADS_STAGE,
 } = require('../utils/config');
 const {
-  STATES, CREATIVE_STATES, CREATIVE_KINDS, ensureAdIndexes, priceForDays, ratePerDayFor,
+  STATES, CREATIVE_STATES, CREATIVE_KINDS, DAY_MS, ensureAdIndexes, priceForDays, ratePerDayFor,
   validDayCount, windowFrom, servableReason,
 } = require('../utils/adModel');
 const { getSnapshot, forecastPerDay } = require('../services/adInventory');
@@ -85,14 +85,6 @@ function oid(v) {
   try { return new ObjectId(String(v)); } catch (_) { return null; }
 }
 
-/** The advertiser behind a reference, or null. Approved only — the gate is here. */
-async function approvedAdvertiser(reference) {
-  if (!reference) return null;
-  const doc = await getDb().collection(ADVERTISERS_COLLECTION)
-    .findOne({ reference, status: 'approved' });
-  return doc || null;
-}
-
 /**
  * How many files an advertiser may attach while their application is still under
  * review: a spot, a logo, and a couple of stills. Enough to show us what they want
@@ -108,11 +100,10 @@ const PENDING_CREATIVE_MAX = 4;
  * describing a video is a worse answer than the video. It also means an advertiser
  * hears "yes, and your spot is approved too" in one reply instead of two.
  *
- * This does not make an unapproved spot servable. A spot only reaches a viewer
- * through a campaign; campaigns still require approvedAdvertiser() and a verified
- * on-chain payment on top of that, and a creative only reaches READY when an
- * operator marks it so. What it does open is storage, which is what
- * PENDING_CREATIVE_MAX bounds.
+ * This does not make anything servable. Booking is open to an unreviewed advertiser
+ * too, but the approval gate now sits in routes/adServe.js: nothing reaches a viewer
+ * until a person has approved the advertiser AND the creative is READY AND the
+ * payment has cleared. What this opens is storage, which PENDING_CREATIVE_MAX bounds.
  */
 async function applicantAdvertiser(reference) {
   if (!reference) return null;
@@ -325,7 +316,11 @@ router.get('/slots', featureVisible, async (req, res) => {
       startAt: want.startAt,
       endAt: want.endAt,
       slots: await slotAvailability(getDb(), {
-        start: want.startAt.getTime(), end: want.endAt.getTime(),
+        start: want.startAt.getTime(),
+        end: want.endAt.getTime(),
+        // Availability is per SURFACE. Without this a banner at 25% made the roll at
+        // 25% look sold, and half the rate card vanished for no reason.
+        format: str(req.query.format, 32) || DEFAULT_FORMAT,
       }),
     });
   } catch (err) {
@@ -339,9 +334,9 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
   try {
     await ensureAdIndexes();
     const b = req.body || {};
-    const advertiser = await approvedAdvertiser(str(b.reference, 64));
+    const advertiser = await applicantAdvertiser(str(b.reference, 64));
     if (!advertiser) {
-      return res.status(403).json({ success: false, error: 'No approved advertiser for that reference' });
+      return res.status(403).json({ success: false, error: 'No product for that reference' });
     }
 
     // The product being bought. Everything below is validated against this format's
@@ -363,6 +358,30 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
         success: false,
         error: `days must be a whole number between ${AD_MIN_CAMPAIGN_DAYS} and ${AD_MAX_CAMPAIGN_DAYS}`,
       });
+    }
+
+    // When they want it to start. Optional — blank means "as soon as it is approved
+    // and paid", which is what windowFrom() does on its own.
+    //
+    // A start in the PAST is refused rather than accepted: windowFrom() clamps it to
+    // now, so booking one used to succeed and then quietly run on different dates
+    // than the ones on the form. The slack is a full day because the browser sends a
+    // bare calendar date, which Date parses as UTC midnight — an advertiser in
+    // UTC-12 picking their own tomorrow is legitimately up to 14 hours "behind" us,
+    // and refusing them would be refusing a date they cannot avoid picking. Anything
+    // older than that is a date nobody in any timezone still calls tomorrow.
+    let requestedStart = null;
+    if (b.startAt) {
+      requestedStart = new Date(b.startAt);
+      if (Number.isNaN(requestedStart.getTime())) {
+        return res.status(400).json({ success: false, error: 'startAt is not a date we can read.' });
+      }
+      if (requestedStart.getTime() < Date.now() - DAY_MS) {
+        return res.status(400).json({
+          success: false,
+          error: 'The earliest start is tomorrow — a flight has to be approved and paid before it can run.',
+        });
+      }
     }
     // Where it runs inside the video — for the formats where that is a thing to buy.
     // The upload gate plays at the one moment it can play, so asking for a position
@@ -437,7 +456,7 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
     // quoted both of them the whole thing, which ended in an automatic 50% refund to
     // each. Checked here, at the only point where a new claim on a slot is made.
     if (fmt.positioned) {
-      const want = windowFrom(b.startAt ? new Date(b.startAt) : null, days);
+      const want = windowFrom(requestedStart, days);
       const clash = await findSlotConflict(getDb(), {
         slotPercent,
         start: want.startAt.getTime(),
@@ -511,7 +530,7 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
       productionBrief: productionRequested ? productionBrief : null,
       productionStatus: productionRequested ? 'requested' : null,
       paidHbd: 0,
-      requestedStartAt: b.startAt ? new Date(b.startAt) : null,
+      requestedStartAt: requestedStart,
       startAt: null,          // set when the money lands, not when the form is filled
       endAt: null,
       deliveredImpressions: 0,
@@ -546,9 +565,9 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
 /* ─── GET /advertise/campaigns?reference=… ────────────────────────────── */
 router.get('/campaigns', featureVisible, async (req, res) => {
   try {
-    const advertiser = await approvedAdvertiser(str(req.query.reference, 64));
+    const advertiser = await applicantAdvertiser(str(req.query.reference, 64));
     if (!advertiser) {
-      return res.status(403).json({ success: false, error: 'No approved advertiser for that reference' });
+      return res.status(403).json({ success: false, error: 'No product for that reference' });
     }
     const db = getDb();
     const camps = await db.collection(AD_CAMPAIGNS_COLLECTION)
@@ -578,8 +597,8 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
   try {
     await ensureAdIndexes();
     const b = req.body || {};
-    const advertiser = await approvedAdvertiser(str(b.reference, 64));
-    if (!advertiser) return res.status(403).json({ success: false, error: 'No approved advertiser for that reference' });
+    const advertiser = await applicantAdvertiser(str(b.reference, 64));
+    if (!advertiser) return res.status(403).json({ success: false, error: 'No product for that reference' });
 
     const id = oid(req.params.id);
     if (!id) return res.status(400).json({ success: false, error: 'Invalid campaign id' });

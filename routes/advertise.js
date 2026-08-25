@@ -47,6 +47,7 @@ const {
   AD_CREATOR_POOL_PCT,
   AD_DEFAULT_COMMUNITY_PCT,
   AD_CREATIVES_COLLECTION,
+  AD_CAMPAIGNS_COLLECTION,
   ADS_ALLOWED_OWNERS,
 } = require('../utils/config');
 
@@ -637,6 +638,59 @@ router.post('/branding', featureVisible, express.json({ limit: '8kb' }), async (
     res.json({ success: true, logoUrl: doc.logoUrl || null, slogan: doc.slogan || null });
   } catch (err) {
     console.error('[advertise] branding save failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+/* ─── POST /advertise/product/discard ─────────────────────────────────── */
+/**
+ * Abandon an enrollment and remove what it created: the product, its ad videos and
+ * its bookings.
+ *
+ * Deliberately narrow. It refuses once a REVIEWER has looked at the product, and it
+ * refuses if any booking has been paid for — at that point there is money and a
+ * human decision attached, and "cancel" stops being a client-side concern. Someone
+ * who genuinely needs that should be talking to a person, not pressing a button.
+ *
+ * Uploaded media is left on the embed service. It is unlisted, has no Hive post and
+ * earns nothing, and deleting somebody's file from here would be a bigger promise
+ * than this endpoint can keep.
+ */
+router.post('/product/discard', featureVisible, express.json({ limit: '8kb' }), async (req, res) => {
+  try {
+    const reference = str((req.body || {}).reference, 64);
+    if (!reference) return res.status(400).json({ success: false, error: 'reference is required' });
+
+    const db = getDb();
+    const advertiser = await db.collection(ADVERTISERS_COLLECTION).findOne({ reference });
+    if (!advertiser) return res.status(404).json({ success: false, error: 'No product for that reference' });
+
+    if (advertiser.status !== 'pending') {
+      return res.status(409).json({
+        success: false,
+        error: 'This product has already been reviewed. Get in touch and we will sort it out.',
+      });
+    }
+
+    const paid = await db.collection(AD_CAMPAIGNS_COLLECTION)
+      .countDocuments({ advertiserRef: reference, paidHbd: { $gt: 0 } });
+    if (paid) {
+      return res.status(409).json({
+        success: false,
+        error: 'A booking on this product has been paid for, so it cannot be discarded here.',
+      });
+    }
+
+    const campaigns = await db.collection(AD_CAMPAIGNS_COLLECTION).deleteMany({ advertiserRef: reference });
+    const creatives = await db.collection(AD_CREATIVES_COLLECTION).deleteMany({ advertiserRef: reference });
+    await db.collection(ADVERTISERS_COLLECTION).deleteOne({ reference });
+
+    res.json({
+      success: true,
+      discarded: { product: 1, campaigns: campaigns.deletedCount, creatives: creatives.deletedCount },
+    });
+  } catch (err) {
+    console.error('[advertise] discard failed:', err && err.message);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });

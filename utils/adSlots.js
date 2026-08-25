@@ -30,7 +30,8 @@
  * for AD_SLOT_HOLD_HOURS. After that the hold lapses and the slot is free again —
  * otherwise an abandoned booking would take a position off the market forever.
  */
-const { AD_SLOT_HOLD_HOURS, AD_SLOT_PERCENTS, AD_CAMPAIGNS_COLLECTION } = require('./config');
+const { AD_SLOT_HOLD_HOURS, AD_SLOT_PERCENTS, AD_CAMPAIGNS_COLLECTION, ADVERTISERS_COLLECTION
+} = require('./config');
 const { STATES, DAY_MS } = require('./adModel');
 const { formatOf } = require('./adFormats');
 
@@ -76,7 +77,9 @@ const overlaps = (a, b) => !!a && !!b && a.start < b.end && b.start < a.end;
  * `startAt` to match against, so the window has to be derived per candidate. The
  * candidate set is one position's live bookings, which is small.
  */
-async function findSlotConflict(db, { slotPercent, start, end, excludeId = null, now = Date.now() }) {
+async function findSlotConflict(db, {
+  slotPercent, start, end, excludeId = null, now = Date.now(), format = null,
+}) {
   if (slotPercent === null || slotPercent === undefined) return null;   // unpositioned format
 
   const candidates = await db.collection(AD_CAMPAIGNS_COLLECTION).find({
@@ -84,10 +87,29 @@ async function findSlotConflict(db, { slotPercent, start, end, excludeId = null,
     status: { $in: HOLDING },
   }).limit(200).toArray();
 
+  // A provisional hold only counts if the advertiser behind it has been APPROVED.
+  // Anyone can now fill in the whole form and be reviewed afterwards, so without
+  // this a stranger could reserve the entire rate card by booking five slots they
+  // will never pay for. A hold is earned by approval, not by submitting a form.
+  const provisionalRefs = [...new Set(candidates
+    .filter((c) => effectiveWindow(c, now).provisional)
+    .map((c) => c.advertiserRef)
+    .filter(Boolean))];
+  const approvedRefs = provisionalRefs.length
+    ? new Set((await db.collection(ADVERTISERS_COLLECTION)
+      .find({ reference: { $in: provisionalRefs }, status: 'approved' }, { projection: { reference: 1 } })
+      .toArray()).map((a) => a.reference))
+    : new Set();
+
   const want = { start, end };
   for (const c of candidates) {
     if (excludeId && String(c._id) === String(excludeId)) continue;
+    // Formats are different surfaces that never compete for the same moment: a
+    // banner at 25% does not consume the roll at 25%. Comparing them was blocking
+    // half the rate card for no reason.
+    if (format && formatOf(c).key !== format) continue;
     const win = effectiveWindow(c, now);
+    if (win.provisional && !approvedRefs.has(c.advertiserRef)) continue;
     if (overlaps(win, want)) {
       return {
         campaignId: c._id,
@@ -105,10 +127,10 @@ async function findSlotConflict(db, { slotPercent, start, end, excludeId = null,
  * Which positions are free for a window — what the booking form should offer.
  * Returns every slot with whether it is taken and, if so, when it comes back.
  */
-async function slotAvailability(db, { start, end, excludeId = null, now = Date.now() }) {
+async function slotAvailability(db, { start, end, excludeId = null, now = Date.now(), format = null }) {
   const out = [];
   for (const percent of AD_SLOT_PERCENTS) {
-    const clash = await findSlotConflict(db, { slotPercent: percent, start, end, excludeId, now });
+    const clash = await findSlotConflict(db, { slotPercent: percent, start, end, excludeId, now, format });
     out.push({
       percent,
       available: !clash,
