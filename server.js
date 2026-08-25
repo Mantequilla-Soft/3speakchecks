@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
 
-const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN, AD_INVENTORY_ENABLED, AD_INVENTORY_INTERVAL_H } = require('./utils/config');
+const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN, DURATION_SYNC_ENABLED, DURATION_SYNC_INTERVAL_MIN, AD_INVENTORY_ENABLED, AD_INVENTORY_INTERVAL_H } = require('./utils/config');
 const { connectToMongo, getDb } = require('./utils/db');
 const { calculateAndFlagTrendingVideos } = require('./services/trending');
 const { syncHiveCommunities } = require('./services/communitySync');
@@ -12,6 +12,7 @@ const { startTagSyncWatcher } = require('./services/tagSync');
 const { syncAudioHiveLinks } = require('./services/audioHiveSync');
 const { syncEmbedCategories } = require('./services/embedCategorySync');
 const { syncThumbnails } = require('./services/thumbnailSync');
+const { syncDurations } = require('./services/durationSync');
 const { syncPremiumFromSubs } = require('./services/premiumSubsSync');
 const { schedule: scheduleCollectSubs } = require('./services/collectSubscriptions');
 const { schedule: scheduleVerifiedFollow } = require('./services/verifiedFollow');
@@ -248,6 +249,23 @@ async function startServer() {
             }, thumbIntervalMs);
         }, 90 * 1000);
         console.log(`Thumbnail sync scheduled every ${THUMBNAIL_SYNC_INTERVAL_MIN}min (first run in 90s)`);
+    }
+
+    // Recover embed-video.duration for videos published without one. The field is
+    // client-supplied at upload and never measured on our side, so an app that omits
+    // it leaves the length unknown forever — which silently removes the video from
+    // every length-targeted ad campaign, and from anything else that asks how long it
+    // is. Read back from the video's own HLS manifest.
+    if (DURATION_SYNC_ENABLED) {
+        const durIntervalMs = DURATION_SYNC_INTERVAL_MIN * 60 * 1000;
+        setTimeout(() => {
+            syncDurations().catch(err => console.error('Duration sync error:', err));
+            setInterval(() => {
+                if (syncRunning) return;
+                syncDurations().catch(err => console.error('Duration sync error:', err));
+            }, durIntervalMs);
+        }, 120 * 1000);
+        console.log(`Duration sync scheduled every ${DURATION_SYNC_INTERVAL_MIN}min (first run in 2min)`);
     }
 
     // Sync VSC subscription status → embed-users.premium. Runs on a

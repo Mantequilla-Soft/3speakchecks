@@ -387,6 +387,30 @@ module.exports = {
     // Hard cap on how far out promotedUntil can reach (days from now).
     MAX_PROMOTION_DAYS: parseInt(process.env.MAX_PROMOTION_DAYS) || 7,
 
+    // --- Duration backfill (services/durationSync.js) ---
+    // embed-video.duration is whatever the uploading client put in its tus metadata;
+    // nothing on our side ever measures it, and the encoder does not fill it in even
+    // though the manifest it just produced states the answer. Apps that omit it leave
+    // the field null forever — ~22.7% of the published library as of 2026-08-25.
+    // This worker recovers it from the manifest (sum of EXTINF). Stopgap until the encoder
+    // writes the length it already knows.
+    DURATION_SYNC_ENABLED: parseBool(process.env.DURATION_SYNC_ENABLED, true),
+    DURATION_SYNC_INTERVAL_MIN: parseInt(process.env.DURATION_SYNC_INTERVAL_MIN) || 10,
+    // Docs per run. The backlog drains over successive runs rather than in one long
+    // burst. Deliberately smaller than the thumbnail batch: each doc costs one or two
+    // IPFS gateway fetches, which are far slower than a Hive RPC.
+    DURATION_SYNC_BATCH: parseInt(process.env.DURATION_SYNC_BATCH) || 30,
+    // Parallel gateway fetches. Kept low on purpose — a wide fan-out at the gateway
+    // is what turns a cold-cache miss into a run of 500s.
+    DURATION_SYNC_CONCURRENCY: parseInt(process.env.DURATION_SYNC_CONCURRENCY) || 4,
+    // A video whose manifest we cannot read is stamped and skipped for a while,
+    // otherwise every run would re-fetch the same permanent misses. Recent uploads get
+    // the short cadence (the manifest may be moments from reachable), older ones only
+    // an occasional recheck.
+    DURATION_SYNC_FRESH_DAYS: parseInt(process.env.DURATION_SYNC_FRESH_DAYS) || 2,
+    DURATION_SYNC_FRESH_RECHECK_MIN: parseInt(process.env.DURATION_SYNC_FRESH_RECHECK_MIN) || 30,
+    DURATION_SYNC_RECHECK_DAYS: parseInt(process.env.DURATION_SYNC_RECHECK_DAYS) || 7,
+
     // --- Thumbnail backfill (services/thumbnailSync.js) ---
     // Repairs embed-video docs whose thumbnail_url is null but whose Hive post
     // carries the image (livestream VODs, third-party embed-API uploads). Stopgap
