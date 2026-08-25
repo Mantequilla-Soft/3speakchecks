@@ -73,7 +73,79 @@ async function ensureSessionIndexes() {
   }
 }
 
-async function fetchText(url) {
+/**
+ * The IPFS gateways that serve the same content and may stand in for each other.
+ *
+ * 🚨 BunnyCDN 500s on COLD-CACHE content — an object it has not been asked for
+ * recently. That is not an error the stitcher can absorb: fetchText throws, the
+ * manifest route falls open with a 302 to the un-stitched video, and the playback
+ * carries no ad. Worse, it is invisible from the outside — the video plays fine, so
+ * nothing looks broken, while the campaign never records an impression and sits at
+ * `scheduled` forever. The same cold-cache 500s made a 2,000-row duration backfill
+ * look like the whole archive had gone missing (see utils/videoDuration.js).
+ *
+ * Order is not preference, it is fallback: the player hands us whichever URL it is
+ * using, we try that first, and only reach for a sibling gateway if it fails.
+ */
+const GATEWAY_HOSTS = [
+  // The one the PLAYER itself resolves to (play.3speak.tv/hls races gateways and this
+  // is what wins), and the only one measured to serve cold content: hotipfs-3speak-1
+  // answers 500 for anything not already in its cache and never recovers on retry —
+  // 24 of 24 random published videos, four attempts each.
+  'ipfs-3speak.b-cdn.net',
+  'hotipfs-3speak-1.b-cdn.net',
+  'ipfs.3speak.tv',
+];
+
+/**
+ * Of those, the ones a BROWSER can actually read.
+ *
+ * 🚨 ipfs.3speak.tv answers 200 with the bytes but sends no `Access-Control-Allow-
+ * Origin`, so every segment fetch from a page is blocked at the browser. It is fine
+ * for anything server-side (the duration backfill reads it happily — no CORS applies
+ * between two servers) and useless in a playlist we hand to hls.js.
+ *
+ * That distinction cost a whole debugging session: falling back to it made the
+ * stitcher succeed — correct playlist, correct splice, correct burn, all verifiable
+ * with curl — while the viewer's player was blocked on every ordinary segment,
+ * errored, and quietly fell back to the un-stitched source. The video played, so
+ * nothing looked broken, and no server log said otherwise. The gateway is not ours
+ * to fix (it resolves off-box), so the rule is enforced here instead: never sign a
+ * playlist pointing somewhere a browser cannot follow.
+ */
+const BROWSER_SAFE_HOSTS = ['ipfs-3speak.b-cdn.net', 'hotipfs-3speak-1.b-cdn.net'];
+const isBrowserSafe = (url) => {
+  try { return BROWSER_SAFE_HOSTS.includes(new URL(url).hostname); } catch (_) { return false; }
+};
+
+/** The same object on the other gateways, in order. Empty for a non-gateway URL. */
+function gatewaySiblings(url) {
+  try {
+    const u = new URL(url);
+    if (!GATEWAY_HOSTS.includes(u.hostname)) return [];
+    return GATEWAY_HOSTS.filter((h) => h !== u.hostname).map((h) => {
+      const alt = new URL(u.href);
+      alt.hostname = h;
+      return alt.href;
+    });
+  } catch (_) {
+    return [];
+  }
+}
+
+/** Do these two URLs address the same content through interchangeable gateways? */
+function sameContentScope(a, b) {
+  try {
+    const x = new URL(a);
+    const y = new URL(b);
+    if (x.origin === y.origin) return true;
+    return GATEWAY_HOSTS.includes(x.hostname) && GATEWAY_HOSTS.includes(y.hostname);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function fetchOnce(url) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
   try {
@@ -85,6 +157,18 @@ async function fetchText(url) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function fetchText(url) {
+  let firstErr = null;
+  for (const candidate of [url, ...gatewaySiblings(url)]) {
+    try {
+      return await fetchOnce(candidate);
+    } catch (err) {
+      if (!firstErr) firstErr = err;
+    }
+  }
+  throw firstErr || new Error('unreachable');
 }
 
 const isMaster = (text) => /#EXT-X-STREAM-INF/i.test(text);
@@ -479,7 +563,24 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       recent = new Set(rows.map((r) => String(r.campaignId)));
     }
 
+    // 🚨 THE APPROVAL GATE. It used to sit at booking time — a campaign could only be
+    // created by an already-approved advertiser, so serving never had to ask. Now that
+    // anyone can fill the whole form in one go and be reviewed afterwards, the gate has
+    // to be HERE instead: an unapproved advertiser who booked and paid would otherwise
+    // start serving the moment their payment cleared, with no human having looked at
+    // them. One batched lookup over the candidates, before anything is chosen.
+    const candidateRefs = [...new Set(candidates.map((c) => c.advertiserRef).filter(Boolean))];
+    const approvedRefs = new Set(
+      (await db.collection(ADVERTISERS_COLLECTION)
+        .find({ reference: { $in: candidateRefs }, status: 'approved' }, { projection: { reference: 1 } })
+        .toArray()).map((a) => a.reference),
+    );
+
     const eligible = candidates.filter((c) => {
+      // Fail CLOSED: a campaign whose advertiser we cannot confirm as approved does
+      // not serve. Missing advertiserRef included — there is no such thing as an
+      // ownerless booking that is safe to run.
+      if (!c.advertiserRef || !approvedRefs.has(c.advertiserRef)) return false;
       const creative = byCampaign.get(String(c._id));
       if (servableReason(c, creative)) return false;
       if (recent.has(String(c._id))) return false;
@@ -663,11 +764,22 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
     if (requested) {
       const base = new URL(session.contentManifestUrl);
       const abs = new URL(requested, base);
-      if (abs.origin !== base.origin) return res.status(400).send('out of scope');
+      // Same origin, or a sibling gateway we fell back to when the player's own
+      // gateway 500'd. Anything else is a manifest pointing off its own content and
+      // we will not sign it.
+      if (!sameContentScope(abs.href, base.href)) return res.status(400).send('out of scope');
       target = abs.href;
     }
 
     const content = await fetchText(target);
+    // We may have read this through a fallback gateway. That is fine for reading and
+    // fatal for serving: every URL below is absolutised against content.url and handed
+    // to a browser, so if the gateway that answered will not send CORS headers there is
+    // no playlist we can build that the viewer can play. Bail to the fail-open path
+    // rather than emit one that is guaranteed to error.
+    if (!isBrowserSafe(content.url)) {
+      throw new Error(`gateway ${new URL(content.url).hostname} sends no CORS headers`);
+    }
     const publicBase = publicBaseOf(req);
     res.set('Content-Type', 'application/vnd.apple.mpegurl');
     res.set('Cache-Control', 'no-store');   // per-session; never shared or edge-cached
