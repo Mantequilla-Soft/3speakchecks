@@ -38,6 +38,7 @@ const {
   validDayCount, windowFrom, servableReason,
 } = require('../utils/adModel');
 const { getSnapshot, forecastPerDay } = require('../services/adInventory');
+const { videoShapeFromManifest } = require('../utils/videoDuration');
 const {
   DEFAULT_FORMAT, FORMAT_KEYS, formatOf, isBookableFormat, rateFor, rateCard,
   creativeSpecError,
@@ -705,6 +706,32 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
     const manifestUrl = encoded ? `${CDN}/${embed.manifest_cid}/manifest.m3u8` : null;
     const creativeKey = String(embed._id);
 
+    // Shape, for the formats that constrain it — today that is the shorts spot, which
+    // is full-screen portrait and looks wrong with anything else in it.
+    //
+    // 🚨 Probed from the MEDIA, never from the playlist: the encoder writes a
+    // hardcoded RESOLUTION=854x480 into #EXT-X-STREAM-INF regardless of the real
+    // output, so reading that would pass every landscape upload and reject every
+    // portrait one. Costs a segment fetch, so the answer is stored on the creative
+    // and a second attach reuses it.
+    //
+    // An unencoded upload has nothing to probe yet. It cannot serve either way
+    // (servableReason holds it at `creative_pending`), so it is accepted here and the
+    // shape settles when the encode lands rather than blocking the attach.
+    let shape = null;
+    if (fmt.creativeSpec && encoded) {
+      const known = await db.collection(AD_CREATIVES_COLLECTION)
+        .findOne({ embedId: creativeKey }, { projection: { videoWidth: 1, videoHeight: 1 } });
+      shape = (known && known.videoWidth > 0 && known.videoHeight > 0)
+        ? { width: known.videoWidth, height: known.videoHeight }
+        : await videoShapeFromManifest(manifestUrl);
+      // A shape we could not read is not a failure — same rule as the image path,
+      // where an unmeasurable creative is let through rather than an advertiser
+      // blocked by our own missing measurement.
+      const shapeError = shape ? creativeSpecError(fmt.key, shape) : null;
+      if (shapeError) return res.status(400).json({ success: false, error: shapeError });
+    }
+
     // A creative is identified by its embedId, never by the campaign it happens to
     // be attached to. Since a spot can be uploaded and reviewed BEFORE any flight
     // exists, the row is usually already there with `campaignId: null` — and an
@@ -730,6 +757,9 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
           campaignId: id,
           advertiserRef: advertiser.reference,
           kind: CREATIVE_KINDS.VIDEO,
+          // Measured once from the media; null until an encode exists to measure.
+          videoWidth: shape ? shape.width : null,
+          videoHeight: shape ? shape.height : null,
           owner: embed.owner || null,
           permlink: embed.permlink,
           durationSeconds,

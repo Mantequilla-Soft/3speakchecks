@@ -37,6 +37,8 @@ const { adDecision } = require('../utils/adEligibility');
 const {
   AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_IMPRESSIONS_COLLECTION, ADVERTISERS_COLLECTION,
   AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, ADS_STAGE,
+  AD_COOLDOWN_MINUTES, AD_PACING_ENABLED, AD_PACING_MIN_FRACTION, AD_SESSION_RATE_PER_MIN,
+  AD_SHORTS_EVERY_N,
   AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT,
 } = require('../utils/config');
 const { STATES, CREATIVE_STATES, servableReason, ensureAdIndexes, slotSecondsFor } = require('../utils/adModel');
@@ -47,6 +49,126 @@ const SESSIONS = process.env.AD_SESSIONS_COLLECTION || 'ad_sessions';
 const FETCH_TIMEOUT_MS = parseInt(process.env.AD_FETCH_TIMEOUT_MS, 10) || 6000;
 const ID_RE = /^[a-z0-9._-]+$/i;
 const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+
+/**
+ * Ad requests per minute from one address.
+ *
+ * 🚨 The IP is used and DROPPED inside the request — it is a key in a Map that holds
+ * a counter and an expiry, never a document, never a log line. That is the same deal
+ * watchTracking.js already makes to resolve a country, and it is what lets this exist
+ * at all: there is no viewer identity here to store or to leak.
+ *
+ * Deliberately generous. Offices, schools and mobile carriers put hundreds of real
+ * people behind one address, so this is sized to stop a script in a loop, not to
+ * ration a household. Anything subtler than a loop is the settlement check's job.
+ */
+const rateBuckets = new Map();
+function overRateLimit(ip) {
+  if (!ip || !(AD_SESSION_RATE_PER_MIN > 0)) return false;
+  const now = Date.now();
+  // Opportunistic prune. The map only ever holds addresses seen in the last minute,
+  // so it cannot grow into a memory leak or a de facto visitor log.
+  if (rateBuckets.size > 5000) {
+    for (const [k, v] of rateBuckets) if (v.resetAt <= now) rateBuckets.delete(k);
+  }
+  const b = rateBuckets.get(ip);
+  if (!b || b.resetAt <= now) {
+    rateBuckets.set(ip, { count: 1, resetAt: now + 60000 });
+    return false;
+  }
+  b.count += 1;
+  return b.count > AD_SESSION_RATE_PER_MIN;
+}
+
+/** The caller's address, for rate limiting only. Never stored, never returned. */
+function callerIp(req) {
+  const xri = req.headers['x-real-ip'];
+  if (xri) return String(xri).trim();
+  const xff = req.headers['x-forwarded-for'];
+  if (xff) return String(xff).split(',')[0].trim();
+  return req.socket && req.socket.remoteAddress ? String(req.socket.remoteAddress) : '';
+}
+
+/**
+ * Is this viewer still inside the quiet period after their last ad?
+ *
+ * ⚠️ This is a COMFORT feature, not a fraud control, and it is built accordingly.
+ * The existing frequency cap is per CAMPAIGN, so five videos could carry five
+ * different advertisers back to back — this is the one that stops that.
+ *
+ * For a NAMED viewer the answer is ours: their recent sessions are on the server.
+ * For an anonymous one there is nothing durable to ask — capId is per page load by
+ * design, and a durable anonymous id would be the viewing profile that decision
+ * exists to prevent. So the client holds a single expiry timestamp and sends it
+ * back. That value cannot identify anybody: it is one number, the same for everyone
+ * who saw an ad at the same moment, with no history behind it.
+ *
+ * A client that lies about it gets MORE ads, not fewer, which is a fraud question
+ * and answered by pacing, the rate limiter and the settlement check — not here.
+ */
+async function inCooldown(db, { viewer, lastAdAt }) {
+  if (!(AD_COOLDOWN_MINUTES > 0)) return false;
+  const since = Date.now() - AD_COOLDOWN_MINUTES * 60 * 1000;
+
+  const claimed = Number(lastAdAt);
+  if (Number.isFinite(claimed) && claimed > since && claimed <= Date.now() + 60000) return true;
+
+  if (!viewer) return false;
+  // Authoritative for anyone signed in: a session that actually delivered something.
+  const recent = await db.collection(SESSIONS).findOne(
+    { viewer, startedAt: { $gte: new Date(since) }, $or: [{ adStartAt: { $ne: null } }, { bannerStartAt: { $ne: null } }] },
+    { projection: { _id: 1 } },
+  );
+  return !!recent;
+}
+
+/**
+ * Refuse an ad segment that is being pulled faster than its own playlist says it can
+ * be watched.
+ *
+ * A real player asks for segment N roughly N segment-durations into the break; a
+ * script asks for all of them at once. Enforcing the difference turns a forged
+ * impression from instant into its full wall-clock length, which is the entire
+ * economics of botting this. Costs a genuine viewer nothing.
+ *
+ * The clock starts at the FIRST ad segment this session fetched rather than at
+ * session creation: a viewer may sit on a paused player for ten minutes before
+ * reaching the break, and dating the budget from the session would hand them the
+ * whole break for free.
+ */
+async function pacingRefusal(db, session, sid, elapsedRequired) {
+  if (!AD_PACING_ENABLED) return false;
+  const now = Date.now();
+
+  // Start the clock on the FIRST ad segment of this session, whatever its index.
+  // (An earlier version only started it when elapsedRequired > 0, so segment 0 —
+  // always the first one fetched — never started anything and every later segment
+  // looked like the first. The whole check silently passed everything.)
+  const startedAt = session.adFirstFetchAt ? new Date(session.adFirstFetchAt).getTime() : null;
+  if (!startedAt) {
+    await db.collection(SESSIONS).updateOne(
+      { sid, adFirstFetchAt: null },
+      { $set: { adFirstFetchAt: new Date(now) } },
+    ).catch(() => {});
+    return false;
+  }
+  if (!(elapsedRequired > 0)) return false;
+
+  // ⚠️ A FRACTION of the honest time, not the whole of it minus a fixed grace.
+  //
+  // Segment fetches are not watch time: hls.js reads ahead, so a real player asks
+  // for a segment before it plays it, and how far ahead depends on the connection.
+  // A fixed grace cannot express that — subtracting 12s from a 10-second banner
+  // makes the check unsatisfiable, which is exactly how the first version of this
+  // passed a bot pulling all three segments in one round trip.
+  //
+  // A proportion holds either way: a player buffering even aggressively still takes
+  // a real share of the spot's length to walk through its segments, while a script
+  // takes none of it. Under-counting a genuine impression costs the advertiser
+  // nothing and us a little revenue accuracy, so this errs generous.
+  const allowedAt = startedAt + elapsedRequired * AD_PACING_MIN_FRACTION * 1000;
+  return now < allowedAt;
+}
 
 // Everything under /m goes dark together. A live session must stop serving too —
 // sessions outlive the switch by their TTL, and a manifest that keeps splicing after
@@ -498,6 +620,10 @@ function publicBaseOf(req) {
 router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
   try {
     if (ADS_STAGE === 'off') return res.status(404).json({ error: 'Not found' });
+    // Before any database work: a script in a loop should cost us a Map lookup, not
+    // a candidate query. Answers 'no ad' rather than an error — a rate-limited
+    // viewer must still get their video.
+    if (overRateLimit(callerIp(req))) return res.json({ ad: null, reason: 'rate_limited' });
     await ensureSessionIndexes();
 
     const b = req.body || {};
@@ -512,10 +638,15 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     const capId = /^[a-f0-9]{16,64}$/.test(str(b.capId, 64)) ? str(b.capId, 64) : null;
     const country = str(b.country, 2).toUpperCase() || null;
     const contentManifestUrl = str(b.manifestUrl, 2048);
+    // Which surface is asking. 'watch' is the default and the only one that stitches;
+    // 'shorts' is answered by its own branch below and never reaches the splicer.
+    const surface = str(b.surface, 16) === 'shorts' ? 'shorts' : 'watch';
     if (!ID_RE.test(owner) || !ID_RE.test(permlink)) {
       return res.status(400).json({ error: 'Invalid owner/permlink' });
     }
-    if (!/^https:\/\//i.test(contentManifestUrl)) {
+    // A shorts spot is its own item in the feed, so there is no content manifest to
+    // splice into and none is required of the caller.
+    if (surface !== 'shorts' && !/^https:\/\//i.test(contentManifestUrl)) {
       return res.status(400).json({ error: 'manifestUrl must be an https URL' });
     }
 
@@ -527,6 +658,123 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       // if something marks them — this is the cheapest place to learn it, since the
       // answer has just been computed anyway.
       return res.json({ ad: null, reason: decision.reason, premium: decision.reason === 'premium_viewer' });
+    }
+
+    // The quiet period after this viewer's last ad, whichever advertiser it was for.
+    if (await inCooldown(getDb(), { viewer, lastAdAt: b.lastAdAt })) {
+      return res.json({ ad: null, reason: 'cooldown', cooldownMinutes: AD_COOLDOWN_MINUTES });
+    }
+
+    // ── THE SHORTS SURFACE ────────────────────────────────────────────────────
+    // A full-screen vertical spot BETWEEN shorts, not inside one. Nothing is
+    // stitched, nothing is burned: the ad is its own item in the feed and simply
+    // plays, which is why this returns before any of the splicing below.
+    //
+    // ⚠️ Its pacing is counted in SHORTS WATCHED, not minutes, and it deliberately
+    // does NOT consult the time-based cooldown. Someone swiping the feed clears ten
+    // shorts well inside ten minutes, so a minutes rule would either silence the
+    // surface entirely or fire constantly depending on how fast they swipe. The two
+    // surfaces keep their own cadence and do not block each other.
+    if (surface === 'shorts') {
+      const watched = Math.max(0, parseInt(b.shortsWatched, 10) || 0);
+      if (watched < AD_SHORTS_EVERY_N) {
+        return res.json({ ad: null, reason: 'shorts_cadence', everyN: AD_SHORTS_EVERY_N, shortsWatched: watched });
+      }
+
+      const db2 = getDb();
+      const now2 = new Date();
+      const cands = await db2.collection(AD_CAMPAIGNS_COLLECTION).find({
+        format: 'shorts_roll',
+        status: { $in: [STATES.SCHEDULED, STATES.RUNNING] },
+        startAt: { $lte: now2 },
+        endAt: { $gt: now2 },
+      }).limit(50).toArray();
+      if (!cands.length) return res.json({ ad: null, reason: 'no_campaign', everyN: AD_SHORTS_EVERY_N });
+
+      const crs = await db2.collection(AD_CREATIVES_COLLECTION)
+        .find({ campaignId: { $in: cands.map((c) => c._id) }, status: CREATIVE_STATES.READY }).toArray();
+      const byC = new Map(crs.map((cr) => [String(cr.campaignId), cr]));
+
+      // Same approval gate as the watch surface, and it fails closed for the same
+      // reason: anyone can fill in the whole form now and be reviewed afterwards.
+      const refs2 = [...new Set(cands.map((c) => c.advertiserRef).filter(Boolean))];
+      const ok2 = new Set((await db2.collection(ADVERTISERS_COLLECTION)
+        .find({ reference: { $in: refs2 }, status: 'approved' }, { projection: { reference: 1 } })
+        .toArray()).map((a) => a.reference));
+
+      let recent2 = new Set();
+      const capKey2 = viewer ? { viewer } : (capId ? { capId } : null);
+      if (capKey2) {
+        const since2 = new Date(Date.now() - AD_FREQUENCY_CAP_MINUTES * 60 * 1000);
+        const rows2 = await db2.collection(SESSIONS)
+          .find({ ...capKey2, startedAt: { $gte: since2 } }, { projection: { campaignId: 1 } }).toArray();
+        recent2 = new Set(rows2.map((r) => String(r.campaignId)));
+      }
+
+      const fit = cands.filter((c) => {
+        if (!c.advertiserRef || !ok2.has(c.advertiserRef)) return false;
+        const cr = byC.get(String(c._id));
+        if (servableReason(c, cr)) return false;
+        if (recent2.has(String(c._id))) return false;
+        if (c.markets && c.markets.length && country && !c.markets.includes(country)) return false;
+        return true;
+      }).sort((x, y) => (x.deliveredImpressions || 0) - (y.deliveredImpressions || 0));
+      if (!fit.length) return res.json({ ad: null, reason: 'no_eligible_campaign', everyN: AD_SHORTS_EVERY_N });
+
+      const pickC = fit[0];
+      const pickCr = byC.get(String(pickC._id));
+      const brandDoc2 = await db2.collection(ADVERTISERS_COLLECTION).findOne(
+        { reference: pickC.advertiserRef },
+        { projection: { hiveAccount: 1, projectName: 1, logoUrl: 1, slogan: 1, website: 1 } },
+      );
+      const site2 = brandDoc2 && /^https?:\/\//i.test(String(brandDoc2.website || '')) ? String(brandDoc2.website) : null;
+
+      const sid2 = crypto.randomBytes(16).toString('hex');
+      const base2 = publicBaseOf(req);
+      await db2.collection(SESSIONS).insertOne({
+        sid: sid2,
+        surface: 'shorts',
+        campaignId: pickC._id,
+        creativeId: pickCr._id,
+        adManifestUrl: pickCr.manifestUrl,
+        // No content to stitch into — the spot IS the item. Kept null rather than
+        // omitted so every reader downstream sees the shape it already handles.
+        contentManifestUrl: null,
+        adFirstFetchAt: null,
+        slotPercent: null,
+        slotPosition: null,
+        banner: null,
+        // WHOSE short the viewer just finished. They are the reason the viewer was
+        // there for the slot, so they are who the creator half is owed to.
+        owner,
+        permlink,
+        viewer,
+        capId,
+        country,
+        clickUrl: site2,
+        adDurationSeconds: Number(pickCr.durationSeconds) || Number(pickC.spotSeconds) || null,
+        startedAt: new Date(),
+        expiresAt: new Date(Date.now() + AD_SESSION_TTL_MINUTES * 60 * 1000),
+      });
+
+      return res.json({
+        ad: null,
+        shortsAd: {
+          manifestUrl: `${base2}/m/${sid2}/short.m3u8`,
+          durationSeconds: Number(pickCr.durationSeconds) || Number(pickC.spotSeconds) || null,
+          label: 'Sponsored',
+          advertiser: brandDoc2 ? brandDoc2.projectName : null,
+          brand: brandDoc2 ? {
+            account: brandDoc2.hiveAccount || null,
+            productName: brandDoc2.projectName || null,
+            logoUrl: brandDoc2.logoUrl || null,
+            slogan: brandDoc2.slogan || null,
+            clickUrl: site2 ? `${base2}/m/${sid2}/c` : null,
+          } : null,
+        },
+        everyN: AD_SHORTS_EVERY_N,
+        reason: null,
+      });
     }
 
     const db = getDb();
@@ -637,6 +885,9 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     const sid = crypto.randomBytes(16).toString('hex');
     await db.collection(SESSIONS).insertOne({
       sid,
+      // When this session first pulled an ad segment. Starts the pacing budget; see
+      // pacingRefusal(). Null until the viewer actually reaches the break.
+      adFirstFetchAt: null,
       // The ROLL placement. Null when this playback carries only a banner — every
       // reader downstream already has to cope with a session whose splice produced
       // nothing, so an absent roll is not a new shape.
@@ -740,6 +991,10 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       } : null,
 
       reason: null,
+      // What the client should hold on to so the next video knows to stay quiet. A
+      // bare expiry — no id, nothing to correlate, nothing that outlives itself.
+      cooldownMinutes: AD_COOLDOWN_MINUTES,
+      cooldownUntil: AD_COOLDOWN_MINUTES > 0 ? Date.now() + AD_COOLDOWN_MINUTES * 60 * 1000 : null,
     });
   } catch (err) {
     console.error('[ad-serve] session failed:', err && err.message);
@@ -1018,6 +1273,16 @@ router.get('/:sid/s/:vk/:i', servingVisible, async (req, res) => {
     if (!Array.isArray(list) || i >= list.length) return res.status(404).send('not found');
     original = list[i];
 
+    // Pacing. The banner's segments are evenly spread across its run, so segment i
+    // cannot honestly be reached before i of them have played. A request that beats
+    // that still gets its bytes — the viewer's video is never the thing we break —
+    // it just is not counted, and the advertiser is not charged for it.
+    const perSeg = (Number(session.bannerDurationSeconds) || 0) / Math.max(1, list.length);
+    if (await pacingRefusal(db, session, sid, i * perSeg)) {
+      res.set('Cache-Control', 'no-store');
+      return res.redirect(302, original);
+    }
+
     await recordDelivery({
       db,
       sid,
@@ -1095,6 +1360,63 @@ router.get('/:sid/bc', servingVisible, async (req, res) => {
   }
 });
 
+/* ─── GET /m/:sid/short.m3u8 — the shorts spot's own playlist ─────────── */
+/**
+ * A shorts spot is not spliced into anything: it IS the item. So this is simply the
+ * creative's own playlist, re-pointed so the first and last segments come back
+ * through /m/:sid/a and /m/:sid/b.
+ *
+ * That is the same two-segment measurement the roll uses, and for the same reason —
+ * everything in between 302s straight to the CDN, so the spot is measured without a
+ * single byte of it transiting this box. See the bandwidth note in adBurner.js for
+ * why that constraint is not negotiable.
+ *
+ * 🚨 Declared BEFORE /:sid/:n, which would otherwise match 'short.m3u8' as an :n.
+ */
+router.get('/:sid/short.m3u8', servingVisible, async (req, res) => {
+  try {
+    const sid = str(req.params.sid, 64);
+    if (!/^[0-9a-f]{32}$/.test(sid)) return res.status(400).send('bad session');
+
+    const session = await getDb().collection(SESSIONS).findOne({ sid });
+    if (!session || session.surface !== 'shorts') return res.status(404).send('expired');
+    if (!session.adManifestUrl) return res.status(404).send('no spot on this session');
+
+    const segments = await loadAdSegments(session.adManifestUrl);
+    if (!segments.length) return res.status(502).send('unavailable');
+
+    const publicBase = publicBaseOf(req);
+    // loadAdSegments hands back the raw `#EXTINF:` LINE, not a number — it is reused
+    // verbatim so the spot's timing is byte-for-byte the encoder's own. (Reading a
+    // `duration` field off it instead produced #EXTINF:0.000000 on every segment,
+    // which is a playlist a player reads as a zero-length ad.)
+    const secsOf = (x) => parseFloat((String(x.extinf).match(/#EXTINF:\s*([\d.]+)/) || [])[1]) || 0;
+    const target = Math.ceil(Math.max(...segments.map(secsOf), 1));
+    const lines = ['#EXTM3U', '#EXT-X-VERSION:3', `#EXT-X-TARGETDURATION:${target}`,
+      '#EXT-X-PLAYLIST-TYPE:VOD', '#EXT-X-MEDIA-SEQUENCE:0'];
+    segments.forEach((seg, i) => {
+      // A one-segment spot is both the opening and the closing measurement, which is
+      // what 'ab' means to /:sid/:n — without it a short spot would start an
+      // impression that nothing could ever complete.
+      const key = segments.length === 1
+        ? 'ab'
+        : (i === 0 ? 'a' : (i === segments.length - 1 ? 'b' : null));
+      lines.push(seg.extinf);
+      lines.push(key ? `${publicBase}/m/${sid}/${key}` : seg.url);
+    });
+    lines.push('#EXT-X-ENDLIST');
+
+    res.set('Content-Type', 'application/vnd.apple.mpegurl');
+    res.set('Cache-Control', 'no-store');   // per-session; never shared or edge-cached
+    return res.send(lines.join('\n'));
+  } catch (err) {
+    console.error('[ad-serve] shorts manifest failed:', err && err.message);
+    // No fail-open here, and none is wanted: there is no content underneath a shorts
+    // spot to fall back to. The feed simply moves on to the next short.
+    return res.status(502).send('unavailable');
+  }
+});
+
 /* ─── GET /m/:sid/:n — the two measured segments ──────────────────────── */
 router.get('/:sid/:n', servingVisible, async (req, res) => {
   try {
@@ -1109,6 +1431,15 @@ router.get('/:sid/:n', servingVisible, async (req, res) => {
     if (!session.adManifestUrl) return res.status(404).send('no spot on this session');
     const segments = await loadAdSegments(session.adManifestUrl);
     const seg = n === 'a' ? segments[0] : segments[segments.length - 1];
+
+    // Pacing: the closing segment cannot be reached before the spot has had time to
+    // play. Same deal as the banner — the bytes go out regardless, they just do not
+    // count, so a script cannot bank a completed impression in one round trip.
+    const needs = (n === 'a') ? 0 : (Number(session.adDurationSeconds) || 0);
+    if (await pacingRefusal(db, session, sid, needs)) {
+      res.set('Cache-Control', 'no-store');
+      return res.redirect(302, seg.url);
+    }
 
     // Record BEFORE redirecting: the bytes are about to be served either way, and
     // a redirect that fails to record is an ad we gave away.

@@ -608,6 +608,55 @@ module.exports = {
     AD_MAX_CAMPAIGN_DAYS: parseInt(process.env.AD_MAX_CAMPAIGN_DAYS) || 90,
     // A viewer sees at most one ad per this window, per campaign. Without it a
     // binge session would carry the same spot a dozen times and burn the audience.
+    // --- Shorts spot (utils/adFormats.js `shorts_roll`) ---
+    // A full-screen VERTICAL spot shown BETWEEN shorts, never inside one. Short.jsx
+    // has said since ads existed: "If shorts ever carry ads it needs its own slot
+    // type, not the mid-roll rules borrowed" — putting a 15s roll in front of a 12s
+    // short delivers an impression to someone who never wanted the content.
+    AD_SHORTS_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_SHORTS_PRICE_PER_SECOND_DAY_HBD) || 0.2,
+    // Shorter than a watch-page roll on purpose: the whole surface is built on quick
+    // swipes and the tolerance for a spot is correspondingly lower.
+    AD_SHORTS_MAX_SECONDS: parseInt(process.env.AD_SHORTS_MAX_SECONDS) || 10,
+    // 🚨 The pacing for THIS surface is counted in SHORTS WATCHED, not minutes —
+    // a viewer swiping through shorts covers ten of them in well under the
+    // time-based cooldown, so minutes would let the feed carry an ad almost
+    // continuously (or, tuned the other way, almost never).
+    AD_SHORTS_EVERY_N: parseInt(process.env.AD_SHORTS_EVERY_N) || 10,
+    // Vertical means vertical: 9:16 is 0.5625, so anything at or above ~0.8 is a
+    // square or a landscape video and would letterbox into black bars either side of
+    // a full-screen portrait player.
+    AD_SHORTS_MAX_ASPECT: parseFloat(process.env.AD_SHORTS_MAX_ASPECT) || 0.8,
+    AD_SHORTS_MIN_WIDTH: parseInt(process.env.AD_SHORTS_MIN_WIDTH) || 480,
+    AD_SHORTS_RECOMMENDED: process.env.AD_SHORTS_RECOMMENDED || '1080x1920',
+
+    // --- Anti-fraud + viewer comfort (routes/adServe.js) ---
+    // How long after ANY ad before this viewer is offered another one. The existing
+    // frequency cap is per CAMPAIGN, so five videos could carry five different
+    // advertisers back to back — this is the one that stops that.
+    // ⚠️ Delivery drops when this is on, and adPayouts.js measures under-delivery
+    // against the forecastImpressions written at BOOKING time, so flights quoted
+    // before it was enabled will refund more. services/adInventory.js needs to
+    // account for it before this is treated as the long-term default.
+    AD_COOLDOWN_MINUTES: parseInt(process.env.AD_COOLDOWN_MINUTES) || 10,
+    // Refuse a burned/ad segment that is being pulled faster than its own playlist
+    // says it can be watched. A real player asks for segment N roughly N segment-
+    // durations in; a script asks for all of them at once. Costs a genuine viewer
+    // nothing and makes each forged impression take its full wall-clock time.
+    AD_PACING_ENABLED: parseBool(process.env.AD_PACING_ENABLED, true),
+    // The share of a spot's honest running time that must really have passed before
+    // a segment counts. A FRACTION rather than a fixed grace on purpose: hls.js reads
+    // ahead, so segment fetches run early by an amount that depends on the
+    // connection, and "the full time minus 12 seconds" is unsatisfiable for a
+    // ten-second banner — which is how the first version of this passed a bot
+    // pulling every segment in one round trip. Erring generous: an uncounted real
+    // impression costs a little revenue accuracy, a counted fake one costs trust.
+    AD_PACING_MIN_FRACTION: parseFloat(process.env.AD_PACING_MIN_FRACTION) || 0.5,
+    // Ad requests per minute from one address. Held IN MEMORY and never persisted —
+    // the IP is used and dropped inside the request, exactly as watchTracking.js
+    // already does for country lookup. Set high enough that shared connections
+    // (offices, schools, mobile carriers) are never the ones who hit it.
+    AD_SESSION_RATE_PER_MIN: parseInt(process.env.AD_SESSION_RATE_PER_MIN) || 40,
+
     AD_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_FREQUENCY_CAP_MINUTES) || 30,
     // An impression counts once the viewer has actually watched this much of the
     // spot. Measured server-side from segment fetches, never a client pixel.

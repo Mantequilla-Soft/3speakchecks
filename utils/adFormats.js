@@ -83,6 +83,8 @@ const {
   AD_BANNER_MIN_ASPECT, AD_BANNER_MAX_ASPECT,
   AD_BANNER_MIN_WIDTH, AD_BANNER_MAX_WIDTH, AD_BANNER_MAX_HEIGHT,
   AD_BANNER_RECOMMENDED,
+  AD_SHORTS_PRICE_PER_SECOND_DAY_HBD, AD_SHORTS_MAX_SECONDS,
+  AD_SHORTS_MAX_ASPECT, AD_SHORTS_MIN_WIDTH, AD_SHORTS_RECOMMENDED,
 } = require('./config');
 const { CREATIVE_KINDS } = require('./adCreativeKinds');
 
@@ -101,6 +103,12 @@ const { CREATIVE_KINDS } = require('./adCreativeKinds');
 const PAYOUT_POOLS = Object.freeze({
   WATCH: 'watch',     // ads served against somebody's video; paid to its owner
   UPLOAD: 'upload',   // the upload gate; paid to the creator who converted
+  // Shorts get their own pool for the same reason the upload gate does: it is a
+  // different audience bought at a different rate, and a short only ever appears in
+  // the shorts feed. So the "two creators paid differently for the identical play"
+  // problem that keeps roll and banner together cannot arise here — no short is ever
+  // eligible for a watch-page format, and no watch-page video is ever eligible here.
+  SHORTS: 'shorts',
 });
 
 const CREATOR_CREDIT = Object.freeze({
@@ -179,6 +187,46 @@ const FORMATS = Object.freeze({
     burnsIn: false,
     maxSeconds: AD_LENGTH_SECONDS,
     ratePerSecondDayHbd: AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD,
+  }),
+
+  /**
+   * A full-screen vertical spot in the shorts feed, shown BETWEEN shorts.
+   *
+   * 🚨 Never inside one, and `positioned: false` says so. Short.jsx has carried the
+   * reasoning since ads existed: "the only slot that could fit is pre-roll, and
+   * putting a 15-second ad in front of a 12-second short is the same mistake as
+   * pre-rolling a video half the audience abandons inside 15 seconds". So this is
+   * its own item in the feed rather than a splice into somebody's short, which also
+   * means there is no stitching, no discontinuity and no burn — it simply plays.
+   *
+   * ⚠️ Its pacing is counted in SHORTS WATCHED, not minutes (AD_SHORTS_EVERY_N).
+   * A viewer swiping the feed passes ten shorts well inside the time-based cooldown,
+   * so minutes would either run an ad almost continuously or almost never.
+   *
+   * The creator half goes to whoever made the short the viewer just finished: they
+   * are the reason the viewer was there for the slot.
+   */
+  shorts_roll: Object.freeze({
+    key: 'shorts_roll',
+    label: 'Shorts spot',
+    blurb: 'A full-screen vertical spot in the Shorts feed, between one short and the next.',
+    creativeKind: CREATIVE_KINDS.VIDEO,
+    surface: 'shorts',
+    creatorCredit: CREATOR_CREDIT.VIDEO_OWNER,
+    payoutPool: PAYOUT_POOLS.SHORTS,
+    positioned: false,
+    burnsIn: false,
+    maxSeconds: AD_SHORTS_MAX_SECONDS,
+    ratePerSecondDayHbd: AD_SHORTS_PRICE_PER_SECOND_DAY_HBD,
+    // Portrait or it does not belong here: a landscape spot letterboxes into black
+    // bars either side of a full-screen phone player, which is technically fine and
+    // visibly not what the advertiser paid for.
+    creativeSpec: Object.freeze({
+      shape: 'portrait',
+      maxAspect: AD_SHORTS_MAX_ASPECT,
+      minWidth: AD_SHORTS_MIN_WIDTH,
+      recommended: AD_SHORTS_RECOMMENDED,
+    }),
   }),
 });
 
@@ -276,6 +324,22 @@ function creativeSpecError(formatKey, { width, height }) {
   // whose size we could not read still fits inside the box at serve time — refusing
   // it would turn a missing measurement into a blocked advertiser.
   if (!(w > 0) || !(h > 0)) return null;
+
+  // Portrait formats (the shorts spot) fail for different reasons and deserve their
+  // own wording — telling someone their vertical video "needs to be at least 3:1"
+  // is advice for a product they are not buying.
+  if (spec.shape === 'portrait') {
+    if (w < spec.minWidth) {
+      return `That video is ${w}px wide. A shorts spot plays full screen on a phone, so `
+        + `it needs to be at least ${spec.minWidth}px across. ${spec.recommended} works well.`;
+    }
+    if (w / h > spec.maxAspect) {
+      return `That video is ${w}x${h}, which is ${w > h ? 'landscape' : 'close to square'}. `
+        + `The shorts feed is full-screen portrait, so a wider spot plays small with black `
+        + `bars either side. Shoot or crop it upright — ${spec.recommended} works well.`;
+    }
+    return null;
+  }
 
   if (w < spec.minWidth) {
     return `That image is ${w}px wide. A banner needs to be at least ${spec.minWidth}px `

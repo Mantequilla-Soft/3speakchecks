@@ -21,6 +21,12 @@
  * like the content is gone when it is merely not cached. Bunny stays as a fallback
  * because it is the faster of the two whenever it does have the object.
  */
+const os = require('os');
+const path = require('path');
+const fsp = require('fs/promises');
+const crypto = require('crypto');
+const execFileP = require('util').promisify(require('child_process').execFile);
+
 const GATEWAYS = [
     // Same order as routes/adServe.js, and for the same measured reason: hotipfs-3speak-1
     // only serves what is already in its cache. ipfs-3speak is what play.3speak.tv's own
@@ -95,4 +101,76 @@ const UNKNOWN_DURATION = [
     { duration: { $exists: false } },
 ];
 
-module.exports = { durationFromManifest, sumExtinf, UNKNOWN_DURATION, GATEWAYS, MAX_PLAUSIBLE_SECONDS };
+/**
+ * The real pixel size of an encoded video, probed from its first segment.
+ *
+ * 🚨 NOT read from the playlist. `#EXT-X-STREAM-INF` carries a RESOLUTION attribute
+ * and our encoder writes a hardcoded 854x480 into it regardless of the actual
+ * output, so trusting it would call every portrait upload a landscape one. The only
+ * honest source is the media itself.
+ *
+ * Costs one segment fetch plus an ffprobe, so callers should store the answer rather
+ * than ask twice.
+ */
+/** Try a URL, then the same path on each sibling gateway. Returns text or null. */
+async function fetchAcrossGateways(url) {
+    const direct = await fetchText(url);
+    if (direct) return { url, text: direct };
+    let u;
+    try { u = new URL(url); } catch (_) { return null; }
+    for (const base of GATEWAYS) {
+        const host = new URL(base).hostname;
+        if (host === u.hostname) continue;
+        const alt = new URL(u.href);
+        alt.hostname = host;
+        const text = await fetchText(alt.href);
+        if (text) return { url: alt.href, text };
+    }
+    return null;
+}
+
+async function videoShapeFromManifest(manifestUrl) {
+    if (!manifestUrl) return null;
+    let doc = await fetchAcrossGateways(manifestUrl);
+    if (!doc) return null;
+
+    if (/#EXT-X-STREAM-INF/i.test(doc.text)) {
+        const variant = doc.text.split('\n').map((l) => l.trim())
+            .find((l) => l && !l.startsWith('#') && l.endsWith('.m3u8'));
+        if (!variant) return null;
+        doc = await fetchAcrossGateways(new URL(variant, doc.url).href);
+        if (!doc) return null;
+    }
+
+    const seg = doc.text.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
+    if (!seg) return null;
+
+    let buf;
+    try {
+        const res = await fetch(new URL(seg, doc.url).href, {
+            redirect: 'follow', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        });
+        if (!res.ok) return null;
+        buf = Buffer.from(await res.arrayBuffer());
+    } catch (_) { return null; }
+
+    const tmp = path.join(os.tmpdir(), `adshape-${crypto.randomBytes(8).toString('hex')}.ts`);
+    try {
+        await fsp.writeFile(tmp, buf);
+        const { stdout } = await execFileP('ffprobe', [
+            '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height', '-of', 'csv=p=0', tmp,
+        ], { timeout: 20000 });
+        const [w, h] = String(stdout).trim().split('\n')[0].split(',').map((n) => parseInt(n, 10));
+        return (w > 0 && h > 0) ? { width: w, height: h } : null;
+    } catch (_) {
+        return null;
+    } finally {
+        await fsp.unlink(tmp).catch(() => {});
+    }
+}
+
+module.exports = {
+    durationFromManifest, videoShapeFromManifest, sumExtinf,
+    UNKNOWN_DURATION, GATEWAYS, MAX_PLAUSIBLE_SECONDS,
+};
