@@ -1,5 +1,6 @@
 /**
- * Slot exclusivity: one campaign per position, per overlapping flight.
+ * Slot capacity: up to AD_SLOT_MAX_SHARES campaigns per position, per overlapping
+ * flight — and why that number can be greater than one now when it could not be.
  *
  * The rate card has always said a booking "buys the slot across the network for the
  * whole flight". The serving side did not enforce that — two campaigns on the same
@@ -11,7 +12,18 @@
  * then owed BOTH of them half their money back. We sold the same thing twice and
  * refunded half of each.
  *
- * So the slot is now sold exclusively, which is what the copy already promised.
+ * The bug was never the ROTATION — serving two campaigns from one position works and
+ * always did. It was the PROMISE: `forecastPerDay()` reads the inventory for a
+ * percent and knows nothing about who else holds it, so every co-holder was quoted
+ * the whole slot and the refund logic then honoured that quote.
+ *
+ * Selling it exclusively was the fix available at the time. The real fix is to quote
+ * each flight its SHARE, which is what booking now does — so a position carries up to
+ * AD_SLOT_MAX_SHARES advertisers, each forecast what rotation will actually give
+ * them, and nobody is refunded for a shortfall we invented at booking time.
+ *
+ * 🚨 The two must move together. Raising AD_SLOT_MAX_SHARES without the holder-aware
+ * forecast brings the double-selling straight back.
  *
  * 🚨 EXCLUSIVE ACROSS FORMATS, not per format. A roll and a banner at the same mark
  * do not overlap on screen — the break replaces the timeline, the banner is painted
@@ -30,7 +42,8 @@
  * for AD_SLOT_HOLD_HOURS. After that the hold lapses and the slot is free again —
  * otherwise an abandoned booking would take a position off the market forever.
  */
-const { AD_SLOT_HOLD_HOURS, AD_SLOT_PERCENTS, AD_CAMPAIGNS_COLLECTION, ADVERTISERS_COLLECTION
+const { AD_SLOT_HOLD_HOURS, AD_SLOT_PERCENTS, AD_CAMPAIGNS_COLLECTION, ADVERTISERS_COLLECTION,
+  AD_SLOT_MAX_SHARES,
 } = require('./config');
 const { STATES, DAY_MS } = require('./adModel');
 const { formatOf } = require('./adFormats');
@@ -71,16 +84,21 @@ function effectiveWindow(campaign, now = Date.now()) {
 const overlaps = (a, b) => !!a && !!b && a.start < b.end && b.start < a.end;
 
 /**
- * The campaign already holding `slotPercent` over this window, or null.
+ * How many campaigns already hold `slotPercent` over this window, and when the next
+ * share frees up.
  *
  * Evaluated in JS rather than as a Mongo query on purpose: an unpaid campaign has no
  * `startAt` to match against, so the window has to be derived per candidate. The
  * candidate set is one position's live bookings, which is small.
+ *
+ * Returns a COUNT, never who. Who else is running at a position is not something one
+ * advertiser gets to learn about another — the count is only here because the quote
+ * has to be divided by it.
  */
-async function findSlotConflict(db, {
+async function slotHolders(db, {
   slotPercent, start, end, excludeId = null, now = Date.now(), format = null,
 }) {
-  if (slotPercent === null || slotPercent === undefined) return null;   // unpositioned format
+  if (slotPercent === null || slotPercent === undefined) return { holders: 0, freeFrom: null };
 
   const candidates = await db.collection(AD_CAMPAIGNS_COLLECTION).find({
     slotPercent,
@@ -102,6 +120,8 @@ async function findSlotConflict(db, {
     : new Set();
 
   const want = { start, end };
+  let holders = 0;
+  let freeFrom = null;
   for (const c of candidates) {
     if (excludeId && String(c._id) === String(excludeId)) continue;
     // Formats are different surfaces that never compete for the same moment: a
@@ -110,37 +130,50 @@ async function findSlotConflict(db, {
     if (format && formatOf(c).key !== format) continue;
     const win = effectiveWindow(c, now);
     if (win.provisional && !approvedRefs.has(c.advertiserRef)) continue;
-    if (overlaps(win, want)) {
-      return {
-        campaignId: c._id,
-        format: formatOf(c).key,
-        provisional: win.provisional,
-        // When it frees up, so the refusal can say something useful instead of "no".
-        freeFrom: new Date(win.end),
-      };
-    }
+    if (!overlaps(win, want)) continue;
+    holders += 1;
+    // The EARLIEST end is when a share comes back, which is the useful answer for a
+    // full position — not the latest.
+    if (freeFrom === null || win.end < freeFrom) freeFrom = win.end;
   }
-  return null;
+  return { holders, freeFrom: freeFrom === null ? null : new Date(freeFrom) };
 }
 
 /**
- * Which positions are free for a window — what the booking form should offer.
- * Returns every slot with whether it is taken and, if so, when it comes back.
+ * Is this position FULL over the window? Null when there is still a share going.
+ *
+ * Kept as the booking-time guard it always was; what changed is the threshold —
+ * AD_SLOT_MAX_SHARES instead of the first holder.
+ */
+async function findSlotConflict(db, opts) {
+  const { holders, freeFrom } = await slotHolders(db, opts);
+  if (holders < AD_SLOT_MAX_SHARES) return null;
+  return { holders, maxShares: AD_SLOT_MAX_SHARES, freeFrom };
+}
+
+/**
+ * Which positions can still be booked for a window — what the booking form offers.
+ * Reports how many shares are gone so the form can say what a flight would be
+ * joining, and so the quote can be divided by it.
  */
 async function slotAvailability(db, { start, end, excludeId = null, now = Date.now(), format = null }) {
   const out = [];
   for (const percent of AD_SLOT_PERCENTS) {
-    const clash = await findSlotConflict(db, { slotPercent: percent, start, end, excludeId, now, format });
+    const { holders, freeFrom } = await slotHolders(db, { slotPercent: percent, start, end, excludeId, now, format });
+    const full = holders >= AD_SLOT_MAX_SHARES;
     out.push({
       percent,
-      available: !clash,
+      available: !full,
+      sharesTaken: holders,
+      sharesTotal: AD_SLOT_MAX_SHARES,
+      sharesLeft: Math.max(0, AD_SLOT_MAX_SHARES - holders),
       // Deliberately NOT the campaign or the advertiser: who else is running is not
       // something one advertiser gets to learn about another.
-      freeFrom: clash ? clash.freeFrom : null,
-      heldProvisionally: clash ? clash.provisional : false,
+      freeFrom: full ? freeFrom : null,
+      heldProvisionally: false,
     });
   }
   return out;
 }
 
-module.exports = { effectiveWindow, findSlotConflict, slotAvailability, HOLDING };
+module.exports = { effectiveWindow, slotHolders, findSlotConflict, slotAvailability, HOLDING };

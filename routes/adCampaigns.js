@@ -31,7 +31,7 @@ const {
   ADVERTISERS_COLLECTION, AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION,
   AD_PAYMENTS_COLLECTION, AD_PAYMENT_ACCOUNT, AD_PRICE_PER_SECOND_DAY_HBD,
   AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_SLOT_PERCENTS, AD_LENGTH_SECONDS,
-  AD_PRODUCTION_FEE_HBD, ADS_STAGE,
+  AD_PRODUCTION_FEE_HBD, ADS_STAGE, AD_SLOT_MAX_SHARES,
 } = require('../utils/config');
 const {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, DAY_MS, ensureAdIndexes, priceForDays, ratePerDayFor,
@@ -43,7 +43,7 @@ const {
   DEFAULT_FORMAT, FORMAT_KEYS, formatOf, isBookableFormat, rateFor, rateCard,
   creativeSpecError,
 } = require('../utils/adFormats');
-const { findSlotConflict, slotAvailability } = require('../utils/adSlots');
+const { findSlotConflict, slotAvailability, slotHolders } = require('../utils/adSlots');
 
 /**
  * When ADS_STAGE is 'off' the whole booking surface answers 404 — not 403, not an
@@ -257,7 +257,15 @@ router.get('/pricing', featureVisible, async (req, res) => {
       hbdPerHive,
       // Flat tenancy, stated plainly so nobody arrives expecting a CPM.
       model: 'flat',
-      note: `A booking buys the slot across the network for the whole flight. Priced per day, not per impression.`,
+      // 🚨 This is the RATE CARD PROMISE, and it is what a shortfall is measured
+      // against. It used to say a booking buys "the slot across the network for the
+      // whole flight" — which is why co-holders each had to be quoted the whole
+      // position, and why both were then refunded half. Now that a position carries
+      // several advertisers in rotation, the copy has to say so or we are back to
+      // selling the same thing twice in writing.
+      note: `A booking buys a place at your chosen position for the whole flight. A position `
+        + `carries up to ${AD_SLOT_MAX_SHARES} advertisers at a time, taking turns, and your `
+        + `forecast is your share of it. Priced per day, not per impression.`,
     });
   } catch (err) {
     console.error('[ad-campaigns] pricing failed:', err && err.message);
@@ -452,22 +460,25 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
     // Per format: a banner and a roll are different products at different rates, and
     // the number written onto the campaign is the one the advertiser was quoted.
     // 🚨 One campaign per position, per overlapping flight — ACROSS FORMATS. The rate
-    // card has always sold the slot ("a booking buys the slot across the network for
-    // the whole flight"); until now the serving side just rotated two holders and
-    // quoted both of them the whole thing, which ended in an automatic 50% refund to
-    // each. Checked here, at the only point where a new claim on a slot is made.
+    // card once sold the whole position, while the serving side rotated two holders
+    // and quoted both of them the whole thing — an automatic 50% refund to each. A
+    // position now carries AD_SLOT_MAX_SHARES advertisers and the quote below is
+    // divided accordingly, so this guard is about CAPACITY, not exclusivity. Checked
+    // here, at the only point where a new claim on a position is made.
     if (fmt.positioned) {
       const want = windowFrom(requestedStart, days);
       const clash = await findSlotConflict(getDb(), {
         slotPercent,
         start: want.startAt.getTime(),
         end: want.endAt.getTime(),
+        format: formatKey,
       });
       if (clash) {
         return res.status(409).json({
           success: false,
-          error: `The ${slotPercent}% position is already booked for those dates.`
-            + ` It is free from ${clash.freeFrom.toISOString().slice(0, 10)}.`,
+          error: `The ${slotPercent}% position is full for those dates — it carries `
+            + `${clash.maxShares} advertisers at a time.`
+            + (clash.freeFrom ? ` A place opens up from ${clash.freeFrom.toISOString().slice(0, 10)}.` : ''),
           // So the form can offer what IS free rather than making them guess. Never
           // says WHO holds it — that is not one advertiser's business about another.
           slotPercent,
@@ -488,6 +499,25 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
     // the number a refund for under-delivery has to be measured against. Reading it
     // at settlement instead would let a later change in traffic quietly rewrite what
     // we had promised.
+    // 🚨 THE SHARE, not the slot. A position now carries up to AD_SLOT_MAX_SHARES
+    // advertisers and rotation splits the plays between them, so quoting the whole
+    // position is precisely the mistake that had two campaigns each promised 2322
+    // impressions, each delivering ~1161, and each automatically refunded half their
+    // money. Divided at BOOKING time because forecastImpressions is what a shortfall
+    // is later measured against — see adPayouts.js.
+    //
+    // Counted for the window this flight will actually run in, and excluding itself.
+    let shareOf = 1;
+    if (fmt.positioned && slotPercent !== null) {
+      try {
+        const w = windowFrom(requestedStart, days);
+        const { holders } = await slotHolders(getDb(), {
+          slotPercent, start: w.startAt.getTime(), end: w.endAt.getTime(), format: formatKey,
+        });
+        shareOf = Math.max(1, Math.min(AD_SLOT_MAX_SHARES, holders + 1));
+      } catch (_) { /* fall back to the undivided figure rather than none */ }
+    }
+
     let forecastImpressions = null;
     try {
       if (fmt.surface !== 'watch') {
@@ -506,6 +536,9 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
         if (slot && Number.isFinite(slot.perDay)) forecastImpressions = Math.round(slot.perDay * days);
       }
     } catch (_) { /* no forecast on record — closeFinishedCampaigns flags it for a human */ }
+    if (Number.isFinite(forecastImpressions) && shareOf > 1) {
+      forecastImpressions = Math.round(forecastImpressions / shareOf);
+    }
 
     const doc = {
       advertiserRef: advertiser.reference,
@@ -536,6 +569,9 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
       endAt: null,
       deliveredImpressions: 0,
       forecastImpressions,
+      // How many advertisers this position was expected to carry when the quote was
+      // made. Without it a shared forecast is indistinguishable from a quiet slot.
+      forecastShareOf: shareOf,
       createdAt: new Date(),
       updatedAt: new Date(),
     };

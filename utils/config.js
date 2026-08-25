@@ -665,6 +665,21 @@ module.exports = {
     // (offices, schools, mobile carriers) are never the ones who hit it.
     AD_SESSION_RATE_PER_MIN: parseInt(process.env.AD_SESSION_RATE_PER_MIN) || 40,
 
+    // How many advertisers may hold the SAME position over overlapping flights.
+    //
+    // Was effectively 1: the rate card said a booking "buys the slot across the
+    // network for the whole flight", and it had to, because forecastPerDay() reads
+    // the inventory for a percent and knew nothing about co-holders — so two
+    // campaigns on the 10% slot were each quoted 2322 impressions, each delivered
+    // ~1161, and both were automatically refunded half their money. We sold the same
+    // thing twice.
+    //
+    // Sharing is safe now only because the quote is holder-aware: a flight joining a
+    // position is forecast its SHARE of that position, so what it is promised is what
+    // rotation actually delivers. Raising this without that division would bring the
+    // double-selling straight back.
+    AD_SLOT_MAX_SHARES: parseInt(process.env.AD_SLOT_MAX_SHARES) || 3,
+
     AD_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_FREQUENCY_CAP_MINUTES) || 30,
     // An impression counts once the viewer has actually watched this much of the
     // spot. Measured server-side from segment fetches, never a client pixel.
