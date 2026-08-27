@@ -387,6 +387,30 @@ module.exports = {
     // Hard cap on how far out promotedUntil can reach (days from now).
     MAX_PROMOTION_DAYS: parseInt(process.env.MAX_PROMOTION_DAYS) || 7,
 
+    // --- Duration backfill (services/durationSync.js) ---
+    // embed-video.duration is whatever the uploading client put in its tus metadata;
+    // nothing on our side ever measures it, and the encoder does not fill it in even
+    // though the manifest it just produced states the answer. Apps that omit it leave
+    // the field null forever — ~22.7% of the published library as of 2026-08-25.
+    // This worker recovers it from the manifest (sum of EXTINF). Stopgap until the encoder
+    // writes the length it already knows.
+    DURATION_SYNC_ENABLED: parseBool(process.env.DURATION_SYNC_ENABLED, true),
+    DURATION_SYNC_INTERVAL_MIN: parseInt(process.env.DURATION_SYNC_INTERVAL_MIN) || 10,
+    // Docs per run. The backlog drains over successive runs rather than in one long
+    // burst. Deliberately smaller than the thumbnail batch: each doc costs one or two
+    // IPFS gateway fetches, which are far slower than a Hive RPC.
+    DURATION_SYNC_BATCH: parseInt(process.env.DURATION_SYNC_BATCH) || 30,
+    // Parallel gateway fetches. Kept low on purpose — a wide fan-out at the gateway
+    // is what turns a cold-cache miss into a run of 500s.
+    DURATION_SYNC_CONCURRENCY: parseInt(process.env.DURATION_SYNC_CONCURRENCY) || 4,
+    // A video whose manifest we cannot read is stamped and skipped for a while,
+    // otherwise every run would re-fetch the same permanent misses. Recent uploads get
+    // the short cadence (the manifest may be moments from reachable), older ones only
+    // an occasional recheck.
+    DURATION_SYNC_FRESH_DAYS: parseInt(process.env.DURATION_SYNC_FRESH_DAYS) || 2,
+    DURATION_SYNC_FRESH_RECHECK_MIN: parseInt(process.env.DURATION_SYNC_FRESH_RECHECK_MIN) || 30,
+    DURATION_SYNC_RECHECK_DAYS: parseInt(process.env.DURATION_SYNC_RECHECK_DAYS) || 7,
+
     // --- Thumbnail backfill (services/thumbnailSync.js) ---
     // Repairs embed-video docs whose thumbnail_url is null but whose Hive post
     // carries the image (livestream VODs, third-party embed-API uploads). Stopgap
@@ -419,11 +443,20 @@ module.exports = {
     // Engagement floor. Measured 2026-08-20: 18% of all sessions ended inside five
     // seconds. Those are not impressions and must not be counted as inventory.
     AD_MIN_ENGAGED_SECONDS: parseFloat(process.env.AD_MIN_ENGAGED_SECONDS) || 3,
-    // Candidate slot positions in seconds. 0 = pre-roll. Mid-roll is listed first
-    // deliberately: 46% of sessions end inside 15s, so a pre-roll spends most of
-    // its inventory on people who were about to leave anyway.
-    AD_SLOT_POSITIONS: (process.env.AD_SLOT_POSITIONS || '30,60,120,0')
-        .split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n) && n >= 0),
+    // Candidate slot positions as a PERCENTAGE of the video. 0 = pre-roll.
+    //
+    // Percentages rather than absolute seconds because 3Speak's catalogue is not one
+    // length: "60 seconds in" is a third of the way through a three-minute video and
+    // barely past the intro of a half-hour one, so an advertiser buying "60s" was
+    // buying a different placement on every video it ran against. A percentage means
+    // the same relative moment everywhere, and it makes short videos sellable at all
+    // — a 90-second video has no 2-minute slot, but it does have a halfway point.
+    //
+    // Capped below 100: a break at the very end plays to a viewer who has already
+    // finished, which is not a placement anybody should be sold.
+    AD_SLOT_PERCENTS: (process.env.AD_SLOT_PERCENTS || '0,10,25,50,75')
+        .split(',').map((s) => parseInt(s.trim(), 10))
+        .filter((n) => Number.isInteger(n) && n >= 0 && n <= 90),
     // How long an ad runs. A slot only exists on a video with room for the ad AND
     // content after it — nobody buys a mid-roll that runs into the credits.
     AD_LENGTH_SECONDS: parseInt(process.env.AD_LENGTH_SECONDS) || 15,
@@ -491,11 +524,189 @@ module.exports = {
     // Flat tenancy, per day, per slot. Not a CPM: at ~271 deliverable plays a day a
     // per-impression price would quote numbers too small to mean anything, and it
     // rewards padding the count instead of finding the right audience.
-    AD_PRICE_PER_DAY_HBD: parseFloat(process.env.AD_PRICE_PER_DAY_HBD) || 5,
+    // HBD per SECOND of spot, per day of flight. A 15s spot for 7 days is
+    // 0.5 * 15 * 7 = 52.5 HBD; a 5s spot the same length of time is 17.5.
+    //
+    // Per second because a 5-second spot and a 15-second one are not the same
+    // product: the shorter one gives the viewer a third of the interruption, so it
+    // should not cost the same. The old flat per-day rate charged both alike, which
+    // quietly pushed every advertiser toward the longest spot allowed.
+    // Launch rate card, set 2026-08-26. Dearest of the four on purpose: a mid-roll is
+    // the most disruptive thing we do to a regular viewer, so it should cost the most.
+    // 5s over 7 days = 52.5 HBD.
+    AD_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_PRICE_PER_SECOND_DAY_HBD) || 1.5,
+    // --- Per-format rates. See utils/adFormats.js, which is the registry these feed.
+    // Each format is a different product and prices on its own rate, on the SAME
+    // per-second-per-day formula, so adding a format later is a rate plus a registry
+    // entry rather than a second pricing path.
+    //
+    // A banner is a strip along the bottom of a frame the viewer keeps watching: it
+    // interrupts nothing, so it is priced well under a roll. 0.15 * 15s * 7d = 15.75.
+    // Cheapest: barely intrusive for viewers, and priced to pull in community ads.
+    // 5s over 7 days = 8.75 HBD.
+    AD_BANNER_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_BANNER_PRICE_PER_SECOND_DAY_HBD) || 0.25,
+    // How long a banner may stay on screen. Longer than a roll's cap on purpose —
+    // fifteen seconds of banner is a fraction of the imposition of fifteen seconds
+    // of spot, and the price already scales with it.
+    AD_BANNER_MAX_SECONDS: parseInt(process.env.AD_BANNER_MAX_SECONDS) || 20,
+    // The pre-upload spot. Priced ABOVE a roll: it is unskippable, it is the only
+    // thing on screen, and the audience is creators rather than passers-by, which is
+    // the most valuable audience on the platform to anyone selling to creators.
+    // Every uploader sees this one, and we have more uploaders than viewers — so it
+    // carries a premium even though viewers on other frontends never meet it.
+    // 5s over 7 days = 35 HBD.
+    AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD) || 1,
+    // --- Banner burn-in (services/adBurner.js) ---
+    // Burned segments are the ONE thing under /m whose bytes leave this box rather
+    // than 302-ing to the CDN, so the cache is what keeps that affordable: a burned
+    // segment is identical for every viewer of the same video and campaign.
+    AD_BURN_CACHE_DIR: process.env.AD_BURN_CACHE_DIR || '/var/cache/3speak-ad-burn',
+    AD_BURN_CACHE_MAX_MB: parseInt(process.env.AD_BURN_CACHE_MAX_MB) || 2048,
+    AD_BURN_TIMEOUT_MS: parseInt(process.env.AD_BURN_TIMEOUT_MS) || 30000,
+    // Banner geometry, as a percentage of the frame it is composited into — the same
+    // content is encoded at several resolutions and the banner has to be the same
+    // relative size on each of them.
+    AD_BANNER_WIDTH_PCT: parseFloat(process.env.AD_BANNER_WIDTH_PCT) || 60,
+    // Bounded on the other axis too, so a square creative lands as a small centred
+    // mark along the bottom instead of a 60%-of-the-frame takeover.
+    AD_BANNER_MAX_HEIGHT_PCT: parseFloat(process.env.AD_BANNER_MAX_HEIGHT_PCT) || 15,
+    AD_BANNER_MARGIN_PCT: parseFloat(process.env.AD_BANNER_MARGIN_PCT) || 6,
+    // Burned into the picture with the banner, never drawn in the page: disclosure
+    // has to survive everything the ad itself survives.
+    AD_BANNER_LABEL: process.env.AD_BANNER_LABEL || 'Ad',
+    // --- What a banner creative has to BE ---
+    // The burn fits the image inside a box that is 60% of the frame's width and 15%
+    // of its height. On a 16:9 frame that box is about 7:1, so a creative near that
+    // shape fills it and anything squarer lands small and centred with the video
+    // showing either side — technically fine, visibly not what the advertiser
+    // pictured. The range is generous around that ideal rather than pinned to it.
+    AD_BANNER_MIN_ASPECT: parseFloat(process.env.AD_BANNER_MIN_ASPECT) || 3,
+    AD_BANNER_MAX_ASPECT: parseFloat(process.env.AD_BANNER_MAX_ASPECT) || 12,
+    // 728 is the long-standing leaderboard width and the point below which the image
+    // is being upscaled on a 720p frame rather than fitted into it.
+    AD_BANNER_MIN_WIDTH: parseInt(process.env.AD_BANNER_MIN_WIDTH) || 728,
+    // Sanity bounds. A banner is a strip on a video, not a poster.
+    AD_BANNER_MAX_WIDTH: parseInt(process.env.AD_BANNER_MAX_WIDTH) || 4000,
+    AD_BANNER_MAX_HEIGHT: parseInt(process.env.AD_BANNER_MAX_HEIGHT) || 1000,
+    // What we tell advertisers to make. Fills the box on a 16:9 frame at 1080p
+    // without upscaling, and is a shape every design tool already has a preset for.
+    AD_BANNER_RECOMMENDED: process.env.AD_BANNER_RECOMMENDED || '1456x240',
+    // --- Upload-gate conversion credit (utils/adCredit.js) ---
+    // The gate pays the creator who watched the spot, but only once they publish the
+    // upload it gated. These four numbers are the whole anti-farm story.
+    // How long they have to publish before the credit expires. Generous: someone can
+    // reasonably start an upload, get interrupted, and come back tomorrow.
+    AD_GATE_CONVERSION_DAYS: parseInt(process.env.AD_GATE_CONVERSION_DAYS) || 7,
+    // Wait after publishing before the credit is money. A Hive post with no votes can
+    // still be removed by its author, so "published" is not yet durable — paying on
+    // the instant would buy a post that can be deleted a minute later, repeatedly.
+    AD_GATE_SETTLE_HOLD_HOURS: parseInt(process.env.AD_GATE_SETTLE_HOLD_HOURS) || 48,
+    // A two-second clip is not the upload we were paying for.
+    AD_GATE_MIN_VIDEO_SECONDS: parseInt(process.env.AD_GATE_MIN_VIDEO_SECONDS) || 30,
+    // Backstop the hold cannot provide: it stops publish-and-delete, not someone
+    // posting thirty real-but-worthless videos a day. Deliberately far above what any
+    // genuine creator will hit in one payout period.
+    AD_GATE_MAX_CREDITS_PER_PERIOD: parseInt(process.env.AD_GATE_MAX_CREDITS_PER_PERIOD) || 10,
+    // A booked-but-unpaid campaign holds its slot this long. Without a hold, two
+    // advertisers can book the same position and both then pay for it, and one of
+    // them has to be refunded a flight they had every reason to think they owned.
+    // With one, an abandoned booking cannot take a position off the market forever.
+    AD_SLOT_HOLD_HOURS: parseInt(process.env.AD_SLOT_HOLD_HOURS) || 24,
     AD_MIN_CAMPAIGN_DAYS: parseInt(process.env.AD_MIN_CAMPAIGN_DAYS) || 7,
     AD_MAX_CAMPAIGN_DAYS: parseInt(process.env.AD_MAX_CAMPAIGN_DAYS) || 90,
     // A viewer sees at most one ad per this window, per campaign. Without it a
     // binge session would carry the same spot a dozen times and burn the audience.
+    // --- Shorts spot (utils/adFormats.js `shorts_roll`) ---
+    // A full-screen VERTICAL spot shown BETWEEN shorts, never inside one. Short.jsx
+    // has said since ads existed: "If shorts ever carry ads it needs its own slot
+    // type, not the mid-roll rules borrowed" — putting a 15s roll in front of a 12s
+    // short delivers an impression to someone who never wanted the content.
+    // Kept low while the shorts audience is small. 5s over 7 days = 17.5 HBD.
+    AD_SHORTS_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_SHORTS_PRICE_PER_SECOND_DAY_HBD) || 0.5,
+    // Shorter than a watch-page roll on purpose: the whole surface is built on quick
+    // swipes and the tolerance for a spot is correspondingly lower.
+    AD_SHORTS_MAX_SECONDS: parseInt(process.env.AD_SHORTS_MAX_SECONDS) || 10,
+    // 🚨 The pacing for THIS surface is counted in SHORTS WATCHED, not minutes —
+    // a viewer swiping through shorts covers ten of them in well under the
+    // time-based cooldown, so minutes would let the feed carry an ad almost
+    // continuously (or, tuned the other way, almost never).
+    AD_SHORTS_EVERY_N: parseInt(process.env.AD_SHORTS_EVERY_N) || 10,
+    // Let the SAME shorts spot come round again instead of waiting out the repeat cap.
+    //
+    // 🚨 A TESTING SWITCH. It must not be left on. The repeat cap is the thing that
+    // stops one advertiser following a viewer down the feed, and with this true the
+    // rotation collapses to whichever campaign sorts first — so with a single flight
+    // booked, every AD_SHORTS_EVERY_N shorts carries that same spot, forever.
+    //
+    // It exists because the single-campaign case makes a working cap look exactly
+    // like a broken feature: you watch one spot, and the surface goes silent for the
+    // next AD_FREQUENCY_CAP_MINUTES. Verifying the playback hand-off needs the spot
+    // to come back on demand, and booking a second flight to work around your own
+    // frequency cap is a worse answer than a documented switch.
+    //
+    // Ignores BOTH exclusions the shorts branch applies: the session cap for a named
+    // viewer, and the adKeys the client reports already having been shown. Nothing
+    // else — the approval gate, the owner allowlist, the cadence and the premium
+    // check all still hold. Server-side so it flips without a frontend rebuild.
+    AD_SHORTS_IGNORE_REPEAT_CAP: String(process.env.AD_SHORTS_IGNORE_REPEAT_CAP || '').toLowerCase() === 'true',
+    // Vertical means vertical: 9:16 is 0.5625, so anything at or above ~0.8 is a
+    // square or a landscape video and would letterbox into black bars either side of
+    // a full-screen portrait player.
+    AD_SHORTS_MAX_ASPECT: parseFloat(process.env.AD_SHORTS_MAX_ASPECT) || 0.8,
+    AD_SHORTS_MIN_WIDTH: parseInt(process.env.AD_SHORTS_MIN_WIDTH) || 480,
+    AD_SHORTS_RECOMMENDED: process.env.AD_SHORTS_RECOMMENDED || '1080x1920',
+
+    // --- Anti-fraud + viewer comfort (routes/adServe.js) ---
+    // How long after ANY ad — whoever it was for — before this viewer is offered
+    // another. 🚨 OFF by default (0), deliberately.
+    //
+    // The complaint it was built for was "five videos, five different advertisers in
+    // a row", but the honest fix for that turned out to be per-AD, not per-viewer:
+    // AD_FREQUENCY_CAP_MINUTES has always stopped the SAME advertiser repeating, it
+    // just could not survive navigation for anyone not signed in, because capId is
+    // per page load. Ads now carry an opaque adKey the client remembers, which closes
+    // that without silencing the whole surface.
+    //
+    // A blanket cooldown on top of that costs real delivery, and adPayouts.js
+    // measures under-delivery against the forecastImpressions written at BOOKING
+    // time — so every flight sold before it was switched on refunds more. Leave it at
+    // 0 unless someone deliberately wants fewer ads per viewer AND the inventory
+    // forecast has been taught to expect it.
+    AD_COOLDOWN_MINUTES: parseInt(process.env.AD_COOLDOWN_MINUTES) || 0,
+    // Refuse a burned/ad segment that is being pulled faster than its own playlist
+    // says it can be watched. A real player asks for segment N roughly N segment-
+    // durations in; a script asks for all of them at once. Costs a genuine viewer
+    // nothing and makes each forged impression take its full wall-clock time.
+    AD_PACING_ENABLED: parseBool(process.env.AD_PACING_ENABLED, true),
+    // The share of a spot's honest running time that must really have passed before
+    // a segment counts. A FRACTION rather than a fixed grace on purpose: hls.js reads
+    // ahead, so segment fetches run early by an amount that depends on the
+    // connection, and "the full time minus 12 seconds" is unsatisfiable for a
+    // ten-second banner — which is how the first version of this passed a bot
+    // pulling every segment in one round trip. Erring generous: an uncounted real
+    // impression costs a little revenue accuracy, a counted fake one costs trust.
+    AD_PACING_MIN_FRACTION: parseFloat(process.env.AD_PACING_MIN_FRACTION) || 0.5,
+    // Ad requests per minute from one address. Held IN MEMORY and never persisted —
+    // the IP is used and dropped inside the request, exactly as watchTracking.js
+    // already does for country lookup. Set high enough that shared connections
+    // (offices, schools, mobile carriers) are never the ones who hit it.
+    AD_SESSION_RATE_PER_MIN: parseInt(process.env.AD_SESSION_RATE_PER_MIN) || 40,
+
+    // How many advertisers may hold the SAME position over overlapping flights.
+    //
+    // Was effectively 1: the rate card said a booking "buys the slot across the
+    // network for the whole flight", and it had to, because forecastPerDay() reads
+    // the inventory for a percent and knew nothing about co-holders — so two
+    // campaigns on the 10% slot were each quoted 2322 impressions, each delivered
+    // ~1161, and both were automatically refunded half their money. We sold the same
+    // thing twice.
+    //
+    // Sharing is safe now only because the quote is holder-aware: a flight joining a
+    // position is forecast its SHARE of that position, so what it is promised is what
+    // rotation actually delivers. Raising this without that division would bring the
+    // double-selling straight back.
+    AD_SLOT_MAX_SHARES: parseInt(process.env.AD_SLOT_MAX_SHARES) || 3,
+
     AD_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_FREQUENCY_CAP_MINUTES) || 30,
     // An impression counts once the viewer has actually watched this much of the
     // spot. Measured server-side from segment fetches, never a client pixel.
@@ -529,6 +740,6 @@ module.exports = {
     ADS_BETA_USERS: (process.env.ADS_BETA_USERS || 'badadib,meno,tibfox,coolmole')
         .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
     AD_CATEGORIES: (process.env.AD_CATEGORIES
-        || 'defi,exchange,gaming,nft,infrastructure,dao,media,education,event,tooling,other')
+        || 'defi,dapp,exchange,gaming,nft,infrastructure,dao,media,education,event,tooling,other')
         .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
 };

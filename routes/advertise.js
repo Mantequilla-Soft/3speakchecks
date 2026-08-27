@@ -33,7 +33,7 @@ const { verifyHiveSignedMessage, verifyHiveAuthority } = require('../utils/hiveA
 const { hiveRpcBatch } = require('../utils/hive');
 const { getSnapshot, runOnce } = require('../services/adInventory');
 const { ObjectId: AdObjectId } = require('mongodb');
-const { CREATIVE_STATES } = require('../utils/adModel');
+const { CREATIVE_STATES, missingAssetFor } = require('../utils/adModel');
 const {
   ADVERTISERS_COLLECTION,
   AD_CREATOR_PREFS_COLLECTION,
@@ -47,6 +47,7 @@ const {
   AD_CREATOR_POOL_PCT,
   AD_DEFAULT_COMMUNITY_PCT,
   AD_CREATIVES_COLLECTION,
+  AD_CAMPAIGNS_COLLECTION,
   ADS_ALLOWED_OWNERS,
 } = require('../utils/config');
 
@@ -199,6 +200,11 @@ const clientIp = (req) => String(req.headers['x-real-ip'] || req.headers['x-forw
 // Bound to the action and the account so a signature captured from one flow
 // cannot be replayed into another.
 const applyMessage = (hiveAccount, timestamp) => ['3speak-ads', 'apply', hiveAccount, String(timestamp)].join('|');
+
+// "Show me my own applications". Same shape as the others so one verifier covers
+// all three, and scoped by name so a signature made to list an account's records
+// can never be replayed against a route that changes something.
+const mineMessage = (hiveAccount, timestamp) => ['3speak-ads', 'mine', hiveAccount, String(timestamp)].join('|');
 // The community share is IN the signed message on purpose. It decides where money
 // goes, so a signature captured for one split must not authorise another — the same
 // reason the on/off state is in there rather than trusted from the request body.
@@ -253,7 +259,7 @@ router.get('/inventory', featureVisible, async (req, res) => {
         countries: snap.countries,
       },
       slots: snap.slots.map((s) => ({
-        position: s.position,
+        percent: s.percent,
         kind: s.kind,
         perDay: s.perDay,
         perMonth: s.perMonth,
@@ -311,6 +317,14 @@ router.post('/apply', featureVisible, express.json({ limit: '64kb' }), async (re
     const markets = marketsRaw.filter((m) => ISO_COUNTRIES.has(m));
     const badMarkets = marketsRaw.filter((m) => !ISO_COUNTRIES.has(m));
 
+    // "Have us make the video for you", asked at application time rather than only
+    // at booking. Most people applying do not have a spot yet, and finding that out
+    // after we have already reviewed and approved them wastes the reviewer's pass.
+    // It commits nobody to anything: the fee is still quoted and charged on the
+    // campaign, this is the brief and the intent.
+    const productionRequested = !!(b.production && b.production.requested);
+    const productionBrief = str(b.production && b.production.brief, 4000);
+
     if (!HIVE_ACCOUNT_RE.test(hiveAccount)) {
       return res.status(400).json({ success: false, error: 'A valid Hive account is required' });
     }
@@ -335,24 +349,39 @@ router.post('/apply', featureVisible, express.json({ limit: '64kb' }), async (re
         error: `Not a country code: ${badMarkets.join(', ')}. Use ISO two-letter codes, e.g. BD, US, VE.`,
       });
     }
+    if (productionRequested && productionBrief.length < 20) {
+      return res.status(400).json({
+        success: false,
+        error: 'Tell us what the spot should say (at least 20 characters). We cannot make a spot from a blank brief.',
+      });
+    }
 
     const db = getDb();
     const coll = db.collection(ADVERTISERS_COLLECTION);
 
-    // One open application per account. An approved advertiser re-applying is
-    // also a no-op — they already have what the form grants.
-    const existing = await coll.findOne(
-      { hiveAccount, status: { $in: ['pending', 'approved'] } },
+    // One application UNDER REVIEW at a time, not one per account ever.
+    //
+    // An approved advertiser may apply again, because an application is not an
+    // account: it is one product with its own creative concept, its own spots, its
+    // own flights and its own negotiated rate. Somebody approved to run an exchange
+    // ad has not been approved to run whatever they launch next, and that second
+    // thing deserves the same look from a person as the first one got. Their
+    // existing approval is untouched and still books flights for the thing it was
+    // granted for.
+    //
+    // A pending one still blocks: two applications from the same account sitting in
+    // the queue at once is a reviewer reading the same person twice, and it is also
+    // the only natural rate limit on how many an approved advertiser can open.
+    const pendingAlready = await coll.findOne(
+      { hiveAccount, status: 'pending' },
       { projection: { status: 1, reference: 1 } },
     );
-    if (existing) {
+    if (pendingAlready) {
       return res.status(409).json({
         success: false,
-        error: existing.status === 'approved'
-          ? 'This account is already approved as an advertiser'
-          : 'An application for this account is already under review',
-        reference: existing.reference,
-        status: existing.status,
+        error: 'You already have an application under review. We will come back to you on that one first.',
+        reference: pendingAlready.reference,
+        status: pendingAlready.status,
       });
     }
 
@@ -395,6 +424,9 @@ router.post('/apply', featureVisible, express.json({ limit: '64kb' }), async (re
       budgetHbd,
       markets,
       creativeConcept,
+      production: productionRequested
+        ? { requested: true, brief: productionBrief, requestedAt: new Date() }
+        : null,
       status: 'pending',
       applicantNote: null,     // shown to the applicant
       reviewerNote: null,      // internal only, never returned publicly
@@ -426,7 +458,7 @@ router.get('/application/:reference', featureVisible, async (req, res) => {
 
     const doc = await getDb().collection(ADVERTISERS_COLLECTION).findOne(
       { reference },
-      { projection: { status: 1, applicantNote: 1, projectName: 1, hiveAccount: 1, createdAt: 1, reviewedAt: 1 } },
+      { projection: { status: 1, applicantNote: 1, projectName: 1, hiveAccount: 1, createdAt: 1, reviewedAt: 1, production: 1, logoUrl: 1, slogan: 1 } },
     );
     if (!doc) return res.status(404).json({ success: false, error: 'Unknown reference' });
 
@@ -439,9 +471,226 @@ router.get('/application/:reference', featureVisible, async (req, res) => {
       note: doc.applicantNote || null,
       submittedAt: doc.createdAt,
       reviewedAt: doc.reviewedAt || null,
+      // So someone coming back with only their reference sees what they asked for,
+      // rather than wondering whether the request was recorded at all.
+      production: doc.production && doc.production.requested
+        ? { requested: true, brief: doc.production.brief || null }
+        : null,
+      logoUrl: doc.logoUrl || null,
+      slogan: doc.slogan || null,
     });
   } catch (err) {
     console.error('[advertise] application lookup failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+/* ─── POST /advertise/mine ────────────────────────────────────────────── */
+/**
+ * Every application belonging to one Hive account, so a returning advertiser does
+ * not have to keep a reference around to find their own work.
+ *
+ * POST, not GET, and signed. The `reference` is deliberately unguessable precisely
+ * so that no endpoint takes an account name and confirms whether it applied — this
+ * route would undo that if it answered on a name alone, because what sits behind a
+ * reference is contact details, a stated budget, the applicant's brief, our private
+ * note to them and a payment memo. So it costs a signature, and the signature goes
+ * in a body rather than a query string where access logs would keep it.
+ *
+ * Accepted proof is the same pair the opt-out control accepts: the account's own
+ * posting key, or a posting-authority delegate we sign with (@threespeak). The
+ * delegate path is what makes this work at all for HiveSigner and Butter Auth
+ * sessions, which hold no key in the browser.
+ *
+ * It returns the references themselves, which is the point: the caller can then use
+ * the ordinary per-reference endpoints, and can remember them so the next visit
+ * costs no signature at all.
+ */
+router.post('/mine', featureVisible, express.json({ limit: '8kb' }), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const name = account(b.account);
+    if (!HIVE_ACCOUNT_RE.test(name)) {
+      return res.status(400).json({ success: false, error: 'Invalid account' });
+    }
+
+    if (HIVE_AUTH_REQUIRED) {
+      const signature = str(b.signature, 200);
+      const timestamp = stamp(b.timestamp);
+      if (!signature || !timestamp) {
+        return res.status(401).json({
+          success: false,
+          error: 'Signature required',
+          expected_message: mineMessage(name, '<ms>'),
+        });
+      }
+      const tsErr = badTimestamp(timestamp);
+      if (tsErr) return res.status(401).json({ success: false, error: tsErr });
+      let verdict = { ok: false };
+      try {
+        verdict = await verifyHiveAuthority({
+          message: mineMessage(name, timestamp),
+          signature,
+          username: name,
+          allowedDelegates: AD_SIGNING_DELEGATES,
+        });
+      } catch (err) {
+        if (err && err.code === 'HIVE_ACCOUNT_NOT_FOUND') {
+          return res.status(404).json({ success: false, error: 'Hive account not found' });
+        }
+        verdict = { ok: false };
+      }
+      if (!verdict.ok) return res.status(401).json({ success: false, error: 'Invalid signature' });
+    }
+
+    // Same projection as the single-reference lookup, plus the reference itself.
+    // reviewerNote is absent here for the same reason it is absent there: it is the
+    // one field on this document that is ours and not theirs.
+    const rows = await getDb().collection(ADVERTISERS_COLLECTION)
+      .find({ hiveAccount: name }, {
+        projection: {
+          reference: 1, status: 1, applicantNote: 1, projectName: 1,
+          hiveAccount: 1, createdAt: 1, reviewedAt: 1, production: 1,
+          logoUrl: 1, slogan: 1,
+        },
+      })
+      .sort({ createdAt: -1 })
+      .limit(25)
+      .toArray();
+
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      success: true,
+      account: name,
+      applications: rows.map((doc) => ({
+        reference: doc.reference,
+        status: doc.status,
+        projectName: doc.projectName,
+        hiveAccount: doc.hiveAccount,
+        note: doc.applicantNote || null,
+        submittedAt: doc.createdAt,
+        reviewedAt: doc.reviewedAt || null,
+        production: doc.production && doc.production.requested
+          ? { requested: true, brief: doc.production.brief || null }
+          : null,
+        logoUrl: doc.logoUrl || null,
+        slogan: doc.slogan || null,
+      })),
+    });
+  } catch (err) {
+    console.error('[advertise] mine lookup failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+/* ─── POST /advertise/branding ────────────────────────────────────────── */
+/**
+ * The logo and slogan shown in the disclosure overlay while the ad plays.
+ *
+ * They live on the PRODUCT rather than on each ad video, because they identify who
+ * the ad is from and that does not change between one clip and the next. It also
+ * means updating a logo fixes it everywhere at once instead of per creative.
+ *
+ * Open to a pending applicant for the same reason uploading is: the reviewer should
+ * see the whole thing, overlay included, before deciding.
+ */
+const SLOGAN_MAX = 50;
+
+router.post('/branding', featureVisible, express.json({ limit: '8kb' }), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const reference = str(b.reference, 64);
+    if (!reference) return res.status(400).json({ success: false, error: 'reference is required' });
+
+    const coll = getDb().collection(ADVERTISERS_COLLECTION);
+    const advertiser = await coll.findOne(
+      { reference, status: { $in: ['pending', 'approved'] } },
+      { projection: { reference: 1 } },
+    );
+    if (!advertiser) {
+      return res.status(403).json({ success: false, error: 'No product for that reference' });
+    }
+
+    const set = { updatedAt: new Date() };
+
+    // `undefined` means "leave it alone"; an empty string means "remove it". Without
+    // that distinction saving a slogan would wipe a logo the caller never mentioned.
+    if (b.logoUrl !== undefined) {
+      const logoUrl = str(b.logoUrl, 1024);
+      if (logoUrl && !/^https:\/\//i.test(logoUrl)) {
+        return res.status(400).json({ success: false, error: 'logoUrl must be an https URL' });
+      }
+      set.logoUrl = logoUrl || null;
+    }
+    if (b.slogan !== undefined) {
+      const slogan = str(b.slogan, SLOGAN_MAX);
+      if (String(b.slogan || '').trim().length > SLOGAN_MAX) {
+        return res.status(400).json({
+          success: false,
+          error: `The slogan can be at most ${SLOGAN_MAX} characters.`,
+        });
+      }
+      set.slogan = slogan || null;
+    }
+
+    await coll.updateOne({ reference }, { $set: set });
+    const doc = await coll.findOne({ reference }, { projection: { logoUrl: 1, slogan: 1 } });
+    res.json({ success: true, logoUrl: doc.logoUrl || null, slogan: doc.slogan || null });
+  } catch (err) {
+    console.error('[advertise] branding save failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+/* ─── POST /advertise/product/discard ─────────────────────────────────── */
+/**
+ * Abandon an enrollment and remove what it created: the product, its ad videos and
+ * its bookings.
+ *
+ * Deliberately narrow. It refuses once a REVIEWER has looked at the product, and it
+ * refuses if any booking has been paid for — at that point there is money and a
+ * human decision attached, and "cancel" stops being a client-side concern. Someone
+ * who genuinely needs that should be talking to a person, not pressing a button.
+ *
+ * Uploaded media is left on the embed service. It is unlisted, has no Hive post and
+ * earns nothing, and deleting somebody's file from here would be a bigger promise
+ * than this endpoint can keep.
+ */
+router.post('/product/discard', featureVisible, express.json({ limit: '8kb' }), async (req, res) => {
+  try {
+    const reference = str((req.body || {}).reference, 64);
+    if (!reference) return res.status(400).json({ success: false, error: 'reference is required' });
+
+    const db = getDb();
+    const advertiser = await db.collection(ADVERTISERS_COLLECTION).findOne({ reference });
+    if (!advertiser) return res.status(404).json({ success: false, error: 'No product for that reference' });
+
+    if (advertiser.status !== 'pending') {
+      return res.status(409).json({
+        success: false,
+        error: 'This product has already been reviewed. Get in touch and we will sort it out.',
+      });
+    }
+
+    const paid = await db.collection(AD_CAMPAIGNS_COLLECTION)
+      .countDocuments({ advertiserRef: reference, paidHbd: { $gt: 0 } });
+    if (paid) {
+      return res.status(409).json({
+        success: false,
+        error: 'A booking on this product has been paid for, so it cannot be discarded here.',
+      });
+    }
+
+    const campaigns = await db.collection(AD_CAMPAIGNS_COLLECTION).deleteMany({ advertiserRef: reference });
+    const creatives = await db.collection(AD_CREATIVES_COLLECTION).deleteMany({ advertiserRef: reference });
+    await db.collection(ADVERTISERS_COLLECTION).deleteOne({ reference });
+
+    res.json({
+      success: true,
+      discarded: { product: 1, campaigns: campaigns.deletedCount, creatives: creatives.deletedCount },
+    });
+  } catch (err) {
+    console.error('[advertise] discard failed:', err && err.message);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
@@ -645,14 +894,43 @@ router.post('/admin/creatives/:id/decide', requireAdmin, express.json({ limit: '
     const creative = await coll.findOne({ _id });
     if (!creative) return res.status(404).json({ success: false, error: 'Creative not found' });
 
-    // Approving something with no playable manifest would put a campaign into a
-    // state that looks servable and then fails at splice time — refuse it here,
-    // where the operator can still be told why.
-    if (decision === 'approved' && !creative.manifestUrl) {
-      return res.status(409).json({
-        success: false,
-        error: 'That spot has not finished encoding yet — there is nothing to play.',
-      });
+    // Approving a creative with nothing to show would put a campaign into a state
+    // that looks servable and then fails at delivery — refuse it here, where the
+    // operator can still be told why.
+    //
+    // What "nothing to show" means depends on the KIND. This used to demand a
+    // manifestUrl of everything, which a still never has, so a banner creative could
+    // be uploaded and queued and then never approved — the reviewer was told a
+    // still had "not finished encoding", which it was never going to do. The rule
+    // now comes from missingAssetFor(), the same one the serving gate uses, so the
+    // two cannot drift apart again.
+    if (decision === 'approved') {
+      const missing = missingAssetFor(creative);
+      if (missing) {
+        return res.status(409).json({
+          success: false,
+          error: missing === 'creative_has_no_image'
+            ? 'That banner has no image on record — nothing to show.'
+            : 'That spot has not finished encoding yet — there is nothing to play.',
+        });
+      }
+    }
+
+    // Spots can now be uploaded while an application is still under review, so the
+    // queue contains creatives from advertisers we have not said yes to. Approving
+    // one of those would leave a READY spot belonging to somebody who may end up
+    // rejected. Nothing would serve it — a campaign still needs an approved
+    // advertiser and a paid flight — but "approved" would be a lie on the record,
+    // and the applicant's page would show it.
+    if (decision === 'approved' && creative.advertiserRef) {
+      const advertiser = await getDb().collection(ADVERTISERS_COLLECTION)
+        .findOne({ reference: creative.advertiserRef }, { projection: { status: 1 } });
+      if (!advertiser || advertiser.status !== 'approved') {
+        return res.status(409).json({
+          success: false,
+          error: `The advertiser behind that spot is ${advertiser ? advertiser.status : 'unknown'}. Approve the application first.`,
+        });
+      }
     }
 
     await coll.updateOne({ _id }, {

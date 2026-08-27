@@ -34,15 +34,9 @@
 const path = require('path');
 const { MongoClient } = require('mongodb');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
-
-const MONGODB_URI = process.env.MONGODB_URI;
-const DATABASE_NAME = process.env.DATABASE_NAME || 'threespeak';
-const WATCH_LOG = process.env.WATCH_LOG_COLLECTION || 'view-durations';
-const GATEWAYS = [
-  'https://hotipfs-3speak-1.b-cdn.net/ipfs',
-  'https://ipfs.3speak.tv/ipfs',
-];
-const FETCH_TIMEOUT_MS = 15000;
+// Shared with services/durationSync.js and scripts/backfill-null-durations.js: one
+// definition of "what is this video's real length", and one measured gateway order.
+const { durationFromManifest } = require('../utils/videoDuration');
 
 const DRY_RUN = process.argv.includes('--dry-run');
 const argOwner = process.argv.find((a) => a.startsWith('--owner='));
@@ -50,50 +44,9 @@ const argPermlink = process.argv.find((a) => a.startsWith('--permlink='));
 const SCOPE_OWNER = argOwner ? argOwner.split('=')[1] : null;
 const SCOPE_PERMLINK = argPermlink ? argPermlink.split('=')[1] : null;
 
-async function fetchText(url) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) return null;
-    return await res.text();
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function sumExtinf(text) {
-  const durs = [...text.matchAll(/#EXTINF:\s*([0-9.]+)/g)].map((m) => parseFloat(m[1]));
-  if (!durs.length) return null;
-  const total = durs.reduce((a, b) => a + b, 0);
-  return Number.isFinite(total) && total > 0 ? total : null;
-}
-
-/** True duration from the HLS manifest: master → variant playlist → Σ EXTINF. */
-async function durationFromManifest(manifestCid) {
-  if (!manifestCid) return null;
-  for (const base of GATEWAYS) {
-    const master = await fetchText(`${base}/${manifestCid}/manifest.m3u8`);
-    if (!master) continue;
-
-    // A master playlist lists variant playlists; a media playlist has EXTINFs directly.
-    const direct = sumExtinf(master);
-    if (direct) return direct;
-
-    const variant = master.split('\n').map((l) => l.trim())
-      .find((l) => l && !l.startsWith('#') && l.endsWith('.m3u8'));
-    if (!variant) continue;
-
-    const media = await fetchText(`${base}/${manifestCid}/${variant}`);
-    if (!media) continue;
-    const total = sumExtinf(media);
-    if (total) return total;
-  }
-  return null;
-}
-
+const MONGODB_URI = process.env.MONGODB_URI;
+const DATABASE_NAME = process.env.DATABASE_NAME || 'threespeak';
+const WATCH_LOG = process.env.WATCH_LOG_COLLECTION || 'view-durations';
 async function run() {
   const client = new MongoClient(MONGODB_URI);
   await client.connect();
