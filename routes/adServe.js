@@ -38,7 +38,7 @@ const {
   AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_IMPRESSIONS_COLLECTION, ADVERTISERS_COLLECTION,
   AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, ADS_STAGE,
   AD_COOLDOWN_MINUTES, AD_PACING_ENABLED, AD_PACING_MIN_FRACTION, AD_SESSION_RATE_PER_MIN,
-  AD_SHORTS_EVERY_N,
+  AD_SHORTS_EVERY_N, AD_SHORTS_IGNORE_REPEAT_CAP,
   AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT,
 } = require('../utils/config');
 const { STATES, CREATIVE_STATES, servableReason, ensureAdIndexes, slotSecondsFor } = require('../utils/adModel');
@@ -725,15 +725,20 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         .find({ reference: { $in: refs2 }, status: 'approved' }, { projection: { reference: 1 } })
         .toArray()).map((a) => a.reference));
 
+      // AD_SHORTS_IGNORE_REPEAT_CAP drops both exclusions together, on purpose: they
+      // are two halves of one rule (the server's record for a named viewer, the
+      // client's report for everyone else), and honouring one while ignoring the
+      // other would cap signed-in viewers only — which is the confusing half-state
+      // rather than the switch anybody wanted.
       let recent2 = new Set();
       const capKey2 = viewer ? { viewer } : (capId ? { capId } : null);
-      if (capKey2) {
+      if (capKey2 && !AD_SHORTS_IGNORE_REPEAT_CAP) {
         const since2 = new Date(Date.now() - AD_FREQUENCY_CAP_MINUTES * 60 * 1000);
         const rows2 = await db2.collection(SESSIONS)
           .find({ ...capKey2, startedAt: { $gte: since2 } }, { projection: { campaignId: 1 } }).toArray();
         recent2 = new Set(rows2.map((r) => String(r.campaignId)));
       }
-      const claimedKeys2 = claimedAdKeys(b);
+      const claimedKeys2 = AD_SHORTS_IGNORE_REPEAT_CAP ? new Set() : claimedAdKeys(b);
 
       const fit = cands.filter((c) => {
         if (!c.advertiserRef || !ok2.has(c.advertiserRef)) return false;

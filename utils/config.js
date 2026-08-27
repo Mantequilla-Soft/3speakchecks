@@ -531,7 +531,10 @@ module.exports = {
     // product: the shorter one gives the viewer a third of the interruption, so it
     // should not cost the same. The old flat per-day rate charged both alike, which
     // quietly pushed every advertiser toward the longest spot allowed.
-    AD_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_PRICE_PER_SECOND_DAY_HBD) || 0.5,
+    // Launch rate card, set 2026-08-26. Dearest of the four on purpose: a mid-roll is
+    // the most disruptive thing we do to a regular viewer, so it should cost the most.
+    // 5s over 7 days = 52.5 HBD.
+    AD_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_PRICE_PER_SECOND_DAY_HBD) || 1.5,
     // --- Per-format rates. See utils/adFormats.js, which is the registry these feed.
     // Each format is a different product and prices on its own rate, on the SAME
     // per-second-per-day formula, so adding a format later is a rate plus a registry
@@ -539,7 +542,9 @@ module.exports = {
     //
     // A banner is a strip along the bottom of a frame the viewer keeps watching: it
     // interrupts nothing, so it is priced well under a roll. 0.15 * 15s * 7d = 15.75.
-    AD_BANNER_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_BANNER_PRICE_PER_SECOND_DAY_HBD) || 0.15,
+    // Cheapest: barely intrusive for viewers, and priced to pull in community ads.
+    // 5s over 7 days = 8.75 HBD.
+    AD_BANNER_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_BANNER_PRICE_PER_SECOND_DAY_HBD) || 0.25,
     // How long a banner may stay on screen. Longer than a roll's cap on purpose —
     // fifteen seconds of banner is a fraction of the imposition of fifteen seconds
     // of spot, and the price already scales with it.
@@ -547,7 +552,10 @@ module.exports = {
     // The pre-upload spot. Priced ABOVE a roll: it is unskippable, it is the only
     // thing on screen, and the audience is creators rather than passers-by, which is
     // the most valuable audience on the platform to anyone selling to creators.
-    AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD) || 0.8,
+    // Every uploader sees this one, and we have more uploaders than viewers — so it
+    // carries a premium even though viewers on other frontends never meet it.
+    // 5s over 7 days = 35 HBD.
+    AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD) || 1,
     // --- Banner burn-in (services/adBurner.js) ---
     // Burned segments are the ONE thing under /m whose bytes leave this box rather
     // than 302-ing to the CDN, so the cache is what keeps that affordable: a burned
@@ -613,7 +621,8 @@ module.exports = {
     // has said since ads existed: "If shorts ever carry ads it needs its own slot
     // type, not the mid-roll rules borrowed" — putting a 15s roll in front of a 12s
     // short delivers an impression to someone who never wanted the content.
-    AD_SHORTS_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_SHORTS_PRICE_PER_SECOND_DAY_HBD) || 0.2,
+    // Kept low while the shorts audience is small. 5s over 7 days = 17.5 HBD.
+    AD_SHORTS_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_SHORTS_PRICE_PER_SECOND_DAY_HBD) || 0.5,
     // Shorter than a watch-page roll on purpose: the whole surface is built on quick
     // swipes and the tolerance for a spot is correspondingly lower.
     AD_SHORTS_MAX_SECONDS: parseInt(process.env.AD_SHORTS_MAX_SECONDS) || 10,
@@ -622,6 +631,24 @@ module.exports = {
     // time-based cooldown, so minutes would let the feed carry an ad almost
     // continuously (or, tuned the other way, almost never).
     AD_SHORTS_EVERY_N: parseInt(process.env.AD_SHORTS_EVERY_N) || 10,
+    // Let the SAME shorts spot come round again instead of waiting out the repeat cap.
+    //
+    // 🚨 A TESTING SWITCH. It must not be left on. The repeat cap is the thing that
+    // stops one advertiser following a viewer down the feed, and with this true the
+    // rotation collapses to whichever campaign sorts first — so with a single flight
+    // booked, every AD_SHORTS_EVERY_N shorts carries that same spot, forever.
+    //
+    // It exists because the single-campaign case makes a working cap look exactly
+    // like a broken feature: you watch one spot, and the surface goes silent for the
+    // next AD_FREQUENCY_CAP_MINUTES. Verifying the playback hand-off needs the spot
+    // to come back on demand, and booking a second flight to work around your own
+    // frequency cap is a worse answer than a documented switch.
+    //
+    // Ignores BOTH exclusions the shorts branch applies: the session cap for a named
+    // viewer, and the adKeys the client reports already having been shown. Nothing
+    // else — the approval gate, the owner allowlist, the cadence and the premium
+    // check all still hold. Server-side so it flips without a frontend rebuild.
+    AD_SHORTS_IGNORE_REPEAT_CAP: String(process.env.AD_SHORTS_IGNORE_REPEAT_CAP || '').toLowerCase() === 'true',
     // Vertical means vertical: 9:16 is 0.5625, so anything at or above ~0.8 is a
     // square or a landscape video and would letterbox into black bars either side of
     // a full-screen portrait player.
