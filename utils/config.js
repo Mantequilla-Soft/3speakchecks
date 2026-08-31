@@ -502,14 +502,22 @@ module.exports = {
         const n = parseFloat(process.env.AD_CREATOR_POOL_PCT);
         return Number.isFinite(n) && n >= 0 && n <= 100 ? n : 50;
     })(),
-    // What the community gets when a creator has never touched the setting. An
-    // even split of the pool: the creator opted into neither number, so defaulting
-    // to "I keep everything" is as much of an assumption as any other, and this one
-    // at least matches how the split is described. A creator who explicitly sets 0
-    // keeps 0 — that stored zero must never be read as "unset".
+    // What the community gets when a creator has never touched the setting: NOTHING.
+    //
+    // 🚨 This was an even split of the pool, and that was wrong. The argument for it
+    // was that a creator who set neither number had opted into neither, so "I keep
+    // everything" was no more neutral than any other choice. But the two are not
+    // symmetric: the creator earned the share, and giving half of it away is a
+    // decision only they can make. Defaulting to 25 meant every creator who never
+    // opened the setting was donating half their ad income without being asked, and
+    // would have found out from a payout rather than from us.
+    //
+    // Sharing with a community is opt IN. A creator who wants it sets it in
+    // Settings → Content, and a stored 0 still means a deliberate 0 rather than
+    // "unset" — the nullish checks that protect that are still required.
     AD_DEFAULT_COMMUNITY_PCT: (() => {
         const n = parseFloat(process.env.AD_DEFAULT_COMMUNITY_PCT);
-        return Number.isInteger(n) && n >= 0 ? n : 25;
+        return Number.isInteger(n) && n >= 0 ? n : 0;
     })(),
     // --- Booking, payment, serving, payout ---
     AD_CAMPAIGNS_COLLECTION: process.env.AD_CAMPAIGNS_COLLECTION || 'ad_campaigns',
@@ -517,6 +525,11 @@ module.exports = {
     AD_PAYMENTS_COLLECTION: process.env.AD_PAYMENTS_COLLECTION || 'ad_payments',
     AD_IMPRESSIONS_COLLECTION: process.env.AD_IMPRESSIONS_COLLECTION || 'ad_impressions',
     AD_PAYOUTS_COLLECTION: process.env.AD_PAYOUTS_COLLECTION || 'ad_payouts',
+    // Operator-settable platform defaults (currently the per-format rate card),
+    // one document keyed 'rates'. Config, not data: it survives an ad data purge,
+    // and it is what lets a price change without a checker restart. Read through
+    // utils/adSettings.js, never directly.
+    AD_SETTINGS_COLLECTION: process.env.AD_SETTINGS_COLLECTION || 'ad_settings',
     // Where advertisers send HBD/HIVE. Defaults to the promotion account so this
     // works out of the box, but it is a SEPARATE setting on purpose: ad money and
     // promotion money are different books and will want to be told apart.
@@ -726,6 +739,10 @@ module.exports = {
     // on a predictable cadence instead of whenever some advertiser's flight ends.
     AD_PAYOUT_PERIOD_DAYS: parseInt(process.env.AD_PAYOUT_PERIOD_DAYS) || 7,
     AD_PAYOUT_PERIODS_COLLECTION: process.env.AD_PAYOUT_PERIODS_COLLECTION || 'ad_payout_periods',
+    // How long an unpaid booking may hold credit before it is released back to the
+    // advertiser's balance. Without this a booking that is created and abandoned
+    // locks credit up forever — there is no cancel route and no other expiry.
+    AD_BOOKING_EXPIRY_DAYS: parseInt(process.env.AD_BOOKING_EXPIRY_DAYS) || 30,
 
     // 🚨 SERVING ALLOWLIST. While this is non-empty, ads run ONLY on videos owned by
     // these accounts — every other creator's videos carry nothing, no matter what a

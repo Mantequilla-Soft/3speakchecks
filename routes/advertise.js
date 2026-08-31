@@ -18,6 +18,13 @@
  *   POST /advertise/admin/applications/:id/decide
  *   GET  /advertise/admin/inventory        full snapshot, including who was excluded
  *   POST /advertise/admin/inventory/refresh
+ *   GET  /advertise/admin/rates            platform rate card, and where each price came from
+ *   POST /advertise/admin/rates            set or clear one format's default price
+ *   GET  /advertise/admin/advertisers/rates          who is below today's platform rate
+ *   GET  /advertise/admin/advertisers/:id/rates      one advertiser's rates vs the platform's
+ *   POST /advertise/admin/advertisers/:id/rates      move one advertiser onto a new rate
+ *   GET  /advertise/admin/refunds                    payments refused as sent from the wrong account
+ *   POST /advertise/admin/refunds/:trxId/settle      record that one was sent back
  *
  * PRIVACY: no IP is stored. The per-IP throttle below lives in memory for ten
  * minutes and never reaches Mongo — same posture as routes/reports.js and the
@@ -35,6 +42,10 @@ const { getSnapshot, runOnce } = require('../services/adInventory');
 const { ObjectId: AdObjectId } = require('mongodb');
 const { CREATIVE_STATES, missingAssetFor } = require('../utils/adModel');
 const {
+  FORMATS, FORMAT_KEYS, isBookableFormat, defaultRateFor, snapshotRates, rateFor,
+} = require('../utils/adFormats');
+const adSettings = require('../utils/adSettings');
+const {
   ADVERTISERS_COLLECTION,
   AD_CREATOR_PREFS_COLLECTION,
   HIVE_AUTH_REQUIRED,
@@ -48,6 +59,7 @@ const {
   AD_DEFAULT_COMMUNITY_PCT,
   AD_CREATIVES_COLLECTION,
   AD_CAMPAIGNS_COLLECTION,
+  AD_PAYMENTS_COLLECTION,
   ADS_ALLOWED_OWNERS,
 } = require('../utils/config');
 
@@ -464,6 +476,14 @@ router.post('/apply', featureVisible, express.json({ limit: '64kb' }), async (re
       reviewerNote: null,      // internal only, never returned publicly
       reviewedBy: null,
       reviewedAt: null,
+      // The price list they signed up on, captured now. rateFor() reads this before
+      // it reads the platform default, so raising the default later moves NEW
+      // advertisers and leaves this one where they are — which is the whole point:
+      // an early advertiser keeps the rate they were offered. Raising theirs is a
+      // deliberate act through POST /admin/advertisers/:id/rates.
+      rates: snapshotRates(),
+      ratesSource: 'registration',   // vs 'admin' once somebody edits it
+      ratesSetAt: new Date(),        // "since when has this advertiser been on this price?"
       createdAt: new Date(),
       updatedAt: new Date(),
     };
@@ -1002,6 +1022,399 @@ router.post('/admin/inventory/refresh', requireAdmin, async (req, res) => {
     res.json({ success: true, snapshot: snap });
   } catch (err) {
     console.error('[advertise] inventory refresh failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+/* ─── platform rate card ──────────────────────────────────────────────────
+ * The default price of each format, settable without a restart. See
+ * utils/adSettings.js for why this is data rather than env, and for what is
+ * deliberately NOT settable here (the revenue split, which is mirrored in the API
+ * server's message signing and cannot move one side at a time).
+ *
+ * Admin-only, like every other operator surface in this file: a price is not
+ * something a booking client may set, and the secret never reaches a browser.
+ */
+
+/** Every bookable format: what it costs now, and where that number came from. */
+function rateRows() {
+  return FORMAT_KEYS.map((key) => {
+    const f = FORMATS[key];
+    const stored = adSettings.currentSettings().formats || {};
+    const isStored = Object.prototype.hasOwnProperty.call(stored, key);
+    return {
+      format: key,
+      label: f.label,
+      // What a booking with no negotiated rate is quoted right now.
+      ratePerSecondDayHbd: defaultRateFor(key),
+      // The compiled fallback, so an operator can see what clearing would restore.
+      builtInHbd: f.ratePerSecondDayHbd,
+      source: isStored ? 'database' : 'built-in',
+      maxSeconds: f.maxSeconds,
+    };
+  });
+}
+
+router.get('/admin/rates', requireAdmin, async (req, res) => {
+  try {
+    // Read through rather than trusting the poll: an operator checking a rate wants
+    // the stored truth, not a snapshot up to a minute old.
+    await adSettings.refresh();
+    const s = adSettings.currentSettings();
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      success: true,
+      rates: rateRows(),
+      updatedAt: s.updatedAt || null,
+      updatedBy: s.updatedBy || null,
+      maxRate: adSettings.MAX_RATE,
+    });
+  } catch (err) {
+    console.error('[advertise] admin rates failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+/**
+ * Set or clear one format's platform default.
+ *
+ * Body: { format, ratePerSecondDayHbd, updatedBy? }. A null/empty rate CLEARS the
+ * override so the format tracks its compiled default again — which is not the same
+ * as storing today's compiled number, and the two are worth being able to tell
+ * apart later.
+ *
+ * One format per call on purpose. A bulk write makes a typo in one field silently
+ * reprice four products, and there is no volume of rate changes here that a loop
+ * cannot serve.
+ */
+router.post('/admin/rates', requireAdmin, express.json({ limit: '4kb' }), async (req, res) => {
+  try {
+    const format = str(req.body && req.body.format, 40);
+    if (!isBookableFormat(format)) {
+      return res.status(400).json({
+        success: false,
+        error: `Unknown format. Bookable formats: ${FORMAT_KEYS.join(', ')}`,
+      });
+    }
+    const raw = req.body ? req.body.ratePerSecondDayHbd : undefined;
+    const clearing = raw === null || raw === undefined || raw === '';
+    if (!clearing && !adSettings.validRate(raw)) {
+      return res.status(400).json({
+        success: false,
+        error: `ratePerSecondDayHbd must be a number greater than 0 and at most ${adSettings.MAX_RATE}, or null to clear`,
+      });
+    }
+
+    const before = defaultRateFor(format);
+    await adSettings.setRate(format, clearing ? null : Number(raw), str(req.body && req.body.updatedBy, 40) || null);
+    const after = defaultRateFor(format);
+    // A price change is worth a line in the journal even when nobody is watching:
+    // "why did this campaign cost that" is asked long after the fact.
+    console.log(`[advertise] platform rate ${format}: ${before} -> ${after} HBD/s/day${clearing ? ' (cleared to built-in)' : ''}`);
+
+    res.json({ success: true, rates: rateRows(), format, previousHbd: before, ratePerSecondDayHbd: after });
+  } catch (err) {
+    console.error('[advertise] set rate failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+/* ─── per-advertiser rates ────────────────────────────────────────────────
+ * An advertiser gets a copy of the price list at registration (see the /apply
+ * route), so raising the platform default moves new signups and leaves existing
+ * ones where they are. These routes are the deliberate act that moves an existing
+ * one — the "after a year, put them on current rates" job.
+ */
+
+/** One advertiser's rates against the platform's, format by format. */
+function advertiserRateRows(advertiser) {
+  const stored = (advertiser && advertiser.rates) || {};
+  return FORMAT_KEYS.map((key) => {
+    const platform = defaultRateFor(key);
+    const effective = rateFor(advertiser, key);
+    return {
+      format: key,
+      label: FORMATS[key].label,
+      // What THIS advertiser is quoted. Goes through rateFor() rather than reading
+      // `rates` directly so the legacy roll-only field is still honoured.
+      ratePerSecondDayHbd: effective,
+      platformHbd: platform,
+      hasOwnRate: Object.prototype.hasOwnProperty.call(stored, key),
+      // Negative means they are paying less than a new advertiser would. That is
+      // the number the year-later review is looking for.
+      deltaHbd: Math.round((effective - platform) * 1000) / 1000,
+    };
+  });
+}
+
+/**
+ * Every advertiser whose rates differ from today's platform rates.
+ *
+ * This is the working list for "put the founding advertisers on current prices".
+ * `?all=1` returns everyone instead, including those already at the platform rate.
+ */
+router.get('/admin/advertisers/rates', requireAdmin, async (req, res) => {
+  try {
+    await adSettings.refresh();
+    const all = String(req.query.all || '') === '1';
+    const docs = await getDb().collection(ADVERTISERS_COLLECTION)
+      .find({}).sort({ createdAt: 1 }).limit(500).toArray();
+
+    const rows = docs.map((a) => {
+      const rates = advertiserRateRows(a);
+      return {
+        _id: String(a._id),
+        hiveAccount: a.hiveAccount,
+        projectName: a.projectName,
+        status: a.status,
+        ratesSource: a.ratesSource || null,
+        ratesSetAt: a.ratesSetAt || null,
+        createdAt: a.createdAt,
+        belowPlatform: rates.some((r) => r.deltaHbd < 0),
+        rates,
+      };
+    }).filter((r) => all || r.belowPlatform);
+
+    res.set('Cache-Control', 'no-store');
+    res.json({ success: true, count: rows.length, advertisers: rows });
+  } catch (err) {
+    console.error('[advertise] advertiser rates list failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+router.get('/admin/advertisers/:id/rates', requireAdmin, async (req, res) => {
+  try {
+    let _id;
+    try { _id = new ObjectId(String(req.params.id)); }
+    catch (_) { return res.status(400).json({ success: false, error: 'Invalid advertiser id' }); }
+
+    await adSettings.refresh();
+    const a = await getDb().collection(ADVERTISERS_COLLECTION).findOne({ _id });
+    if (!a) return res.status(404).json({ success: false, error: 'Advertiser not found' });
+
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      success: true,
+      advertiser: {
+        _id: String(a._id),
+        hiveAccount: a.hiveAccount,
+        projectName: a.projectName,
+        status: a.status,
+        ratesSource: a.ratesSource || null,
+        ratesSetAt: a.ratesSetAt || null,
+        createdAt: a.createdAt,
+      },
+      rates: advertiserRateRows(a),
+      maxRate: adSettings.MAX_RATE,
+    });
+  } catch (err) {
+    console.error('[advertise] advertiser rates read failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+/**
+ * Move one advertiser onto different rates.
+ *
+ * Three request shapes, because the real jobs are different sizes:
+ *
+ *   { format, ratePerSecondDayHbd }   one format. null/'' REMOVES their own rate for
+ *                                     it, dropping them onto whatever the platform
+ *                                     charges today AND keeping them tracking it —
+ *                                     which storing a copy of today's number would not.
+ *
+ *   { rates: { <format>: n|null } }   several at once. This is the shape the year-later
+ *                                     review actually needs: an advertiser holds a rate
+ *                                     for every format, so "put them on new prices" is
+ *                                     four changes, and doing it in four calls leaves
+ *                                     them on a mixture of old and new if one fails.
+ *
+ *   { snapshotPlatform: true }        re-freeze them at today's platform rates, all
+ *                                     formats. The founding discount ends, they move to
+ *                                     current prices, and they hold THOSE until somebody
+ *                                     moves them again — the same deal they had before,
+ *                                     at the new number. This is the one-click version
+ *                                     of the whole "after a year" job.
+ *
+ * Whichever shape is used, the write is a single updateOne, so an advertiser is never
+ * left half-repriced.
+ */
+router.post('/admin/advertisers/:id/rates', requireAdmin, express.json({ limit: '4kb' }), async (req, res) => {
+  try {
+    let _id;
+    try { _id = new ObjectId(String(req.params.id)); }
+    catch (_) { return res.status(400).json({ success: false, error: 'Invalid advertiser id' }); }
+
+    const b = req.body || {};
+    const coll = getDb().collection(ADVERTISERS_COLLECTION);
+    const before = await coll.findOne({ _id });
+    if (!before) return res.status(404).json({ success: false, error: 'Advertiser not found' });
+
+    await adSettings.refresh();
+
+    // Normalise all three shapes into one { format: number|null } map, so the
+    // validation and the write below have a single case to handle.
+    let wanted;
+    if (b.snapshotPlatform === true) {
+      wanted = snapshotRates();
+    } else if (b.rates && typeof b.rates === 'object' && !Array.isArray(b.rates)) {
+      wanted = b.rates;
+    } else if (b.format !== undefined) {
+      wanted = { [str(b.format, 40)]: b.ratePerSecondDayHbd === undefined ? null : b.ratePerSecondDayHbd };
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: 'Send { format, ratePerSecondDayHbd }, { rates: {...} }, or { snapshotPlatform: true }',
+      });
+    }
+
+    const entries = Object.entries(wanted);
+    if (!entries.length) {
+      return res.status(400).json({ success: false, error: 'No rates given' });
+    }
+
+    // Validate EVERYTHING before writing ANYTHING. A bad third entry must not leave
+    // the first two applied.
+    const $set = { ratesSource: 'admin', ratesSetAt: new Date(), updatedAt: new Date() };
+    const $unset = {};
+    for (const [fmt, raw] of entries) {
+      if (!isBookableFormat(fmt)) {
+        return res.status(400).json({
+          success: false,
+          error: `Unknown format "${String(fmt).slice(0, 40)}". Bookable formats: ${FORMAT_KEYS.join(', ')}`,
+        });
+      }
+      if (raw === null || raw === undefined || raw === '') {
+        $unset[`rates.${fmt}`] = '';
+      } else if (!adSettings.validRate(raw)) {
+        return res.status(400).json({
+          success: false,
+          error: `${fmt}: rate must be a number greater than 0 and at most ${adSettings.MAX_RATE}, or null to drop them onto the platform rate`,
+        });
+      } else {
+        $set[`rates.${fmt}`] = Number(raw);
+      }
+    }
+
+    const update = { $set };
+    if (Object.keys($unset).length) update.$unset = $unset;
+    await coll.updateOne({ _id }, update);
+
+    const after = await coll.findOne({ _id });
+    const by = str(b.updatedBy, 40) || 'admin';
+    const changed = entries
+      .map(([fmt]) => `${fmt} ${rateFor(before, fmt)}->${rateFor(after, fmt)}`)
+      .join(', ');
+    console.log(`[advertise] @${after.hiveAccount} rates by ${by}: ${changed}`);
+
+    res.json({
+      success: true,
+      changed: entries.map(([fmt]) => ({
+        format: fmt,
+        previousHbd: rateFor(before, fmt),
+        ratePerSecondDayHbd: rateFor(after, fmt),
+      })),
+      rates: advertiserRateRows(after),
+    });
+  } catch (err) {
+    console.error('[advertise] advertiser rate write failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+/* ─── returns owed on refused payments ────────────────────────────────────
+ * A transfer sent from an account other than the one a campaign is booked under is
+ * refused rather than credited (routes/adCampaigns.js claim) — paying from the
+ * account IS how an advertiser proves they hold it, so a payment from elsewhere
+ * proves nothing and cannot be allowed to buy a flight in that name.
+ *
+ * The money still arrived, so it goes back — automatically, on the payout run
+ * (services/adPayouts.js refundRefusedPayments). A payment we have declined to
+ * accept is simply not ours, and holding it pending a human is holding somebody's
+ * money for no reason. Contrast the under-delivery shortfall, which is a judgement
+ * about delivery and is KEPT as spendable credit (utils/adBalance.js).
+ *
+ * These routes are the window onto that, plus the manual override: anything parked
+ * at `review` (unparseable amount, or too many failed sends) needs a person to check
+ * the chain and settle it by hand.
+ */
+router.get('/admin/refunds', requireAdmin, async (req, res) => {
+  try {
+    const status = str(req.query.status, 16).toLowerCase() || 'pending';
+    const rows = await getDb().collection(AD_PAYMENTS_COLLECTION)
+      .find({ status: 'refused', refundStatus: status })
+      .sort({ processedAt: 1 }).limit(200).toArray();
+
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      success: true,
+      count: rows.length,
+      refunds: rows.map((p) => ({
+        trx_id: p.trx_id,
+        campaignId: p.campaignId ? String(p.campaignId) : null,
+        // Send it back where it came from, never to the account that was claimed —
+        // returning a stray payment to the impersonated account would hand a
+        // stranger the money and leave the real payer out of pocket.
+        returnTo: p.refundTo || p.from,
+        amount: p.refundAmount || p.amount,
+        reason: p.reason || null,
+        expectedFrom: p.expectedFrom || null,
+        receivedAt: p.processedAt,
+        refundStatus: p.refundStatus,
+        returnedTrxId: p.returnedTrxId || null,
+        returnedAt: p.returnedAt || null,
+      })),
+    });
+  } catch (err) {
+    console.error('[advertise] refund queue failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+/**
+ * Record that a refused payment has been sent back.
+ *
+ * `returnedTrxId` is required: a refund nobody can point at on-chain is an assertion,
+ * not a receipt, and this is the only record that the money went back.
+ */
+router.post('/admin/refunds/:trxId/settle', requireAdmin, express.json({ limit: '4kb' }), async (req, res) => {
+  try {
+    const trxId = str(req.params.trxId, 80);
+    const returnedTrxId = str(req.body && req.body.returnedTrxId, 80);
+    if (!returnedTrxId) {
+      return res.status(400).json({ success: false, error: 'returnedTrxId is required — the transaction that sent the money back' });
+    }
+
+    const coll = getDb().collection(AD_PAYMENTS_COLLECTION);
+    const result = await coll.findOneAndUpdate(
+      { trx_id: trxId, status: 'refused', refundStatus: 'pending' },
+      { $set: {
+        refundStatus: 'returned',
+        returnedTrxId,
+        returnedBy: str(req.body && req.body.returnedBy, 64) || null,
+        returnedAt: new Date(),
+      } },
+      { returnDocument: 'after' },
+    );
+    const doc = result && (result.value || result);
+    if (!doc || !doc.trx_id) {
+      // Either it does not exist or it is already settled. Say which, so an
+      // operator does not send a second transfer chasing a phantom.
+      const existing = await coll.findOne({ trx_id: trxId });
+      if (existing && existing.refundStatus === 'returned') {
+        return res.status(409).json({
+          success: false,
+          error: `Already returned on ${existing.returnedAt}, transaction ${existing.returnedTrxId}. Do not send it again.`,
+        });
+      }
+      return res.status(404).json({ success: false, error: 'No pending refund with that transaction id' });
+    }
+
+    console.log(`[advertise] refund ${trxId} returned to @${doc.refundTo || doc.from} as ${returnedTrxId}`);
+    res.json({ success: true, refund: { trx_id: doc.trx_id, returnTo: doc.refundTo || doc.from, amount: doc.refundAmount || doc.amount, returnedTrxId } });
+  } catch (err) {
+    console.error('[advertise] refund settle failed:', err && err.message);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
