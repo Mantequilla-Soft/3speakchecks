@@ -233,6 +233,38 @@ async function hiveAccountExists(name) {
   }
 }
 
+/* ─── GET /advertise/access/:account ──────────────────────────────────── */
+/**
+ * Is this account allowed to USE the ad surfaces yet?
+ *
+ * The frontend used to answer that from a build-time Vite flag, which meant a
+ * preview build with ads switched on pitched the feature to every visitor while
+ * this server refused every one of their writes. One gate, stated here, is the
+ * only way those two can't drift.
+ *
+ * Deliberately NOT behind `featureVisible`: when ADS_STAGE is 'off' this answers
+ * `{ stage: 'off', allowed: false }` rather than 404ing. A 404 is what the client
+ * gets from a checker that predates this route, and it has to be able to tell the
+ * two apart — "the feature is off" and "I can't reach the gate" call for different
+ * fallbacks.
+ *
+ * `allowed` mirrors betaWriterAllowed() exactly, because what the prompts lead to
+ * is a write. The beta LIST is never returned, only the answer for the account
+ * asked about.
+ */
+router.get('/access/:account', async (req, res) => {
+  const name = account(req.params.account);
+  const valid = HIVE_ACCOUNT_RE.test(name);
+  res.set('Cache-Control', 'public, max-age=60');
+  return res.json({
+    success: true,
+    account: valid ? name : null,
+    stage: ADS_STAGE,
+    // Nothing is on offer while the stage is 'off', whoever is asking.
+    allowed: ADS_STAGE !== 'off' && valid && betaWriterAllowed(name),
+  });
+});
+
 /* ─── GET /advertise/inventory ────────────────────────────────────────── */
 // What a prospective advertiser is allowed to see: the cleaned audience and the
 // deliverable slots. Deliberately NOT the excluded-account list — naming the

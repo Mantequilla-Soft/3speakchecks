@@ -815,8 +815,24 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // duration and place itself inside a window the advertiser paid to exclude.
     // `{ permlink, owner }` is a unique index, so this is a point read.
     const video = await db.collection('embed-video')
-      .findOne({ permlink, owner }, { projection: { duration: 1 } });
+      .findOne({ permlink, owner }, { projection: { duration: 1, short: 1 } });
     const videoSeconds = Number(video && video.duration) || null;
+
+    // 🚨 NO WATCH-SURFACE ADS ON A SHORT, whatever its length.
+    //
+    // Short.jsx has said so since ads existed: the only slot that fits inside a short
+    // is a pre-roll, and putting a 15-second spot in front of a 12-second short
+    // delivers an impression to someone who never wanted the content. That is the
+    // whole reason `shorts_roll` exists as its own format, played BETWEEN shorts.
+    //
+    // The shorts FEED honoured it by simply never asking. But a short opened through
+    // the embed player or a watch page asks like anything else, and nothing here
+    // checked — so a roll spliced straight into it. Length is not the test and never
+    // was: these are 61-68s shorts, comfortably past any duration threshold, and one
+    // row in the wild is flagged short at seven hours. The FLAG is the answer.
+    if (video && video.short === true) {
+      return res.json({ ad: null, reason: 'short_video' });
+    }
 
     const candidates = await db.collection(AD_CAMPAIGNS_COLLECTION).find({
       status: { $in: [STATES.SCHEDULED, STATES.RUNNING] },
