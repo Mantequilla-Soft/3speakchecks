@@ -51,6 +51,14 @@ const LEGACY = { author: 'hiveredcarpet', permlink: 'ozmstwre', community: 'hive
   const periods = db.collection(AD_PAYOUT_PERIODS_COLLECTION);
   const ev = db.collection('embed-video');
 
+  // Sharing with a community is OPT IN (AD_DEFAULT_COMMUNITY_PCT is 0), so the
+  // community path only runs for a creator who has set a share. These are real
+  // accounts, so whatever they already had is put back at the end.
+  const SHARE = 25;
+  const prefs = db.collection(AD_CREATOR_PREFS_COLLECTION);
+  const owners = [...new Set([CREATOR, LEGACY.author])];
+  const savedPrefs = await prefs.find({ _id: { $in: owners } }).toArray();
+
   const period = periodContaining(Date.now() - 40 * 864e5);
   const cleanup = async () => {
     await camps.deleteMany({ name: MARK });
@@ -58,9 +66,13 @@ const LEGACY = { author: 'hiveredcarpet', permlink: 'ozmstwre', community: 'hive
     await payouts.deleteMany({ periodKey: period.key });
     await periods.deleteMany({ _id: period.key });
     await ev.deleteMany({ permlink: { $regex: `^${MARK}` } });
-    await db.collection(AD_CREATOR_PREFS_COLLECTION).deleteMany({ _id: `${MARK}-creator` });
+    await prefs.deleteMany({ _id: { $in: owners } });
+    if (savedPrefs.length) await prefs.insertMany(savedPrefs);
   };
   await cleanup();
+  for (const o of owners) {
+    await prefs.updateOne({ _id: o }, { $set: { adsEnabled: true, communitySharePct: SHARE } }, { upsert: true });
+  }
 
   try {
     const mid = new Date(period.start.getTime() + 864e5);
@@ -128,7 +140,8 @@ const LEGACY = { author: 'hiveredcarpet', permlink: 'ozmstwre', community: 'hive
     const communityTotal = sumKind('community');
     const creatorTotal = sumKind('creator');
     check('creators were paid', creatorTotal > 0, true);
-    const expectedCommunity = Math.round(pool * (AD_DEFAULT_COMMUNITY_PCT / AD_CREATOR_POOL_PCT) * 1000) / 1000;
+    // Against the share these creators actually SET, not the platform default.
+    const expectedCommunity = Math.round(pool * (SHARE / AD_CREATOR_POOL_PCT) * 1000) / 1000;
     check('communities got the default share of the pool',
       Math.abs(communityTotal - expectedCommunity) < 0.02, true);
     check('creators got the remainder',
@@ -138,6 +151,23 @@ const LEGACY = { author: 'hiveredcarpet', permlink: 'ozmstwre', community: 'hive
     // Kinds are recorded so a transfer memo can say what it is for.
     check('community rows are marked as such', byAccount[GAP.community]?.kind, 'community');
     check('creator row is marked as such', byAccount[CREATOR]?.kind, 'creator');
+
+    // 🚨 SHARING IS OPT IN. A creator who has never touched the setting sends their
+    // community nothing and keeps the whole creator share. This used to default to
+    // an even split, which donated half of every untouched creator's ad income for
+    // them. Settling again with the preferences removed proves the default.
+    await payouts.deleteMany({ periodKey: period.key });
+    await periods.deleteMany({ _id: period.key });
+    await imps.updateMany({ sid: { $regex: `^${MARK}` } }, { $set: { payoutId: null } });
+    await prefs.deleteMany({ _id: { $in: owners } });
+
+    await settlePeriod(db, period);
+    const reRun = await payouts.find({ periodKey: period.key }).toArray();
+    check('with no preference set, no community is paid',
+      reRun.filter((p) => p.kind === 'community').length, 0);
+    check('  and the creators keep the whole pool',
+      Math.abs(reRun.reduce((a, p) => a + p.hbd, 0) - pool) < 0.02, true);
+    check('  which is the platform default', AD_DEFAULT_COMMUNITY_PCT, 0);
   } finally {
     await cleanup();
     console.log('\ncleaned up its own rows.');

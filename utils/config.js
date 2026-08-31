@@ -502,14 +502,22 @@ module.exports = {
         const n = parseFloat(process.env.AD_CREATOR_POOL_PCT);
         return Number.isFinite(n) && n >= 0 && n <= 100 ? n : 50;
     })(),
-    // What the community gets when a creator has never touched the setting. An
-    // even split of the pool: the creator opted into neither number, so defaulting
-    // to "I keep everything" is as much of an assumption as any other, and this one
-    // at least matches how the split is described. A creator who explicitly sets 0
-    // keeps 0 — that stored zero must never be read as "unset".
+    // What the community gets when a creator has never touched the setting: NOTHING.
+    //
+    // 🚨 This was an even split of the pool, and that was wrong. The argument for it
+    // was that a creator who set neither number had opted into neither, so "I keep
+    // everything" was no more neutral than any other choice. But the two are not
+    // symmetric: the creator earned the share, and giving half of it away is a
+    // decision only they can make. Defaulting to 25 meant every creator who never
+    // opened the setting was donating half their ad income without being asked, and
+    // would have found out from a payout rather than from us.
+    //
+    // Sharing with a community is opt IN. A creator who wants it sets it in
+    // Settings → Content, and a stored 0 still means a deliberate 0 rather than
+    // "unset" — the nullish checks that protect that are still required.
     AD_DEFAULT_COMMUNITY_PCT: (() => {
         const n = parseFloat(process.env.AD_DEFAULT_COMMUNITY_PCT);
-        return Number.isInteger(n) && n >= 0 ? n : 25;
+        return Number.isInteger(n) && n >= 0 ? n : 0;
     })(),
     // --- Booking, payment, serving, payout ---
     AD_CAMPAIGNS_COLLECTION: process.env.AD_CAMPAIGNS_COLLECTION || 'ad_campaigns',
