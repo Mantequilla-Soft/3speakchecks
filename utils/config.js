@@ -517,6 +517,11 @@ module.exports = {
     AD_PAYMENTS_COLLECTION: process.env.AD_PAYMENTS_COLLECTION || 'ad_payments',
     AD_IMPRESSIONS_COLLECTION: process.env.AD_IMPRESSIONS_COLLECTION || 'ad_impressions',
     AD_PAYOUTS_COLLECTION: process.env.AD_PAYOUTS_COLLECTION || 'ad_payouts',
+    // Operator-settable platform defaults (currently the per-format rate card),
+    // one document keyed 'rates'. Config, not data: it survives an ad data purge,
+    // and it is what lets a price change without a checker restart. Read through
+    // utils/adSettings.js, never directly.
+    AD_SETTINGS_COLLECTION: process.env.AD_SETTINGS_COLLECTION || 'ad_settings',
     // Where advertisers send HBD/HIVE. Defaults to the promotion account so this
     // works out of the box, but it is a SEPARATE setting on purpose: ad money and
     // promotion money are different books and will want to be told apart.
@@ -726,6 +731,10 @@ module.exports = {
     // on a predictable cadence instead of whenever some advertiser's flight ends.
     AD_PAYOUT_PERIOD_DAYS: parseInt(process.env.AD_PAYOUT_PERIOD_DAYS) || 7,
     AD_PAYOUT_PERIODS_COLLECTION: process.env.AD_PAYOUT_PERIODS_COLLECTION || 'ad_payout_periods',
+    // How long an unpaid booking may hold credit before it is released back to the
+    // advertiser's balance. Without this a booking that is created and abandoned
+    // locks credit up forever — there is no cancel route and no other expiry.
+    AD_BOOKING_EXPIRY_DAYS: parseInt(process.env.AD_BOOKING_EXPIRY_DAYS) || 30,
 
     // 🚨 SERVING ALLOWLIST. While this is non-empty, ads run ONLY on videos owned by
     // these accounts — every other creator's videos carry nothing, no matter what a

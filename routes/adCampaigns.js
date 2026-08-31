@@ -29,7 +29,7 @@ const execFileP = promisify(require('child_process').execFile);
 const { hiveRpcBatch } = require('../utils/hive');
 const {
   ADVERTISERS_COLLECTION, AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION,
-  AD_PAYMENTS_COLLECTION, AD_PAYMENT_ACCOUNT, AD_PRICE_PER_SECOND_DAY_HBD,
+  AD_PAYMENTS_COLLECTION, AD_PAYMENT_ACCOUNT,
   AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_SLOT_PERCENTS, AD_LENGTH_SECONDS,
   AD_PRODUCTION_FEE_HBD, ADS_STAGE, AD_SLOT_MAX_SHARES,
 } = require('../utils/config');
@@ -40,10 +40,11 @@ const {
 const { getSnapshot, forecastPerDay } = require('../services/adInventory');
 const { videoShapeFromManifest } = require('../utils/videoDuration');
 const {
-  DEFAULT_FORMAT, FORMAT_KEYS, formatOf, isBookableFormat, rateFor, rateCard,
+  DEFAULT_FORMAT, FORMAT_KEYS, formatOf, isBookableFormat, rateFor, defaultRateFor, rateCard,
   creativeSpecError,
 } = require('../utils/adFormats');
 const { findSlotConflict, slotAvailability, slotHolders } = require('../utils/adSlots');
+const { balanceOf, ledgerOf } = require('../utils/adBalance');
 
 /**
  * When ADS_STAGE is 'off' the whole booking surface answers 404 — not 403, not an
@@ -197,8 +198,19 @@ function publicCampaign(c, creative) {
     delivered: c.deliveredImpressions || 0,
     forecast: c.forecastImpressions ?? null,
     deliveryRate: c.deliveryRate ?? null,
+    // What the shortfall against forecast came to, and what became of it. An
+    // under-delivering flight is settled as spendable credit, not a transfer back —
+    // `refundStatus: 'credited'` is that outcome, and the advertiser should be told
+    // so rather than left waiting for money that is not coming.
     refundHbd: c.refundHbd ?? null,
     refundStatus: c.refundStatus || null,
+    creditHbd: c.creditHbd ?? null,
+    creditAppliedHbd: c.creditAppliedHbd ?? null,
+    // What is still owed in a transfer, as distinct from what the flight cost. They
+    // differ whenever credit was spent, and a client showing the wrong one either
+    // asks for too much money or reports a paid flight as unpaid.
+    amountDueHbd: c.amountDueHbd ?? c.priceHbd ?? null,
+    outstandingHbd: Math.max(0, Math.round(((c.priceHbd || 0) - (c.paidHbd || 0)) * 1000) / 1000),
     creative: creative ? {
       status: creative.status,
       durationSeconds: creative.durationSeconds,
@@ -248,7 +260,7 @@ router.get('/pricing', featureVisible, async (req, res) => {
       minSpotSeconds: 1,
       // So the page can say "your rate" rather than quietly showing a different
       // number from the one in the rate card above it.
-      rateIsCustom: pricePerSecondDayHbd !== AD_PRICE_PER_SECOND_DAY_HBD,
+      rateIsCustom: pricePerSecondDayHbd !== defaultRateFor(DEFAULT_FORMAT),
       minDays: AD_MIN_CAMPAIGN_DAYS,
       maxDays: AD_MAX_CAMPAIGN_DAYS,
       slotPercents: AD_SLOT_PERCENTS,
@@ -540,6 +552,13 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
       forecastImpressions = Math.round(forecastImpressions / shareOf);
     }
 
+    // Spend whatever balance they are carrying, and quote the difference. Capped at
+    // the price: credit beyond what this flight costs stays on the balance for the
+    // next one rather than being consumed for nothing.
+    const balanceHbd = await balanceOf(getDb(), advertiser.reference);
+    const creditAppliedHbd = Math.round(Math.min(balanceHbd, priceHbd) * 1000) / 1000;
+    const amountDueHbd = Math.round((priceHbd - creditAppliedHbd) * 1000) / 1000;
+
     const doc = {
       advertiserRef: advertiser.reference,
       hiveAccount: advertiser.hiveAccount,
@@ -563,10 +582,27 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
       productionRequested,
       productionBrief: productionRequested ? productionBrief : null,
       productionStatus: productionRequested ? 'requested' : null,
-      paidHbd: 0,
+      // Credit from an earlier flight that under-delivered, spent HERE rather than
+      // at claim time. Applying it at claim would have been useless: the advertiser
+      // is quoted `priceHbd`, sends exactly that, and a top-up only fires when
+      // somebody has UNDERPAID — which nobody does on purpose. So the discount has
+      // to be in the number they are asked to send.
+      //
+      // Counted as paid, not merely recorded: a credit-funded flight still runs on
+      // somebody's video, and a campaign with paidHbd 0 accrues no revenue, so the
+      // creators carrying it would earn nothing for real delivery.
+      creditAppliedHbd: creditAppliedHbd || undefined,
+      creditAppliedAt: creditAppliedHbd ? new Date() : undefined,
+      paidHbd: creditAppliedHbd,
+      amountDueHbd,
       requestedStartAt: requestedStart,
-      startAt: null,          // set when the money lands, not when the form is filled
-      endAt: null,
+      // Fully covered by credit means there is no transfer to wait for, and no
+      // transfer for `claim` to match — so the flight starts here rather than
+      // sitting in awaiting_payment forever.
+      ...(amountDueHbd <= 0 ? { status: STATES.SCHEDULED, ...windowFrom(requestedStart, days) } : {
+        startAt: null,        // set when the money lands, not when the form is filled
+        endAt: null,
+      }),
       deliveredImpressions: 0,
       forecastImpressions,
       // How many advertisers this position was expected to carry when the quote was
@@ -588,9 +624,24 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
       campaign: publicCampaign({ ...doc, _id: insertedId, memo }, null),
       payment: {
         to: AD_PAYMENT_ACCOUNT,
-        amount: `${priceHbd.toFixed(3)} HBD`,
+        // 🚨 What to actually send — the price MINUS any credit spent, not the price.
+        // A client that shows `priceHbd` here asks for money the advertiser does not
+        // owe, and the overpayment would sit on the campaign unspent.
+        amount: `${amountDueHbd.toFixed(3)} HBD`,
         memo,
-        note: 'Send the transfer with exactly this memo, then call claim. HIVE is accepted and valued at the on-chain median price.',
+        // Kept alongside so a client can show "200 HBD, less 75 credit = 125 due"
+        // rather than an unexplained number that does not match the rate card.
+        priceHbd,
+        creditAppliedHbd,
+        amountDueHbd,
+        // Nothing left to send. The flight is already scheduled; calling claim would
+        // look for a transfer that will never exist.
+        alreadyCovered: amountDueHbd <= 0,
+        note: amountDueHbd <= 0
+          ? `Covered in full by ${creditAppliedHbd} HBD of credit from an earlier campaign. Nothing to send — this flight is scheduled.`
+          : (creditAppliedHbd > 0
+            ? `${creditAppliedHbd} HBD of credit from an earlier campaign has been applied. Send the remaining ${amountDueHbd.toFixed(3)} HBD with exactly this memo, then call claim. HIVE is accepted and valued at the on-chain median price.`
+            : 'Send the transfer with exactly this memo, then call claim. HIVE is accepted and valued at the on-chain median price.'),
       },
     });
   } catch (err) {
@@ -616,6 +667,11 @@ router.get('/campaigns', featureVisible, async (req, res) => {
     res.set('Cache-Control', 'no-store');
     res.json({
       success: true,
+      // Credit from earlier flights that under-delivered. Returned unprompted and
+      // with its working shown: a balance the advertiser has to ask about is one
+      // they will never spend, which would make "credit instead of a refund" a way
+      // of keeping the money rather than an alternative to sending it back.
+      ...(await ledgerOf(db, advertiser.reference)),
       campaigns: camps.map((c) => publicCampaign(c, byCampaign.get(String(c._id)) || null)),
     });
   } catch (err) {
@@ -986,24 +1042,75 @@ router.post('/campaigns/:id/claim', featureVisible, express.json({ limit: '8kb' 
       });
     }
 
+    /* ─── who is allowed to pay ────────────────────────────────────────────
+     * A transfer only counts if it came FROM the account the campaign is booked
+     * under. Registration is deliberately unsigned — several 3Speak login methods
+     * cannot sign a message — so until this point nothing had ever proved that an
+     * applicant holds the account they claimed. Paying from it does: a transfer
+     * requires the ACTIVE key, which is strictly stronger proof than the posting
+     * signature the apply route treats as optional.
+     *
+     * So this is the ownership check, expressed as money rather than as a
+     * signature. A payment from anywhere else is refused and owed back.
+     *
+     * `campaign.hiveAccount` is written from the advertiser record at booking
+     * (routes/adCampaigns.js, campaign create), never from a request body — a
+     * client-supplied expected-payer would make this check decorative.
+     */
+    const expectedPayer = String(campaign.hiveAccount || '').trim().toLowerCase();
+    const sameAccount = (from) => !!expectedPayer && String(from || '').trim().toLowerCase() === expectedPayer;
+
     // Reserve before crediting: a duplicate key here means another request already
-    // counted this payment, so it is skipped rather than credited twice.
+    // counted this payment, so it is skipped rather than credited twice. Refused
+    // transfers are reserved too — the unique index is what stops the same stray
+    // payment being queued for refund over and over on every claim retry.
     const payments = db.collection(AD_PAYMENTS_COLLECTION);
     const reserved = [];
+    const refused = [];
     for (const m of matches) {
+      const ok = sameAccount(m.from);
+      const base = {
+        trx_id: m.trxId, campaignId: id, from: m.from, amount: m.amount, processedAt: new Date(),
+      };
       try {
-        await payments.insertOne({
-          trx_id: m.trxId, campaignId: id, from: m.from, amount: m.amount, processedAt: new Date(),
+        await payments.insertOne(ok ? { ...base, status: 'credited' } : {
+          ...base,
+          status: 'refused',
+          // An absent expected payer means the campaign has no account on it at
+          // all, which should not happen. Failing CLOSED is deliberate: crediting
+          // an unverifiable payment would defeat the whole point of the check, and
+          // the money is recorded and refundable either way.
+          reason: expectedPayer ? 'payer_mismatch' : 'advertiser_unknown',
+          expectedFrom: expectedPayer || null,
+          refundStatus: 'pending',
+          refundTo: m.from,
+          refundAmount: m.amount,
         });
-        reserved.push(m);
+        (ok ? reserved : refused).push(m);
       } catch (e) {
         if (e?.code !== 11000) throw e;
       }
     }
+
     if (!reserved.length) {
       const current = await db.collection(AD_CAMPAIGNS_COLLECTION).findOne({ _id: id });
       const creative = await db.collection(AD_CREATIVES_COLLECTION).findOne({ campaignId: id });
+      // Nothing creditable. Say WHICH of the two it is — "already credited" in
+      // front of somebody whose payment was just refused would be actively
+      // misleading about where their money went.
+      if (refused.length) {
+        console.warn(`[ad-campaigns] ${id} refused ${refused.length} transfer(s) from the wrong account (expected @${expectedPayer}): ${refused.map((m) => `@${m.from} ${m.amount}`).join(', ')}`);
+        return res.status(409).json({
+          success: false,
+          error: `That payment came from @${refused[0].from}, but this campaign is booked under @${campaign.hiveAccount}. Pay from @${campaign.hiveAccount} — that is how we confirm the account is yours. The transfer we received will be sent back.`,
+          refused: refused.map((m) => ({ from: m.from, amount: m.amount, willBeReturnedTo: m.from })),
+          expectedFrom: campaign.hiveAccount,
+        });
+      }
       return res.json({ success: true, message: 'Already credited', campaign: publicCampaign(current, creative) });
+    }
+    if (refused.length) {
+      console.warn(`[ad-campaigns] ${id} refused ${refused.length} transfer(s) from the wrong account (expected @${expectedPayer})`);
     }
 
     const hbdPerHive = await getHbdPerHive();
@@ -1014,7 +1121,41 @@ router.post('/campaigns/:id/claim', featureVisible, express.json({ limit: '8kb' 
       else if (symbol === 'HIVE') credited += amount * hbdPerHive;
     }
 
-    const paidHbd = Math.round(((campaign.paidHbd || 0) + credited) * 1000) / 1000;
+    let paidHbd = Math.round(((campaign.paidHbd || 0) + credited) * 1000) / 1000;
+
+    /* ─── spend any balance they are carrying ──────────────────────────────
+     * A previous campaign that under-delivered leaves credit rather than a refund
+     * (utils/adBalance.js). This is where it gets spent — automatically, at the
+     * moment it would make a difference, because credit an advertiser has to know
+     * about and ask for is not really credit.
+     *
+     * Applied only to close a shortfall, never beyond it: overspending the balance
+     * on a flight that was already paid for would take money out of their account
+     * and give them nothing for it.
+     *
+     * Once per campaign (`creditAppliedHbd` must not already be set). That bound is
+     * what stops two concurrent claims each drawing the same balance — the worst
+     * case becomes "some credit was not spent on this booking", which is visible and
+     * recoverable, rather than "the balance went negative", which is not.
+     */
+    let creditApplied = 0;
+    if (paidHbd + 1e-6 < campaign.priceHbd && !campaign.creditAppliedHbd) {
+      const shortBy = Math.round((campaign.priceHbd - paidHbd) * 1000) / 1000;
+      const available = await balanceOf(db, campaign.advertiserRef);
+      const take = Math.min(available, shortBy);
+      if (take > 0) {
+        const applied = await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
+          { _id: id, creditAppliedHbd: { $exists: false } },
+          { $set: { creditAppliedHbd: take, creditAppliedAt: new Date() } },
+        );
+        if (applied.modifiedCount === 1) {
+          creditApplied = take;
+          paidHbd = Math.round((paidHbd + take) * 1000) / 1000;
+          console.log(`[ad-campaigns] ${id} applied ${take} HBD of credit for @${campaign.hiveAccount} (balance was ${available})`);
+        }
+      }
+    }
+
     const fullyPaid = paidHbd + 1e-6 >= campaign.priceHbd;
     const window = fullyPaid ? windowFrom(campaign.requestedStartAt, campaign.days) : {};
 
@@ -1043,6 +1184,19 @@ router.post('/campaigns/:id/claim', featureVisible, express.json({ limit: '8kb' 
       success: true,
       message: fullyPaid ? 'Payment received, flight scheduled' : 'Partial payment received',
       creditedHbd: credited,
+      // Say so when a balance covered part of it, or the numbers do not add up from
+      // the advertiser's side and it looks like they were charged the wrong amount.
+      ...(creditApplied > 0 ? {
+        creditAppliedHbd: creditApplied,
+        creditNote: `${creditApplied} HBD of credit from an earlier campaign that under-delivered was applied to this booking.`,
+      } : {}),
+      // A part-payment from the right account alongside a stray one from the wrong
+      // account still has to be told about, or the advertiser is left wondering why
+      // the total is short.
+      ...(refused.length ? {
+        refused: refused.map((m) => ({ from: m.from, amount: m.amount, willBeReturnedTo: m.from })),
+        refusedNote: `We could not count ${refused.length === 1 ? 'a transfer' : `${refused.length} transfers`} sent from another account. Pay from @${campaign.hiveAccount}; the rest will be sent back.`,
+      } : {}),
       campaign: publicCampaign(fresh, creative),
     });
   } catch (err) {

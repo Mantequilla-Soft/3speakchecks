@@ -87,6 +87,7 @@ const {
   AD_SHORTS_MAX_ASPECT, AD_SHORTS_MIN_WIDTH, AD_SHORTS_RECOMMENDED,
 } = require('./config');
 const { CREATIVE_KINDS } = require('./adCreativeKinds');
+const { platformRate } = require('./adSettings');
 
 /**
  * Who the creator half of a delivery is owed to. See the header.
@@ -269,6 +270,13 @@ function isBookableFormat(key) {
  * to the video roll it was agreed for, and ONLY that one) or a per-format map. A
  * bare legacy number must not silently become the banner rate too — that would hand
  * an advertiser a discount on a product nobody negotiated.
+ *
+ * With no negotiated rate the answer is the PLATFORM DEFAULT, which is operator-
+ * settable in the database (utils/adSettings.js) and falls back to the format's
+ * compiled-in `ratePerSecondDayHbd` when nothing is stored. The precedence is
+ * therefore: advertiser's per-format rate → advertiser's legacy roll rate →
+ * database default → compiled default. Each step is a narrower agreement than the
+ * one after it, which is the order they have to be tried in.
  */
 function rateFor(advertiser, formatKey) {
   const fmt = FORMATS[String(formatKey || '').trim()] || FORMATS[DEFAULT_FORMAT];
@@ -283,7 +291,46 @@ function rateFor(advertiser, formatKey) {
     );
     if (Number.isFinite(legacy) && legacy > 0) return legacy;
   }
-  return fmt.ratePerSecondDayHbd;
+  return platformRate(fmt.key, fmt.ratePerSecondDayHbd);
+}
+
+/**
+ * The platform default for a format, with no advertiser in the picture: what this
+ * product costs somebody who has not negotiated. Exported because "is this rate a
+ * special deal?" and "what is the standard price?" are asked outside this file, and
+ * both have to be answered against the database default rather than the compiled
+ * one or a stored default would read as a discount for everybody.
+ */
+function defaultRateFor(formatKey) {
+  const fmt = FORMATS[String(formatKey || '').trim()] || FORMATS[DEFAULT_FORMAT];
+  return platformRate(fmt.key, fmt.ratePerSecondDayHbd);
+}
+
+/**
+ * Today's platform rates for every bookable format, as a plain `{format: hbd}` map
+ * ready to store on an advertiser.
+ *
+ * WHY AN ADVERTISER GETS A COPY AT REGISTRATION
+ * Without one, an advertiser owns no rate at all and `rateFor()` resolves the
+ * platform default afresh on every booking — so raising the default silently
+ * reprices everybody who ever signed up. Taking a copy at registration is what makes
+ * "the rate you signed up on is the rate you keep" true, and it is what lets the
+ * platform default be raised for NEW advertisers without touching existing ones.
+ *
+ * Every format is captured, not just the one they came for. An advertiser who books
+ * a roll in month one and a banner in month six signed up under one price list, and
+ * handing them today's banner rate because they had not happened to buy one yet
+ * would be a rate rise nobody agreed to.
+ *
+ * ⚠️ This is a SNAPSHOT, not a reference. It does not expire on its own — raising an
+ * existing advertiser's rate is a deliberate act through the admin surface. That is
+ * the intended behaviour, but it does mean an advertiser left alone keeps their
+ * signup rate indefinitely.
+ */
+function snapshotRates() {
+  const out = {};
+  FORMAT_KEYS.forEach((key) => { out[key] = defaultRateFor(key); });
+  return out;
 }
 
 /** The rate card: every bookable format with this advertiser's rate applied. */
@@ -291,6 +338,7 @@ function rateCard(advertiser) {
   return FORMAT_KEYS.map((key) => {
     const f = FORMATS[key];
     const rate = rateFor(advertiser, key);
+    const standard = defaultRateFor(key);
     return {
       key: f.key,
       label: f.label,
@@ -301,7 +349,7 @@ function rateCard(advertiser) {
       maxSeconds: f.maxSeconds,
       creativeSpec: f.creativeSpec || null,
       ratePerSecondDayHbd: rate,
-      rateIsCustom: rate !== f.ratePerSecondDayHbd,
+      rateIsCustom: rate !== standard,
       creatorCredit: f.creatorCredit,
       payoutPool: f.payoutPool,
     };
@@ -367,5 +415,6 @@ function creativeSpecError(formatKey, { width, height }) {
 
 module.exports = {
   FORMATS, FORMAT_KEYS, DEFAULT_FORMAT, CREATOR_CREDIT, PAYOUT_POOLS,
-  formatOf, payoutPoolOf, activePools, isBookableFormat, rateFor, rateCard, creativeSpecError,
+  formatOf, payoutPoolOf, activePools, isBookableFormat, rateFor, defaultRateFor, snapshotRates,
+  rateCard, creativeSpecError,
 };

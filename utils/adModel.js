@@ -12,10 +12,10 @@
 const {
   AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_PAYMENTS_COLLECTION,
   AD_IMPRESSIONS_COLLECTION, AD_PAYOUTS_COLLECTION,
-  AD_PRICE_PER_SECOND_DAY_HBD, AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_LENGTH_SECONDS,
+  AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_LENGTH_SECONDS,
 } = require('./config');
 const { getDb } = require('./db');
-const { formatOf } = require('./adFormats');
+const { formatOf, defaultRateFor, DEFAULT_FORMAT } = require('./adFormats');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -114,7 +114,7 @@ function ratePerDayFor(advertiser) {
   const rate = Number(
     advertiser && (advertiser.pricePerSecondDayHbd ?? advertiser.pricePerDayHbd),
   );
-  return Number.isFinite(rate) && rate > 0 ? rate : AD_PRICE_PER_SECOND_DAY_HBD;
+  return Number.isFinite(rate) && rate > 0 ? rate : defaultRateFor(DEFAULT_FORMAT);
 }
 
 /**
@@ -127,7 +127,7 @@ function ratePerDayFor(advertiser) {
  */
 function priceForDays(days, ratePerSecondDay, spotSeconds) {
   const rate = Number(ratePerSecondDay);
-  const perSecondDay = Number.isFinite(rate) && rate > 0 ? rate : AD_PRICE_PER_SECOND_DAY_HBD;
+  const perSecondDay = Number.isFinite(rate) && rate > 0 ? rate : defaultRateFor(DEFAULT_FORMAT);
   // A missing or nonsensical length falls back to the full slot rather than to
   // zero: a bad number must never hand somebody a free flight.
   const seconds = Number(spotSeconds);

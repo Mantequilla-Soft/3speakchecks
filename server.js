@@ -24,6 +24,7 @@ const { scheduleRetention } = require('./services/retention');
 const adInventory = require('./services/adInventory');
 const adPayouts = require('./services/adPayouts');
 const adCreativeSync = require('./services/adCreativeSync');
+const adSettings = require('./utils/adSettings');
 const { scheduleDiscover } = require('./services/discover');
 const { scheduleCommentCounts } = require('./services/commentCounts');
 
@@ -342,6 +343,14 @@ async function startServer() {
     } else {
         console.log('Ad inventory forecast disabled (AD_INVENTORY_ENABLED=false)');
     }
+
+    // Platform rate defaults live in Mongo so a price can change without a restart.
+    // Loaded before anything can quote: platformRate() falls back to the compiled
+    // default until this resolves, so a slow first read prices at the built-in rate
+    // rather than at zero, but there is no reason to serve even one quote that way.
+    adSettings.schedule()
+        .then(() => console.log('Ad platform rates loaded'))
+        .catch((e) => console.error('[ad-settings] initial load:', e.message));
 
     adPayouts.schedule();
     adCreativeSync.schedule();
