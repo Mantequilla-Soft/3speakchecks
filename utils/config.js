@@ -519,6 +519,37 @@ module.exports = {
         const n = parseFloat(process.env.AD_DEFAULT_COMMUNITY_PCT);
         return Number.isInteger(n) && n >= 0 ? n : 0;
     })(),
+    // Where a viewer's decision to be identified is stored. Deliberately a SEPARATE
+    // collection from the watch log: `view-durations` is anonymous by design and
+    // stays that way, so opting in adds a row here rather than changing the shape of
+    // everything we already record about everyone.
+    AD_VIEWER_PREFS_COLLECTION: process.env.AD_VIEWER_PREFS_COLLECTION || 'ad_viewer_prefs',
+
+    // Watch records for viewers who opted in, and ONLY them. This is the seam the
+    // reward metric will read: whatever we decide to pay on (completed ad views,
+    // verified watch seconds, distinct days) gets derived from here.
+    //
+    // 🚨 Separate from `view-durations` on purpose. That log is anonymous for
+    // everybody and must stay that way; identity belongs in a stream that exists
+    // only because someone asked for it, so revoking consent is a delete of this
+    // collection rather than a surgical edit of the log we keep on all viewers.
+    AD_VIEWER_WATCH_COLLECTION: process.env.AD_VIEWER_WATCH_COLLECTION || 'ad_viewer_watch',
+
+    // Share of the PLATFORM's own cut that is paid out to viewers.
+    //
+    // 🚨 Taken from the platform pool, NOT from the creator pool. On 100 HBD of ad
+    // revenue the creator side still receives its full AD_CREATOR_POOL_PCT; the
+    // viewer share comes out of what we would otherwise keep. Funding it from the
+    // creator side would mean paying viewers with creators' money, which is not the
+    // deal creators agreed to.
+    //
+    // At the defaults (creator pool 50, viewer 10): creators+communities 50,
+    // viewers 5, platform 45.
+    AD_VIEWER_POOL_PCT: (() => {
+        const n = parseFloat(process.env.AD_VIEWER_POOL_PCT);
+        return Number.isFinite(n) && n >= 0 && n <= 100 ? n : 10;
+    })(),
+
     // --- Booking, payment, serving, payout ---
     AD_CAMPAIGNS_COLLECTION: process.env.AD_CAMPAIGNS_COLLECTION || 'ad_campaigns',
     AD_CREATIVES_COLLECTION: process.env.AD_CREATIVES_COLLECTION || 'ad_creatives',

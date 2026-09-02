@@ -23,6 +23,12 @@ const OWNED = [
   { coll: 'viewer-tags', field: 'voter' },
   { coll: 'user-hidden-videos', field: 'username' },
   { coll: 'user-hidden-creators', field: 'username' },
+  // Ad viewer rewards. `ad_viewer_watch` is the ONLY place viewing is tied to a
+  // name, and it exists solely because the viewer opted in — so a deletion request
+  // has to reach it, and the opt-in row that authorised it, or we would be holding
+  // identified watch data for someone who asked to be forgotten.
+  { coll: 'ad_viewer_watch', field: 'viewer' },
+  { coll: 'ad_viewer_prefs', field: '_id' },
   { coll: 'podcastsettings', field: 'owner' },
   { coll: 'scheduled-posts', field: 'owner' },
   { coll: 'audio-listen-log', field: 'username' },

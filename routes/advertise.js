@@ -48,6 +48,8 @@ const adSettings = require('../utils/adSettings');
 const {
   ADVERTISERS_COLLECTION,
   AD_CREATOR_PREFS_COLLECTION,
+  AD_VIEWER_PREFS_COLLECTION,
+  AD_VIEWER_WATCH_COLLECTION,
   HIVE_AUTH_REQUIRED,
   SIGNATURE_TIMESTAMP_TOLERANCE_MS,
   AD_APPLY_MAX_PER_WINDOW,
@@ -173,6 +175,37 @@ async function ensureIndexes() {
     await adv.createIndex({ status: 1, createdAt: -1 });   // the review queue
     await adv.createIndex({ hiveAccount: 1, status: 1 });   // duplicate-application guard
     await db.collection(AD_CREATOR_PREFS_COLLECTION).createIndex({ adsEnabled: 1 });
+    // Who is opted in, for the payout run to iterate.
+    await db.collection(AD_VIEWER_PREFS_COLLECTION).createIndex({ rewardsEnabled: 1 });
+    // The identified watch stream. `viewer` leads because every read is per person:
+    // paying them, and deleting them when they opt out.
+    const vw = db.collection(AD_VIEWER_WATCH_COLLECTION);
+    await vw.createIndex({ viewer: 1, at: -1 });
+    await vw.createIndex({ payoutId: 1 });
+    /* 🚨 ONE ROW PER (viewer, video, period) — NOT per playback session.
+     *
+     * The grain IS the anti-fraud rule. Watching the same video again is worth
+     * nothing: the row is upserted with `$max`, so a second viewing can only ever
+     * raise the best coverage already recorded, never add to it.
+     *
+     * That matters more than it sounds. Measured 2026-09-01, rewatching inflates
+     * total plays by 63% over distinct (viewer, video) pairs, and one account had
+     * replayed a single video 85 times. A per-session grain would have paid all 85.
+     *
+     * Once EVER per video, not once per period. Deliberately no `periodKey` in the
+     * key: it would have to be computed in the player service too, duplicating the
+     * epoch-anchored period formula across two codebases where a disagreement
+     * silently splits or merges rows. `payoutId` is what marks a row as settled.
+     */
+    // Earlier grains that would block this one if left in place. Both existed only
+    // on 2026-09-01: per-session (`sid_1_viewer_1`), then period-scoped.
+    try {
+      const existing = await vw.indexes();
+      for (const name of ['sid_1_viewer_1', 'viewer_1_owner_1_permlink_1_periodKey_1']) {
+        if (existing.some((ix) => ix.name === name)) await vw.dropIndex(name);
+      }
+    } catch (_) { /* not there, or already replaced */ }
+    await vw.createIndex({ viewer: 1, owner: 1, permlink: 1 }, { unique: true });
   } catch (err) {
     indexesEnsured = false;
     console.error('[advertise] index ensure failed:', err && err.message);
@@ -223,6 +256,22 @@ const mineMessage = (hiveAccount, timestamp) => ['3speak-ads', 'mine', hiveAccou
 const prefsMessage = (hiveAccount, adsEnabled, communitySharePct, timestamp) =>
   ['3speak-ads', 'creator-prefs', hiveAccount, adsEnabled ? 'on' : 'off',
     String(communitySharePct), String(timestamp)].join('|');
+
+/**
+ * A VIEWER's decision to be identified, so they can be paid a share of ad revenue.
+ *
+ * Signed for two reasons, and the second is the one that matters. It decides where
+ * money goes, like the creator split. But it is also a CONSENT record: without a
+ * signature anyone could opt somebody else in, which would mean storing a person's
+ * username against their viewing because a stranger asked us to. The signature is
+ * what makes this consent rather than an assertion.
+ *
+ * `viewer-prefs` is a distinct action string from `creator-prefs`, so a signature
+ * collected for one can never be replayed into the other.
+ */
+const viewerPrefsMessage = (hiveAccount, rewardsEnabled, timestamp) =>
+  ['3speak-ads', 'viewer-prefs', hiveAccount, rewardsEnabled ? 'on' : 'off',
+    String(timestamp)].join('|');
 
 function badTimestamp(ts) {
   const n = parseInt(ts, 10);
@@ -858,6 +907,118 @@ router.post('/creator/prefs', featureVisible, express.json({ limit: '8kb' }), as
     });
   } catch (err) {
     console.error('[advertise] creator prefs write failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+/* ─── viewer rewards: consent to be identified ────────────────────────────
+ * A viewer who opts in gets their username stored against their watching, which is
+ * what makes paying them possible at all. Everyone else stays anonymous: the watch
+ * log itself is untouched by this, so opting out is not a setting we honour later,
+ * it is simply the absence of a row here.
+ *
+ * THREE STATES, and the third is why `null` is not good enough:
+ *   true   opted in, may be paid
+ *   false  explicitly declined
+ *   null   never asked
+ * The prompt shown on open has to distinguish "said no" from "not asked yet", or it
+ * would nag someone who has already declined. That is the whole reason the read
+ * route returns `decided` alongside the value.
+ */
+router.get('/viewer/prefs/:account', featureVisible, async (req, res) => {
+  try {
+    const name = account(req.params.account);
+    if (!HIVE_ACCOUNT_RE.test(name)) {
+      return res.status(400).json({ success: false, error: 'Invalid account' });
+    }
+    const doc = await getDb().collection(AD_VIEWER_PREFS_COLLECTION).findOne({ _id: name });
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      success: true,
+      account: name,
+      // Default OFF. Being paid requires being identified, and identification is
+      // not something to switch on for somebody who has not been asked.
+      rewardsEnabled: doc ? doc.rewardsEnabled === true : false,
+      // Has this person ever answered? Drives whether the app asks.
+      decided: !!doc,
+      updatedAt: (doc && doc.updatedAt) || null,
+    });
+  } catch (err) {
+    console.error('[advertise] viewer prefs read failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+router.post('/viewer/prefs', featureVisible, express.json({ limit: '8kb' }), async (req, res) => {
+  try {
+    await ensureIndexes();
+    const b = req.body || {};
+    const name = account(b.account);
+    // Explicit boolean: `!== false` would turn a malformed body into an opt-in, and
+    // an accidental opt-in to being tracked is the one mistake this route must not
+    // make. Anything that is not literally true is a decline.
+    const rewardsEnabled = b.rewardsEnabled === true;
+    if (!HIVE_ACCOUNT_RE.test(name)) {
+      return res.status(400).json({ success: false, error: 'Invalid account' });
+    }
+    if (!betaWriterAllowed(name)) return res.status(403).json(BETA_REFUSAL);
+
+    // Signed, for the same reasons as the creator split plus one more: this is a
+    // consent record, and consent nobody can prove was given is not consent.
+    // The @threespeak delegate path is kept so HiveSigner and Butter Auth viewers
+    // (who hold no key in the browser) are not the only people unable to opt in.
+    let signedBy = name;
+    if (HIVE_AUTH_REQUIRED) {
+      const signature = str(b.signature, 200);
+      const timestamp = stamp(b.timestamp);
+      if (!signature || !timestamp) {
+        return res.status(401).json({
+          success: false,
+          error: 'Signature required',
+          expected_message: viewerPrefsMessage(name, rewardsEnabled, '<ms>'),
+        });
+      }
+      const tsErr = badTimestamp(timestamp);
+      if (tsErr) return res.status(401).json({ success: false, error: tsErr });
+      let verdict = { ok: false, signer: null };
+      try {
+        verdict = await verifyHiveAuthority({
+          message: viewerPrefsMessage(name, rewardsEnabled, timestamp),
+          signature,
+          username: name,
+          allowedDelegates: AD_SIGNING_DELEGATES,
+        });
+      } catch (err) {
+        if (err && err.code === 'HIVE_ACCOUNT_NOT_FOUND') {
+          return res.status(404).json({ success: false, error: 'Hive account not found' });
+        }
+        verdict = { ok: false, signer: null };
+      }
+      if (!verdict.ok) return res.status(401).json({ success: false, error: 'Invalid signature' });
+      signedBy = verdict.signer;
+    }
+
+    await getDb().collection(AD_VIEWER_PREFS_COLLECTION).updateOne(
+      { _id: name },
+      {
+        $set: { rewardsEnabled, signedBy, updatedAt: new Date() },
+        $setOnInsert: { createdAt: new Date() },
+      },
+      { upsert: true },
+    );
+
+    // 🚨 Opting OUT must not leave the identified watch rows we already collected
+    // sitting there. "Stop storing my username" is meaningless if the answer is
+    // "from now on" — the rows already written are the thing being consented to.
+    let removed = 0;
+    if (!rewardsEnabled) {
+      const r = await getDb().collection(AD_VIEWER_WATCH_COLLECTION).deleteMany({ viewer: name });
+      removed = r.deletedCount || 0;
+    }
+
+    res.json({ success: true, account: name, rewardsEnabled, decided: true, removedWatchRows: removed });
+  } catch (err) {
+    console.error('[advertise] viewer prefs write failed:', err && err.message);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
