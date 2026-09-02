@@ -37,6 +37,7 @@ const {
   AD_PAYOUTS_COLLECTION, AD_PAYOUT_PERIODS_COLLECTION, AD_CREATOR_POOL_PCT,
   AD_DEFAULT_COMMUNITY_PCT, AD_CREATOR_PREFS_COLLECTION, AD_PAYMENT_ACCOUNT,
   AD_PAYOUTS_ENABLED, AD_PAYOUT_INTERVAL_H, AD_PAYOUT_MIN_HBD, AD_PAYOUT_PERIOD_DAYS, AD_PAYMENTS_COLLECTION, AD_BOOKING_EXPIRY_DAYS,
+  AD_VIEWER_POOL_PCT, AD_VIEWER_WATCH_COLLECTION,
 } = require('../utils/config');
 const { STATES } = require('../utils/adModel');
 // The chain is the authority on which community a post was published to — see
@@ -255,6 +256,23 @@ async function settlePeriod(db, period) {
   const carriedIn = (await periods.findOne({ carryTo: period.key }))?.carriedOut || 0;
   const pool = revenue * (AD_CREATOR_POOL_PCT / 100) + carriedIn;
 
+  /* ─── viewer share ──────────────────────────────────────────────────────
+   * A slice of the PLATFORM's own cut, set aside for the people who watched.
+   *
+   * 🚨 Taken from what we keep, never from `pool`. The creator side must not
+   * notice this exists — funding viewer rewards out of the creator pool would be
+   * paying viewers with creators' money.
+   *
+   * ⚠️ EARMARKED, NOT DISTRIBUTED. The metric we pay on is still an open question
+   * (completed ad views? verified seconds? distinct days?), so this records what is
+   * owed to viewers collectively and stops there. Recording it from day one means
+   * that when the metric lands there is a real, auditable balance to pay out of,
+   * rather than a number reconstructed after the fact from periods nobody measured.
+   * Nothing is lost by waiting: it stays in the platform's own share until claimed.
+   */
+  const platformPool = revenue * (1 - AD_CREATOR_POOL_PCT / 100);
+  const viewerPoolHbd = Math.round(platformPool * (AD_VIEWER_POOL_PCT / 100) * 1000) / 1000;
+
   const impressions = await db.collection(AD_IMPRESSIONS_COLLECTION).find({
     completed: true,
     payoutId: null,
@@ -262,10 +280,17 @@ async function settlePeriod(db, period) {
   }).toArray();
 
   if (!impressions.length) {
+    // No creator impressions does not mean no viewers: someone may still have
+    // watched a video to 75% while a flight was running.
+    const viewerPaidNoImp = await payViewers(db, period, viewerPoolHbd);
     // Nothing delivered. The money is not ours to keep — carry it forward.
     await periods.updateOne({ _id: period.key }, {
       $set: {
         startAt: period.start, endAt: period.end, revenueHbd: revenue, poolHbd: pool,
+        viewerPoolHbd,
+        viewerPoolStatus: viewerPaidNoImp.recipients ? 'paid' : 'earmarked',
+        viewerRecipients: viewerPaidNoImp.recipients,
+        viewerPaidHbd: viewerPaidNoImp.paidHbd,
         impressions: 0, ratePerImpression: 0, carriedIn, carriedOut: pool,
         carryTo: periodContaining(period.end.getTime()).key,
         status: 'settled', settledAt: new Date(),
@@ -351,9 +376,17 @@ async function settlePeriod(db, period) {
     { $set: { payoutId: period.key } },
   );
 
+  // Viewers settle from the platform's slice, independently of the creator pool
+  // above: a period can owe viewers even when it owed creators nothing.
+  const viewerPaid = await payViewers(db, period, viewerPoolHbd);
+
   await periods.updateOne({ _id: period.key }, {
     $set: {
       startAt: period.start, endAt: period.end, revenueHbd: revenue, poolHbd: pool,
+      viewerPoolHbd,
+      viewerPoolStatus: viewerPaid.recipients ? 'paid' : 'earmarked',
+      viewerRecipients: viewerPaid.recipients,
+      viewerPaidHbd: viewerPaid.paidHbd,
       impressions: impressions.length, ratePerImpression: rate, carriedIn,
       carriedOut: dust, carryTo: periodContaining(period.end.getTime()).key,
       recipients: payable.length, status: 'settled', settledAt: new Date(),
@@ -496,6 +529,73 @@ async function payPending(db) {
  * a stuck row is a support ticket. The payout path above does mark-after-send and
  * carries the opposite risk — this is the safer order and the one to copy.
  */
+/**
+ * Pay viewers their share of the period's ad revenue.
+ *
+ * Same pooled shape as the creator side, and for the same reason: one rate for
+ * everyone in the period, so what you earn depends on how much you watched and not
+ * on which campaign happened to be running while you did.
+ *
+ *   rate = viewerPool / (total qualifying seconds)
+ *
+ * Every guard that decides WHETHER a watch counts already ran when the row was
+ * written (preview-player/watchTracking.js recordViewerReward): 3speak.tv only,
+ * >=75% coverage, not the owner, not premium, not private, capped seconds, one row
+ * per video with $max. This function only divides money between rows that exist.
+ *
+ * 🚨 Rows are CLAIMED before payment is computed, by stamping `payoutId`. That is
+ * what stops a viewer being paid twice for the same watch if a settlement is retried
+ * — the same job `payoutId` does for impressions on the creator side.
+ */
+async function payViewers(db, period, viewerPoolHbd) {
+  if (!(viewerPoolHbd > 0)) return { recipients: 0, paidHbd: 0 };
+  const watch = db.collection(AD_VIEWER_WATCH_COLLECTION);
+
+  // Everything banked and not yet settled. No date filter: a watch recorded in an
+  // earlier period that was never paid is still owed, and dropping it would quietly
+  // keep money we said belonged to viewers.
+  const rows = await watch.find({ payoutId: null }).toArray();
+  if (!rows.length) return { recipients: 0, paidHbd: 0 };
+
+  const totalSeconds = rows.reduce((a, r) => a + (Number(r.contentSeconds) || 0), 0);
+  if (totalSeconds <= 0) return { recipients: 0, paidHbd: 0 };
+  const perSecond = viewerPoolHbd / totalSeconds;
+
+  const owed = new Map();
+  for (const r of rows) {
+    const secs = Number(r.contentSeconds) || 0;
+    if (secs <= 0 || !r.viewer) continue;
+    owed.set(r.viewer, (owed.get(r.viewer) || 0) + secs * perSecond);
+  }
+
+  const payable = [...owed.entries()]
+    .map(([account, hbd]) => ({ account, hbd: Math.round(hbd * 1000) / 1000 }))
+    .filter((r) => r.hbd >= AD_PAYOUT_MIN_HBD);
+
+  // Claim first, pay second. A crash between the two leaves rows marked settled and
+  // a payout row already written, which `payPending` will retry — the safe order.
+  await watch.updateMany({ payoutId: null }, { $set: { payoutId: period.key, settledAt: new Date() } });
+
+  for (const r of payable) {
+    await db.collection(AD_PAYOUTS_COLLECTION).updateOne(
+      { periodKey: period.key, account: r.account },
+      {
+        $set: { hbd: r.hbd, kind: 'viewer', updatedAt: new Date() },
+        $setOnInsert: { status: 'pending', createdAt: new Date() },
+      },
+      { upsert: true },
+    );
+  }
+
+  const total = payable.reduce((a, r) => a + r.hbd, 0);
+  console.log(
+    `[adPayout] period ${period.key}: viewer pool ${fmt3(viewerPoolHbd)} HBD / `
+    + `${(totalSeconds / 3600).toFixed(1)}h qualifying = ${(perSecond * 3600).toFixed(4)} HBD/hour `
+    + `→ ${payable.length} viewer(s), ${fmt3(total)} HBD`,
+  );
+  return { recipients: payable.length, paidHbd: total };
+}
+
 /**
  * Give back credit that an abandoned booking is sitting on.
  *
@@ -682,4 +782,4 @@ function schedule() {
   );
 }
 
-module.exports = { schedule, runOnce, settlePeriod, periodContaining, accrualFor, closeFinishedCampaigns, refundRefusedPayments, releaseStaleCredit };
+module.exports = { schedule, runOnce, settlePeriod, periodContaining, accrualFor, closeFinishedCampaigns, refundRefusedPayments, releaseStaleCredit, payViewers };
