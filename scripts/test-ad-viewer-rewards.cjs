@@ -19,6 +19,7 @@ const {
   AD_VIEWER_PREFS_COLLECTION, AD_VIEWER_WATCH_COLLECTION, ADS_BETA_USERS,
 } = require('../utils/config');
 
+const { AD_PAYOUTS_COLLECTION: AD_PAYOUTS_COLLECTION_NAME } = require('../utils/config');
 const BASE = (process.argv[2] || 'http://127.0.0.1:3131') + '/advertise';
 const TESTER = ADS_BETA_USERS[0] || 'badadib';
 const OUTSIDER = 'hiveredcarpet';
@@ -129,6 +130,30 @@ const post = async (path, body) => {
     // rate is one number for everyone and shares are proportional.
     await watch.deleteMany({ viewer: { $regex: '^vrtest-' } });
     const { payViewers, periodContaining } = require('../services/adPayouts');
+
+    /* 🚨 PARK EVERY REAL UNPAID ROW FIRST.
+     *
+     * payViewers() settles ALL unpaid rows by design — there is deliberately no date
+     * filter, so a watch banked in an earlier period is still owed. That makes it
+     * impossible to scope by period: a synthetic pool run here would sweep in real
+     * viewers' watches, stamp them settled, and queue REAL pending payouts. With
+     * AD_PAYOUTS_ENABLED and an active key set, those get broadcast.
+     *
+     * This is not hypothetical: on 2026-09-02 this test paid a genuine viewer
+     * 1.777 HBD out of its own fake 20 HBD pool before anyone noticed.
+     */
+    const parked = await watch.find({ payoutId: null, viewer: { $not: /^vrtest-/ } })
+      .project({ _id: 1 }).toArray();
+    const parkedIds = parked.map((r) => r._id);
+    if (parkedIds.length) {
+      await watch.updateMany({ _id: { $in: parkedIds } }, { $set: { payoutId: '__test-parked' } });
+    }
+    const unpark = async () => {
+      if (parkedIds.length) {
+        await watch.updateMany({ _id: { $in: parkedIds } },
+          { $set: { payoutId: null }, $unset: { settledAt: '' } });
+      }
+    };
     const per = periodContaining(Date.now() - 3 * 864e5);
     await db.collection(require('../utils/config').AD_PAYOUTS_COLLECTION)
       .deleteMany({ periodKey: per.key, account: { $regex: '^vrtest-' } });
@@ -157,12 +182,23 @@ const post = async (path, body) => {
     await watch.deleteMany({ viewer: { $regex: '^vrtest-' } });
     await db.collection(require('../utils/config').AD_PAYOUTS_COLLECTION)
       .deleteMany({ periodKey: per.key, account: { $regex: '^vrtest-' } });
+    await unpark();
+    check('real viewers were NOT swept into the test pool',
+      await db.collection(require('../utils/config').AD_PAYOUTS_COLLECTION)
+        .countDocuments({ kind: 'viewer', account: { $not: /^vrtest-/ } }), 0);
+    check('  and their rows are unpaid again',
+      await watch.countDocuments({ payoutId: '__test-parked' }), 0);
 
     console.log('\n── the identity stream is separate from the anonymous one ──');
     const vd = await db.collection('view-durations').findOne({});
     check('view-durations still carries no viewer identity',
       ['viewer', 'username', 'user', 'account'].some((f) => vd && vd[f] !== undefined), false);
   } finally {
+    // If an assertion threw between parking and unparking, real rows would be left
+    // marked settled and would never be paid. Restore them whatever happened.
+    await watch.updateMany({ payoutId: '__test-parked' },
+      { $set: { payoutId: null }, $unset: { settledAt: '' } });
+    await db.collection(AD_PAYOUTS_COLLECTION_NAME).deleteMany({ kind: 'viewer', status: 'pending', account: { $regex: '^vrtest-' } });
     await cleanup();
     console.log('\ncleaned up its own rows.');
   }
