@@ -20,6 +20,7 @@ require('dotenv').config();
 const { ObjectId } = require('mongodb');
 const db = require('../utils/db');
 const cfg = require('../utils/config');
+const { parkRealRows } = require('./_realMoneyGuard.cjs');
 const { settlePeriod, periodContaining, accrualFor } = require('../services/adPayouts');
 
 const TAG = 'PAYOUT-TEST';
@@ -43,6 +44,9 @@ const near = (l, g, w, tol = 0.002) => { const ok = Math.abs(g - w) <= tol; if (
 
   const idA = new ObjectId();
   const idB = new ObjectId();
+  // Settlement has no date filter on viewer rows by design, so a synthetic pool here
+  // would reach real accounts. See scripts/_realMoneyGuard.cjs — this has bitten twice.
+  const restoreRealRows = await parkRealRows(d, cfg);
   try {
     // Both advertisers pay 50 HBD. A runs a short flight, B a long one — the exact
     // asymmetry that broke the old model.
@@ -102,6 +106,7 @@ const near = (l, g, w, tol = 0.002) => { const ok = Math.abs(g - w) <= tol; if (
     console.log('\n── nothing was sent ──');
     check('all payouts still pending', after.every((p) => p.status === 'pending'), true);
   } finally {
+    await restoreRealRows();
     await camps.deleteMany({ _id: { $in: [idA, idB] } });
     await imps.deleteMany({ sid: { $regex: `^${TAG}-` } });
     await outs.deleteMany({ account: { $regex: '^payout-test-' } });

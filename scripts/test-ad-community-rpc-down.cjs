@@ -28,6 +28,8 @@ const {
   AD_PAYOUT_PERIODS_COLLECTION,
 } = require('../utils/config');
 const { STATES } = require('../utils/adModel');
+const cfg = require('../utils/config');
+const { parkRealRows } = require('./_realMoneyGuard.cjs');
 
 const MARK = 'test-rpc-down';
 let failed = 0;
@@ -50,6 +52,9 @@ function check(label, got, want) {
   };
   await cleanup();
 
+  // Settlement has no date filter on viewer rows by design, so a synthetic pool here
+  // would reach real accounts. See scripts/_realMoneyGuard.cjs — this has bitten twice.
+  const restoreRealRows = await parkRealRows(db, cfg);
   try {
     const mid = new Date(period.start.getTime() + 864e5);
     const campaign = await db.collection(AD_CAMPAIGNS_COLLECTION).insertOne({
@@ -80,6 +85,7 @@ function check(label, got, want) {
       await db.collection(AD_IMPRESSIONS_COLLECTION)
         .countDocuments({ sid: { $regex: `^${MARK}` }, payoutId: null }), 10);
   } finally {
+    await restoreRealRows();
     await cleanup();
     console.log('\ncleaned up its own rows.');
   }
