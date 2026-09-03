@@ -21,7 +21,11 @@ const {
 const { CREATIVE_STATES } = require('../utils/adModel');
 
 const CDN = process.env.AD_CDN_GATEWAY || 'https://hotipfs-3speak-1.b-cdn.net/ipfs';
-const INTERVAL_MIN = parseInt(process.env.AD_CREATIVE_SYNC_INTERVAL_MIN, 10) || 5;
+// How often we check whether a spot has finished encoding. This is the whole delay an
+// advertiser sees between their upload being ready and the page saying so, and there is
+// no push from the encoder to shorten it. The sweep only touches creatives that are
+// still pending, so it costs nothing when nothing is uploading.
+const INTERVAL_MIN = parseInt(process.env.AD_CREATIVE_SYNC_INTERVAL_MIN, 10) || 1;
 const BATCH = parseInt(process.env.AD_CREATIVE_SYNC_BATCH, 10) || 40;
 
 async function runOnce() {
