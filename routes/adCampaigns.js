@@ -31,7 +31,7 @@ const {
   ADVERTISERS_COLLECTION, AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION,
   AD_PAYMENTS_COLLECTION, AD_PAYMENT_ACCOUNT,
   AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_SLOT_PERCENTS, AD_LENGTH_SECONDS,
-  AD_PRODUCTION_FEE_HBD, ADS_STAGE, AD_SLOT_MAX_SHARES,
+  AD_PRODUCTION_FEE_HBD, ADS_STAGE, AD_SLOT_MAX_SHARES, AD_SLOT_HOLD_HOURS,
 } = require('../utils/config');
 const {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, DAY_MS, ensureAdIndexes, priceForDays, ratePerDayFor,
@@ -266,6 +266,11 @@ router.get('/pricing', featureVisible, async (req, res) => {
       slotPercents: AD_SLOT_PERCENTS,
       maxCreativeSeconds: AD_LENGTH_SECONDS,
       productionFeeHbd: AD_PRODUCTION_FEE_HBD,
+      // How long a booking holds its position before payment. Sent rather than
+      // written into the page's copy, because a number in prose goes stale
+      // silently: the note there used to say slots were settled at approval,
+      // which stopped being true when booking started holding them.
+      slotHoldHours: AD_SLOT_HOLD_HOURS,
       hbdPerHive,
       // Flat tenancy, stated plainly so nobody arrives expecting a CPM.
       model: 'flat',
