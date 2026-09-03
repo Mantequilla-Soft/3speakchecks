@@ -1115,10 +1115,25 @@ router.post('/campaigns/:id/claim', featureVisible, express.json({ limit: '8kb' 
 
     const hbdPerHive = await getHbdPerHive();
     let credited = 0;
+    /* What actually ARRIVED, in native units, alongside the HBD valuation.
+     *
+     * 🚨 `paidHbd` is a VALUATION, not a balance. It is what the flight is worth in
+     * HBD, and pricing, servability and under-delivery credit are all measured
+     * against it — but the tokens in the payout account are whatever the advertiser
+     * actually sent. Paying an HBD-denominated obligation out of a HIVE-funded
+     * campaign is not a treasury inconvenience, it is impossible: the transfer fails.
+     *
+     * So the mix is carried through to settlement and paid out IN KIND. No
+     * conversion, no exchange exposure, and creators receive exactly the asset that
+     * was paid for their inventory.
+     */
+    const assets = { ...(campaign.paidAssets || {}) };
     for (const m of reserved) {
       const { amount, symbol } = parseAsset(m.amount);
       if (symbol === 'HBD') credited += amount;
       else if (symbol === 'HIVE') credited += amount * hbdPerHive;
+      else continue;   // not valued above, so not banked here either
+      assets[symbol] = Math.round(((assets[symbol] || 0) + amount) * 1000) / 1000;
     }
 
     let paidHbd = Math.round(((campaign.paidHbd || 0) + credited) * 1000) / 1000;
@@ -1159,7 +1174,7 @@ router.post('/campaigns/:id/claim', featureVisible, express.json({ limit: '8kb' 
     const fullyPaid = paidHbd + 1e-6 >= campaign.priceHbd;
     const window = fullyPaid ? windowFrom(campaign.requestedStartAt, campaign.days) : {};
 
-    const update = { paidHbd, updatedAt: new Date() };
+    const update = { paidHbd, paidAssets: assets, updatedAt: new Date() };
     if (fullyPaid) {
       // The flight clock starts now (or at the requested start), never at booking —
       // a campaign paid a week late should get its full run, not what is left of it.

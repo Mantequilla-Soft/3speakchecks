@@ -84,6 +84,86 @@ function accrualFor(campaign, start, end) {
   return earned * (overlap / (fe - fs));
 }
 
+/**
+ * The same accrual, but in the ASSETS the advertiser actually sent.
+ *
+ * 🚨 `paidHbd` is a valuation. An advertiser may pay in HIVE, and then an
+ * HBD-denominated payout is not merely awkward, it is impossible — the transfer
+ * fails for want of HBD. So a campaign's asset mix rides through settlement and
+ * everyone is paid IN KIND, proportionally.
+ *
+ * Scaled by the same time fraction as the HBD figure, so the two always agree about
+ * how much of a flight has been earned. Campaigns booked before `paidAssets`
+ * existed report nothing here; `assetSplitOf()` falls back to HBD for those.
+ */
+function accrualAssetsFor(campaign, start, end) {
+  const fs = new Date(campaign.startAt || 0).getTime();
+  const fe = new Date(campaign.endAt || 0).getTime();
+  if (!fs || !fe || fe <= fs) return {};
+  const overlap = Math.max(0, Math.min(fe, end.getTime()) - Math.max(fs, start.getTime()));
+  if (overlap <= 0) return {};
+  const fraction = overlap / (fe - fs);
+  const out = {};
+  for (const [symbol, amount] of Object.entries(campaign.paidAssets || {})) {
+    const n = Number(amount);
+    if (Number.isFinite(n) && n > 0) out[symbol] = n * fraction;
+  }
+  return out;
+}
+
+/**
+ * Turn a pool's asset totals into the fractions each asset represents.
+ *
+ * Falls back to all-HBD when a period's campaigns predate `paidAssets`, which keeps
+ * historical settlements behaving exactly as they did.
+ */
+function assetSplitOf(assetTotals) {
+  const total = Object.values(assetTotals).reduce((a, n) => a + n, 0);
+  if (!(total > 0)) return { HBD: 1 };
+  const out = {};
+  for (const [symbol, n] of Object.entries(assetTotals)) if (n > 0) out[symbol] = n / total;
+  return out;
+}
+
+/**
+ * A recipient's payout, in the NATIVE units of each asset the pool holds.
+ *
+ * 🚨 Takes a SHARE OF THE POOL, not an HBD figure, and multiplies it by each asset's
+ * own native pool. This is the whole point and it is easy to get wrong: "7 HBD worth
+ * of HIVE" is not "7 HIVE", so splitting an HBD number by a value ratio and labelling
+ * the pieces with symbols would silently overpay or underpay the HIVE leg by the
+ * exchange rate. Scaling native pools needs no rate at all, so the platform never
+ * takes a currency position and nothing depends on a price at payout time.
+ */
+function splitAmounts(shareOfPool, assetPool) {
+  return Object.entries(assetPool)
+    .map(([symbol, poolAmount]) => ({
+      symbol,
+      amount: Math.round(shareOfPool * poolAmount * 1000) / 1000,
+    }))
+    .filter((leg) => leg.amount > 0);
+}
+
+/**
+ * Each asset's share of a pool, in native units.
+ *
+ * `poolHbd` may exceed this period's own accruals because dust carried in from an
+ * earlier period rides along with it. That carry has no asset of its own — it is a
+ * remainder of an HBD figure — so it is paid in THIS period's mix, which is what the
+ * scale factor does. Without it the legs would not add up to what the recipient is
+ * owed.
+ */
+function assetPoolFor(assetTotals, sharePct, poolHbd, revenueHbd) {
+  const own = revenueHbd * (sharePct / 100);
+  const scale = own > 0 ? (poolHbd / own) : 1;
+  const out = {};
+  for (const [symbol, n] of Object.entries(assetTotals)) {
+    const v = n * (sharePct / 100) * scale;
+    if (v > 0) out[symbol] = v;
+  }
+  return Object.keys(out).length ? out : { HBD: poolHbd };
+}
+
 const isCommunity = (cat) => /^hive-\d+$/.test(String(cat || ''));
 
 /**
@@ -252,9 +332,20 @@ async function settlePeriod(db, period) {
   }).toArray();
 
   const revenue = campaigns.reduce((sum, c) => sum + accrualFor(c, period.start, period.end), 0);
+  // The same accrual expressed in the assets advertisers actually sent, so everyone
+  // is paid in kind rather than in an HBD figure we may not hold.
+  const assetTotals = {};
+  for (const c of campaigns) {
+    for (const [sym, n] of Object.entries(accrualAssetsFor(c, period.start, period.end))) {
+      assetTotals[sym] = (assetTotals[sym] || 0) + n;
+    }
+  }
+  const assetSplit = assetSplitOf(assetTotals);
   // Anything a previous period could not distribute (no impressions) rolls in here.
   const carriedIn = (await periods.findOne({ carryTo: period.key }))?.carriedOut || 0;
   const pool = revenue * (AD_CREATOR_POOL_PCT / 100) + carriedIn;
+  // Native-unit pool per asset, so payouts need no exchange rate at all.
+  const creatorAssetPool = assetPoolFor(assetTotals, AD_CREATOR_POOL_PCT, pool, revenue);
 
   /* ─── viewer share ──────────────────────────────────────────────────────
    * A slice of the PLATFORM's own cut, set aside for the people who watched.
@@ -364,7 +455,9 @@ async function settlePeriod(db, period) {
     await db.collection(AD_PAYOUTS_COLLECTION).updateOne(
       { periodKey: period.key, account: r.account },
       {
-        $set: { hbd: r.hbd, kind: r.kind, updatedAt: new Date() },
+        // `hbd` stays the HBD-equivalent total — it is what every report, test and
+        // dust threshold is expressed in. `amounts` is what actually gets sent.
+        $set: { hbd: r.hbd, amounts: splitAmounts(pool > 0 ? r.hbd / pool : 0, creatorAssetPool), kind: r.kind, updatedAt: new Date() },
         $setOnInsert: { status: 'pending', createdAt: new Date() },
       },
       { upsert: true },
@@ -378,11 +471,14 @@ async function settlePeriod(db, period) {
 
   // Viewers settle from the platform's slice, independently of the creator pool
   // above: a period can owe viewers even when it owed creators nothing.
-  const viewerPaid = await payViewers(db, period, viewerPoolHbd);
+  const viewerPaid = await payViewers(db, period, viewerPoolHbd,
+    assetPoolFor(assetTotals, (100 - AD_CREATOR_POOL_PCT) * (AD_VIEWER_POOL_PCT / 100), viewerPoolHbd, revenue));
 
   await periods.updateOne({ _id: period.key }, {
     $set: {
       startAt: period.start, endAt: period.end, revenueHbd: revenue, poolHbd: pool,
+      assetTotals,
+      assetSplit,
       viewerPoolHbd,
       viewerPoolStatus: viewerPaid.recipients ? 'paid' : 'earmarked',
       viewerRecipients: viewerPaid.recipients,
@@ -494,12 +590,22 @@ async function payPending(db) {
     // One transfer per recipient, marked individually: a batch that fails halfway
     // must never leave us unable to say who was paid.
     try {
-      await getClient().broadcast.sendOperations([['transfer', {
-        from: SOURCE_ACCOUNT,
-        to: p.account,
-        amount: `${fmt3(p.hbd)} HBD`,
-        memo: `3Speak ad revenue share (${p.kind}) — ${p.periodKey}`,
-      }]], key);
+      /* Pay in the assets the advertisers actually sent. `amounts` is written by
+       * settlePeriod; a row from before this existed has none, and falls back to
+       * the HBD figure so old pending rows still settle correctly. */
+      const legs = (Array.isArray(p.amounts) && p.amounts.length)
+        ? p.amounts
+        : [{ symbol: 'HBD', amount: p.hbd }];
+      for (const leg of legs) {
+        const amt = Math.round((Number(leg.amount) || 0) * 1000) / 1000;
+        if (amt <= 0) continue;
+        await getClient().broadcast.sendOperations([['transfer', {
+          from: SOURCE_ACCOUNT,
+          to: p.account,
+          amount: `${fmt3(amt)} ${leg.symbol}`,
+          memo: `3Speak ad revenue share (${p.kind}) — ${p.periodKey}`,
+        }]], key);
+      }
       await db.collection(AD_PAYOUTS_COLLECTION).updateOne({ _id: p._id }, { $set: { status: 'paid', paidAt: new Date() } });
       sent += 1;
     } catch (err) {
@@ -547,7 +653,7 @@ async function payPending(db) {
  * what stops a viewer being paid twice for the same watch if a settlement is retried
  * — the same job `payoutId` does for impressions on the creator side.
  */
-async function payViewers(db, period, viewerPoolHbd) {
+async function payViewers(db, period, viewerPoolHbd, viewerAssetPool = null) {
   if (!(viewerPoolHbd > 0)) return { recipients: 0, paidHbd: 0 };
   const watch = db.collection(AD_VIEWER_WATCH_COLLECTION);
 
@@ -580,7 +686,7 @@ async function payViewers(db, period, viewerPoolHbd) {
     await db.collection(AD_PAYOUTS_COLLECTION).updateOne(
       { periodKey: period.key, account: r.account },
       {
-        $set: { hbd: r.hbd, kind: 'viewer', updatedAt: new Date() },
+        $set: { hbd: r.hbd, amounts: splitAmounts(viewerPoolHbd > 0 ? r.hbd / viewerPoolHbd : 0, viewerAssetPool || { HBD: viewerPoolHbd }), kind: 'viewer', updatedAt: new Date() },
         $setOnInsert: { status: 'pending', createdAt: new Date() },
       },
       { upsert: true },
