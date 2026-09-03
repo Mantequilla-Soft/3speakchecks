@@ -405,7 +405,7 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
       if (requestedStart.getTime() < Date.now() - DAY_MS) {
         return res.status(400).json({
           success: false,
-          error: 'The earliest start is tomorrow — a flight has to be approved and paid before it can run.',
+          error: 'That start date has passed. Pick today or later; a flight begins when it is approved and paid.',
         });
       }
     }
