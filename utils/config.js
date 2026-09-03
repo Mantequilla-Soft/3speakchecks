@@ -486,7 +486,11 @@ module.exports = {
     // One-time fee for us producing the spot, on top of the flight price. Charged
     // once per campaign, not per day, and folded into the same on-chain payment so
     // an advertiser sends one transfer rather than two.
-    AD_PRODUCTION_FEE_HBD: parseFloat(process.env.AD_PRODUCTION_FEE_HBD) || 25,
+    //
+    // Not part of snapshotRates(), which covers per-format rates only, so this is
+    // always the current figure — an advertiser holding an early-adopter rate card
+    // still pays today's production fee.
+    AD_PRODUCTION_FEE_HBD: parseFloat(process.env.AD_PRODUCTION_FEE_HBD) || 100,
     // Accounts allowed to sign a creator's ad preference ON THEIR BEHALF, via the
     // posting authority the creator granted them. HiveSigner and Butter Auth
     // sessions hold no client-side key, so without this the users least able to
@@ -673,7 +677,12 @@ module.exports = {
     // them has to be refunded a flight they had every reason to think they owned.
     // With one, an abandoned booking cannot take a position off the market forever.
     AD_SLOT_HOLD_HOURS: parseInt(process.env.AD_SLOT_HOLD_HOURS) || 24,
-    AD_MIN_CAMPAIGN_DAYS: parseInt(process.env.AD_MIN_CAMPAIGN_DAYS) || 7,
+    // Shortest flight an advertiser can book. Independent of AD_PAYOUT_PERIOD_DAYS:
+    // revenue accrues by time overlap, so a one-day flight simply earns its whole
+    // price inside whichever settlement period contains it. What it does change is
+    // that a creator can now wait most of a week to be paid for a flight that ran for
+    // a day, which is a property of the settlement cadence, not of this number.
+    AD_MIN_CAMPAIGN_DAYS: parseInt(process.env.AD_MIN_CAMPAIGN_DAYS) || 1,
     AD_MAX_CAMPAIGN_DAYS: parseInt(process.env.AD_MAX_CAMPAIGN_DAYS) || 90,
     // A viewer sees at most one ad per this window, per campaign. Without it a
     // binge session would carry the same spot a dozen times and burn the audience.
