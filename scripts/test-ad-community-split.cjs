@@ -80,7 +80,9 @@ const LEGACY = { author: 'hiveredcarpet', permlink: 'ozmstwre', community: 'hive
   // would reach real accounts. See scripts/_realMoneyGuard.cjs — this has bitten twice.
   const restoreRealRows = await parkRealRows(db, cfg);
   try {
-    const mid = new Date(period.start.getTime() + 864e5);
+    // Mid-period, derived from the period: a fixed +1 day lands ON end when the
+    // period is a single day, and `$lt: end` then excludes every impression.
+    const mid = new Date(period.start.getTime() + (period.end.getTime() - period.start.getTime()) / 2);
     const campaign = await camps.insertOne({
       name: MARK, advertiserRef: MARK, hiveAccount: 'testadv', status: STATES.COMPLETE,
       paidHbd: 100, priceHbd: 100,

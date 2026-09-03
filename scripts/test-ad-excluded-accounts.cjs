@@ -47,7 +47,9 @@ const EXCLUDED = cfg.AD_EXCLUDED_ACCOUNTS[0];
   if (!EXCLUDED) { console.log('no excluded accounts configured — nothing to test'); process.exit(0); }
 
   const per = P.periodContaining(Date.now() - 60 * 864e5);
-  const mid = new Date(per.start.getTime() + 864e5);
+  // Mid-period, derived from the period: a fixed +1 day lands ON end when the period
+  // is a single day, and `$lt: end` then excludes every impression.
+  const mid = new Date(per.start.getTime() + (per.end.getTime() - per.start.getTime()) / 2);
 
   const clean = async () => {
     await camps.deleteMany({ name: MARK });

@@ -360,6 +360,13 @@ module.exports = {
     AD_EXCLUDED_ACCOUNTS: (process.env.AD_EXCLUDED_ACCOUNTS || 'badadib')
         .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
 
+    // Where the per-account `adRewardDisabled` flag lives. NOT the `users` collection:
+    // that one is keyed by email/user_id and holds no Hive username, so an account
+    // cannot be found in it. `contentcreators` is the per-Hive-account table and is
+    // where every other per-account flag already sits (canUpload, livestreamEnabled,
+    // hidden, banned), keyed by a lowercase `username`.
+    AD_REWARD_FLAG_COLLECTION: process.env.AD_REWARD_FLAG_COLLECTION || 'contentcreators',
+
     // ─── "Follow these" creator suggestions (/feeds/suggested-creators) ───────
     // A who-to-follow rail for the discover / interests feeds: creators who posted
     // interest-matching videos in the last SUGGEST_WINDOW_DAYS, ranked by the

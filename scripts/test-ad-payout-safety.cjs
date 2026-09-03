@@ -26,6 +26,8 @@ const check = (l, g, w) => {
 };
 
 const MARK = 'safety-test';
+/** A moment safely inside a period, whatever the configured period length is. */
+const midOf = (per) => new Date(per.start.getTime() + (per.end.getTime() - per.start.getTime()) / 2);
 
 (async () => {
   await connectToMongo();
@@ -88,7 +90,8 @@ const MARK = 'safety-test';
     console.log('\n-- 2. viewer below the minimum --');
     const per = P.periodContaining(Date.now() - 60 * 864e5);
     await wipe(per);
-    const mid = new Date(per.start.getTime() + 864e5);
+    // Mid-period, derived from the period — a fixed +1 day lands ON end at 1-day periods.
+    const mid = new Date(per.start.getTime() + (per.end.getTime() - per.start.getTime()) / 2);
     const c1 = await camps.insertOne({
       name: MARK, advertiserRef: MARK, hiveAccount: 'adv', status: 'complete',
       paidHbd: 20, priceHbd: 20, paidAssets: { HBD: 20 },
@@ -156,7 +159,7 @@ const MARK = 'safety-test';
       paidHbd: 100, priceHbd: 100, paidAssets: { HBD: 100 },
       startAt: perB.start, endAt: perB.end, createdAt: perB.start,
     });
-    await imps.insertOne({ sid: `${MARK}-b0`, campaignId: cB.insertedId, owner: `${MARK}-owner`, permlink: 'pb', completed: true, payoutId: null, completedAt: new Date(perB.start.getTime() + 864e5), at: new Date(perB.start.getTime() + 864e5) });
+    await imps.insertOne({ sid: `${MARK}-b0`, campaignId: cB.insertedId, owner: `${MARK}-owner`, permlink: 'pb', completed: true, payoutId: null, completedAt: midOf(perB), at: midOf(perB) });
     await P.settlePeriod(db, perB);
     const payB = await pays.findOne({ periodKey: perB.key, account: `${MARK}-owner` });
     const symbols = (payB.amounts || []).map((a) => a.symbol).sort();

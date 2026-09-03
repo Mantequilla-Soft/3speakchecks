@@ -53,7 +53,8 @@ const MARK = 'inkind-test';
   const run = async (label, paidAssets, expectSymbols, expectAmounts) => {
     const per = P.periodContaining(Date.now() - 60 * 864e5);
     await clean(per);
-    const mid = new Date(per.start.getTime() + 864e5);
+    // Mid-period, derived from the period — a fixed +1 day lands ON end at 1-day periods.
+    const mid = new Date(per.start.getTime() + (per.end.getTime() - per.start.getTime()) / 2);
     const c = await camps.insertOne({
       name: MARK, advertiserRef: MARK, hiveAccount: 'adv', status: 'complete',
       paidHbd: 100, priceHbd: 100, paidAssets,

@@ -56,7 +56,8 @@ function check(label, got, want) {
   // would reach real accounts. See scripts/_realMoneyGuard.cjs — this has bitten twice.
   const restoreRealRows = await parkRealRows(db, cfg);
   try {
-    const mid = new Date(period.start.getTime() + 864e5);
+    // Mid-period, derived from the period — see test-ad-community-split.
+    const mid = new Date(period.start.getTime() + (period.end.getTime() - period.start.getTime()) / 2);
     const campaign = await db.collection(AD_CAMPAIGNS_COLLECTION).insertOne({
       name: MARK, advertiserRef: MARK, hiveAccount: 'testadv', status: STATES.COMPLETE,
       paidHbd: 100, priceHbd: 100, startAt: period.start, endAt: period.end, createdAt: period.start,

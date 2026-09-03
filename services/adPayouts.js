@@ -35,7 +35,7 @@ const { getDb } = require('../utils/db');
 const {
   HIVE_RPC_ENDPOINTS, AD_CAMPAIGNS_COLLECTION, AD_IMPRESSIONS_COLLECTION,
   AD_PAYOUTS_COLLECTION, AD_PAYOUT_PERIODS_COLLECTION, AD_CREATOR_POOL_PCT,
-  AD_EXCLUDED_ACCOUNTS,
+  AD_EXCLUDED_ACCOUNTS, AD_REWARD_FLAG_COLLECTION,
   AD_DEFAULT_COMMUNITY_PCT, AD_CREATOR_PREFS_COLLECTION, AD_PAYMENT_ACCOUNT,
   AD_PAYOUTS_ENABLED, AD_PAYOUT_INTERVAL_H, AD_PAYOUT_MIN_HBD, AD_CREDIT_MIN_HBD, AD_PAYOUT_PERIOD_DAYS, AD_PAYMENTS_COLLECTION, AD_BOOKING_EXPIRY_DAYS,
   AD_VIEWER_POOL_PCT, AD_VIEWER_WATCH_COLLECTION,
@@ -344,6 +344,46 @@ async function resolveCommunities(db, pairs) {
   return { map, unresolved };
 }
 
+/**
+ * Accounts that must not RECEIVE a payout this run.
+ *
+ * Two sources, one answer:
+ *   - AD_EXCLUDED_ACCOUNTS, the platform's own accounts (badadib), from config.
+ *   - `contentcreators.adRewardDisabled: true`, set per account by an admin.
+ *
+ * 🚨 BLOCKED IS NOT OPTED OUT. A blocked account's videos still carry ads and still
+ * earn the advertiser their impressions; we simply do not send the money on. Opting
+ * OUT of ads is a different switch entirely (ad_creator_prefs), it is the creator's to
+ * set, and it removes their videos from what we sell. Never collapse the two: one is
+ * our decision about a transfer, the other is theirs about their videos.
+ *
+ * Batched deliberately. A settlement can hold thousands of impressions over a few
+ * hundred accounts, and a per-row lookup would be a round trip each.
+ *
+ * The flag is read as `=== true`, so a malformed value cannot silently withhold
+ * somebody's money — this decides whether a real person gets paid.
+ */
+async function rewardBlockedSet(db, accounts) {
+  const blocked = new Set(AD_EXCLUDED_ACCOUNTS);
+  const names = [...new Set(
+    accounts.map((a) => String(a || '').trim().toLowerCase()).filter(Boolean),
+  )];
+  if (!names.length) return blocked;
+  try {
+    const rows = await db.collection(AD_REWARD_FLAG_COLLECTION)
+      .find({ username: { $in: names }, adRewardDisabled: true }, { projection: { username: 1 } })
+      .toArray();
+    for (const r of rows) blocked.add(String(r.username).trim().toLowerCase());
+  } catch (err) {
+    // Failing open would pay someone an admin has said not to pay. Failing closed
+    // would withhold from everyone. Neither is acceptable silently, so refuse the
+    // settlement and let the next run retry — the money is not going anywhere.
+    console.error(`[adPayout] could not read reward flags: ${err && err.message}`);
+    throw err;
+  }
+  return blocked;
+}
+
 async function communitySharePctOf(db, owner) {
   const doc = await db.collection(AD_CREATOR_PREFS_COLLECTION)
     .findOne({ _id: owner }, { projection: { communitySharePct: 1 } });
@@ -456,14 +496,6 @@ async function settlePeriod(db, period) {
 
   const rate = pool / impressions.length;
 
-  const owed = new Map();
-  const add = (account, hbd, kind) => {
-    if (!account || hbd <= 0) return;
-    const cur = owed.get(account) || { hbd: 0, kind };
-    cur.hbd += hbd;
-    owed.set(account, cur);
-  };
-
   // A period can hold thousands of impressions across a handful of creators; each
   // lookup is a round trip, so cache by the key that actually varies.
   const prefCache = new Map();
@@ -486,6 +518,29 @@ async function settlePeriod(db, period) {
     return null;
   }
 
+  /* Who must not be paid. Resolved BEFORE anything is credited, and applied at the one
+   * funnel every credit goes through, so a creator, a community or anything added here
+   * later cannot bypass it.
+   *
+   * 🚨 The impression still counts in `rate` above. A blocked account's videos really
+   * did carry the ad and the advertiser really did pay for it, so withholding must not
+   * change what every OTHER creator earns per impression. Only the credit is dropped;
+   * that money stays with the platform. */
+  const blocked = await rewardBlockedSet(
+    db,
+    impressions.map((i) => i.owner).concat([...communityCache.values()]),
+  );
+
+  const owed = new Map();
+  const withheld = [];
+  const add = (account, hbd, kind) => {
+    if (!account || hbd <= 0) return;
+    if (blocked.has(String(account).trim().toLowerCase())) { withheld.push(account); return; }
+    const cur = owed.get(account) || { hbd: 0, kind };
+    cur.hbd += hbd;
+    owed.set(account, cur);
+  };
+
   for (const imp of impressions) {
     const owner = imp.owner;
     if (!owner) continue;
@@ -494,19 +549,14 @@ async function settlePeriod(db, period) {
 
     const community = communityCache.get(`${owner}/${imp.permlink}`) || null;
 
-    // An excluded owner is the platform's own account. Its impression is still one of
-    // `impressions.length` above, so `rate` — what every other creator is paid per
-    // impression — is unchanged by whether we happen to be running ads on ourselves.
-    // Only the credit is withheld; that money is never sent and stays where it is.
-    const ownerExcluded = AD_EXCLUDED_ACCOUNTS.includes(String(owner).toLowerCase());
-
     const communityCut = rate * (communityPct / AD_CREATOR_POOL_PCT);
     if (community) {
-      // The community is a different party and is paid on its own terms: the excluded
-      // account's videos still earn their community whatever that creator configured.
-      if (!ownerExcluded) add(owner, rate - communityCut, 'creator');
+      // The community is a different party, blocked or paid on its own terms: a blocked
+      // creator's videos still earn their community whatever that creator configured,
+      // and a blocked community does not cost the creator their own share.
+      add(owner, rate - communityCut, 'creator');
       add(community, communityCut, 'community');
-    } else if (!ownerExcluded) {
+    } else {
       // No community to pay — the whole share goes to the creator. They are the
       // other party to the split they configured, and keeping it would be the
       // self-serving reading of a choice they made for someone else's benefit.
@@ -566,6 +616,9 @@ async function settlePeriod(db, period) {
   }, { upsert: true });
 
   const total = payable.reduce((a, r) => a + r.hbd, 0);
+  if (withheld.length) {
+    console.log(`[adPayout] period ${period.key}: withheld from ${[...new Set(withheld)].map((a) => `@${a}`).join(', ')} (reward disabled)`);
+  }
   console.log(
     `[adPayout] period ${period.key}: ${fmt3(pool)} HBD pool / ${impressions.length} impressions `
     + `= ${rate.toFixed(5)} HBD each → ${payable.length} recipient(s), ${fmt3(total)} HBD`
@@ -797,8 +850,17 @@ async function payViewers(db, period, viewerPoolHbd, viewerAssetPool = null) {
   // Leaving their seconds in the denominator would hand part of a pool we earmarked
   // for viewers back to ourselves. Their rows are still claimed below, so they settle
   // once and are not re-read every period.
-  const isExcluded = (v) => AD_EXCLUDED_ACCOUNTS.includes(String(v || '').toLowerCase());
-  // Excluded rows are claimed on sight: they can never become payable, and an
+  /* Viewers we must not pay: the platform's own accounts, plus anyone an admin has
+   * flagged with `adRewardDisabled`. Their watching still counts as watching — nothing
+   * about their experience changes — we just do not send the money on.
+   *
+   * Unlike the creator side, their seconds come OUT of the denominator entirely. There
+   * the impression is inventory an advertiser paid for and the rate must not move; here
+   * the pool is a fixed sum earmarked for viewers, and leaving a blocked viewer's
+   * seconds in would quietly shrink everyone else's share to nobody's benefit. */
+  const blocked = await rewardBlockedSet(db, claimable.map((r) => r.viewer));
+  const isExcluded = (v) => blocked.has(String(v || '').trim().toLowerCase());
+  // Blocked rows are claimed on sight: they can never become payable, and an
   // unclaimed row is re-read on every settlement forever.
   const excludedIds = claimable.filter((r) => isExcluded(r.viewer)).map((r) => r._id);
   const claimExcluded = async () => {
