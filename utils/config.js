@@ -778,7 +778,21 @@ module.exports = {
     AD_PAYOUTS_ENABLED: parseBool(process.env.AD_PAYOUTS_ENABLED, false),
     AD_PAYOUTS_LIVE: parseBool(process.env.AD_PAYOUTS_LIVE, false),
     AD_PAYOUT_INTERVAL_H: parseInt(process.env.AD_PAYOUT_INTERVAL_H) || 24,
-    AD_PAYOUT_MIN_HBD: parseFloat(process.env.AD_PAYOUT_MIN_HBD) || 0.01,
+    // The smallest payout worth sending, as an HBD-equivalent. 0.001 is Hive's own
+    // precision for both HBD and HIVE, so this is the smallest amount that can exist
+    // on chain rather than a policy choice. Anything under it cannot be transferred at
+    // all; it is carried to the next period, never dropped.
+    // ⚠️ parseFloat||default means 0 falls back to the default. That is deliberate —
+    // a zero floor would queue transfers of 0.000 that every node rejects.
+    AD_PAYOUT_MIN_HBD: parseFloat(process.env.AD_PAYOUT_MIN_HBD) || 0.001,
+
+    // The smallest UNDER-DELIVERY SHORTFALL worth banking as advertiser credit. This is
+    // deliberately NOT the send minimum above: that one is a chain constraint (0.001 is
+    // the smallest amount Hive can represent), while this is a judgement about whether a
+    // credit line is worth existing. A credit of a tenth of a cent clutters an
+    // advertiser's ledger to no purpose, and it is never transferred, so precision does
+    // not bind it. Dropping the send floor must not quietly start banking dust.
+    AD_CREDIT_MIN_HBD: parseFloat(process.env.AD_CREDIT_MIN_HBD) || 0.01,
     // Payouts settle by PERIOD, not per campaign. Dividing a single campaign's fee
     // by its own impressions made a creator's rate depend on which campaign the
     // rotation happened to give them: 10 plays of a short expensive flight paid 20x

@@ -195,6 +195,21 @@ async function assertOurs(d, cfg, sid, ourCampaignId) {
     ok('impression opened', !!imp && imp.started === true);
     check('not yet counted as delivered', imp && imp.completed ? 'yes' : 'no', 'no');
 
+    /* The closing beacon is PACED: it cannot count until the spot has had time to
+     * actually play, so a script cannot bank a completed impression in one round trip
+     * (routes/adServe.js pacingRefusal). This test used to fire it immediately and then
+     * assert the impression had completed, so the four checks below had been failing
+     * against correct behaviour — which is the worst kind of red, because it makes the
+     * thing that proves creators can be paid at all look permanently broken.
+     *
+     * Wait out the spot the way a player does. */
+    const sessionDoc = await d.collection('ad_sessions').findOne({ sid });
+    const spotSeconds = Number(sessionDoc?.adDurationSeconds) || 0;
+    if (spotSeconds > 0) {
+      console.log(`   ..  waiting ${spotSeconds}s for the spot to play (pacing gate)`);
+      await new Promise((r) => setTimeout(r, (spotSeconds * 1000) + 750));
+    }
+
     const b2 = await fetch(`${BASE}/m/${sid}/b`, { redirect: 'manual' });
     check('closing segment redirects', b2.status, 302);
     imp = await d.collection(cfg.AD_IMPRESSIONS_COLLECTION).findOne({ sid });
