@@ -10,6 +10,18 @@
  * code — so it drives the same functions those routes call.
  */
 require('dotenv').config();
+
+/* 🚨 Run against a SCRATCH settings document, never the live one.
+ *
+ * This suite deletes the rates document and rewrites it several times. The running
+ * checker re-reads that same document every 60 seconds and hands whatever it finds to
+ * snapshotRates(), which stamps a copy onto every advertiser who registers — kept for a
+ * year by design. So an advertiser signing up while this test was mid-run would be
+ * priced at a test rate, permanently, and nothing would look wrong afterwards because
+ * the `finally` puts the real document back.
+ *
+ * Set before requiring config, which reads it once. */
+process.env.AD_SETTINGS_COLLECTION = process.env.AD_SETTINGS_TEST_COLLECTION || 'ad_settings_ratestest';
 const { connectToMongo, getDb } = require('../utils/db');
 const adSettings = require('../utils/adSettings');
 const { FORMATS, FORMAT_KEYS, rateFor, defaultRateFor, snapshotRates, rateCard } = require('../utils/adFormats');
@@ -129,8 +141,9 @@ function check(label, got, want) {
     check('an advertiser rate of 0 is ignored', rateFor({ rates: { video_roll: 0 } }, 'video_roll'), 3);
     check('an advertiser rate of "free" is ignored', rateFor({ rates: { video_roll: 'free' } }, 'video_roll'), 3);
   } finally {
-    if (original) await coll.replaceOne({ _id: adSettings.RATES_ID }, original, { upsert: true });
-    else await coll.deleteOne({ _id: adSettings.RATES_ID });
+    // Scratch collection: nothing to preserve, just remove what the test created.
+    await coll.deleteOne({ _id: adSettings.RATES_ID });
+    void original;
     await adSettings.refresh();
     console.log('\nrestored the settings document as found.');
   }
