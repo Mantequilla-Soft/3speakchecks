@@ -343,6 +343,23 @@ module.exports = {
     LEADERBOARD_EXCLUDED_USERS: (process.env.LEADERBOARD_EXCLUDED_USERS || 'badadib')
         .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
 
+    // Accounts that never RECEIVE an ad payout, as creator or as viewer. badadib is
+    // the platform's own ad account: crediting it is the platform paying itself, and
+    // on the viewer side it would take a slice of a pool we told viewers was theirs.
+    //
+    // 🚨 The two sides treat the excluded account's activity DIFFERENTLY, on purpose:
+    //   creator — its impressions STILL count in `impressions.length`, so the per
+    //     impression rate every other creator is paid at does not move, and the
+    //     forecast keeps matching what was actually served. Its own share is simply
+    //     never credited and stays with the platform.
+    //   viewer  — its watch seconds are dropped from the denominator entirely, so the
+    //     remaining viewers split the WHOLE viewer pool. Leaving them in would quietly
+    //     return part of an earmarked pool to us, which is the thing payViewers'
+    //     no-date-filter comment exists to prevent.
+    // Comma-separated, lowercased.
+    AD_EXCLUDED_ACCOUNTS: (process.env.AD_EXCLUDED_ACCOUNTS || 'badadib')
+        .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+
     // ─── "Follow these" creator suggestions (/feeds/suggested-creators) ───────
     // A who-to-follow rail for the discover / interests feeds: creators who posted
     // interest-matching videos in the last SUGGEST_WINDOW_DAYS, ranked by the

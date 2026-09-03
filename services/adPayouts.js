@@ -35,6 +35,7 @@ const { getDb } = require('../utils/db');
 const {
   HIVE_RPC_ENDPOINTS, AD_CAMPAIGNS_COLLECTION, AD_IMPRESSIONS_COLLECTION,
   AD_PAYOUTS_COLLECTION, AD_PAYOUT_PERIODS_COLLECTION, AD_CREATOR_POOL_PCT,
+  AD_EXCLUDED_ACCOUNTS,
   AD_DEFAULT_COMMUNITY_PCT, AD_CREATOR_PREFS_COLLECTION, AD_PAYMENT_ACCOUNT,
   AD_PAYOUTS_ENABLED, AD_PAYOUT_INTERVAL_H, AD_PAYOUT_MIN_HBD, AD_PAYOUT_PERIOD_DAYS, AD_PAYMENTS_COLLECTION, AD_BOOKING_EXPIRY_DAYS,
   AD_VIEWER_POOL_PCT, AD_VIEWER_WATCH_COLLECTION,
@@ -431,11 +432,19 @@ async function settlePeriod(db, period) {
 
     const community = communityCache.get(`${owner}/${imp.permlink}`) || null;
 
+    // An excluded owner is the platform's own account. Its impression is still one of
+    // `impressions.length` above, so `rate` — what every other creator is paid per
+    // impression — is unchanged by whether we happen to be running ads on ourselves.
+    // Only the credit is withheld; that money is never sent and stays where it is.
+    const ownerExcluded = AD_EXCLUDED_ACCOUNTS.includes(String(owner).toLowerCase());
+
     const communityCut = rate * (communityPct / AD_CREATOR_POOL_PCT);
     if (community) {
-      add(owner, rate - communityCut, 'creator');
+      // The community is a different party and is paid on its own terms: the excluded
+      // account's videos still earn their community whatever that creator configured.
+      if (!ownerExcluded) add(owner, rate - communityCut, 'creator');
       add(community, communityCut, 'community');
-    } else {
+    } else if (!ownerExcluded) {
       // No community to pay — the whole share goes to the creator. They are the
       // other party to the split they configured, and keeping it would be the
       // self-serving reading of a choice they made for someone else's benefit.
@@ -660,8 +669,20 @@ async function payViewers(db, period, viewerPoolHbd, viewerAssetPool = null) {
   // Everything banked and not yet settled. No date filter: a watch recorded in an
   // earlier period that was never paid is still owed, and dropping it would quietly
   // keep money we said belonged to viewers.
-  const rows = await watch.find({ payoutId: null }).toArray();
-  if (!rows.length) return { recipients: 0, paidHbd: 0 };
+  const claimable = await watch.find({ payoutId: null }).toArray();
+  if (!claimable.length) return { recipients: 0, paidHbd: 0 };
+
+  // Excluded accounts are dropped from the pool ENTIRELY, not just from the payout.
+  // Leaving their seconds in the denominator would hand part of a pool we earmarked
+  // for viewers back to ourselves. Their rows are still claimed below, so they settle
+  // once and are not re-read every period.
+  const rows = claimable.filter((r) => !AD_EXCLUDED_ACCOUNTS.includes(String(r.viewer || '').toLowerCase()));
+  if (!rows.length) {
+    // Only excluded viewers had anything banked. Claim regardless: an unclaimed row is
+    // re-read on every settlement forever, and these can never become payable.
+    await watch.updateMany({ payoutId: null }, { $set: { payoutId: period.key, settledAt: new Date() } });
+    return { recipients: 0, paidHbd: 0 };
+  }
 
   const totalSeconds = rows.reduce((a, r) => a + (Number(r.contentSeconds) || 0), 0);
   if (totalSeconds <= 0) return { recipients: 0, paidHbd: 0 };
