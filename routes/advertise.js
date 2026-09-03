@@ -505,6 +505,27 @@ router.post('/apply', featureVisible, express.json({ limit: '64kb' }), async (re
     // no endpoint has to take an account name and confirm whether it applied.
     const reference = crypto.randomBytes(9).toString('base64url');
 
+    /* An advertiser's deal follows THEM, not each product they open.
+     *
+     * A rate card is captured at registration so that raising the platform default
+     * never reprices anyone who already signed up. Applied per product, that promise
+     * broke the moment somebody opened a second one: the new product snapshotted
+     * today's platform rates, so an early advertiser on a founding discount silently
+     * went back to list price for anything they launched afterwards. They had not
+     * changed; only the number of products had.
+     *
+     * So a returning account inherits the rates its existing record carries. Newest
+     * first, because that is their CURRENT deal — an admin who repriced them meant the
+     * new number to apply, not the one they first signed up on.
+     *
+     * Rejected records are skipped: a refused application is not a relationship, and
+     * inheriting a rate from one would carry a deal nobody agreed to.
+     */
+    const sibling = await db.collection(ADVERTISERS_COLLECTION).findOne(
+      { hiveAccount, status: { $ne: 'rejected' }, rates: { $type: 'object' } },
+      { sort: { ratesSetAt: -1, createdAt: -1 }, projection: { rates: 1, reference: 1, ratesSetAt: 1 } },
+    );
+
     const doc = {
       reference,
       hiveAccount,
@@ -530,8 +551,14 @@ router.post('/apply', featureVisible, express.json({ limit: '64kb' }), async (re
       // advertisers and leaves this one where they are — which is the whole point:
       // an early advertiser keeps the rate they were offered. Raising theirs is a
       // deliberate act through POST /admin/advertisers/:id/rates.
-      rates: snapshotRates(),
-      ratesSource: 'registration',   // vs 'admin' once somebody edits it
+      rates: sibling ? { ...sibling.rates } : snapshotRates(),
+      // Three values now, and the distinction is worth keeping: 'registration' is the
+      // platform card of the day, 'inherited' is a deal carried from another product of
+      // the same advertiser, and 'admin' is one somebody set by hand.
+      ratesSource: sibling ? 'inherited' : 'registration',
+      // Which record it came from, so "why is this advertiser on this price" has an
+      // answer that does not require guessing from timestamps.
+      ratesFrom: sibling ? sibling.reference : null,
       ratesSetAt: new Date(),        // "since when has this advertiser been on this price?"
       createdAt: new Date(),
       updatedAt: new Date(),
