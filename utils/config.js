@@ -808,7 +808,25 @@ module.exports = {
     // the same 10 plays of a long cheap one. Pooling every campaign's accrued
     // revenue over a fixed window gives one rate per period for everyone, and pays
     // on a predictable cadence instead of whenever some advertiser's flight ends.
-    AD_PAYOUT_PERIOD_DAYS: parseInt(process.env.AD_PAYOUT_PERIOD_DAYS) || 7,
+    // How much time one settlement covers. Shorter pays people sooner, which matters
+    // now that a flight can be a single day.
+    //
+    // NOT one day, deliberately. Three reasons, and they all point the same way:
+    //   - the payout job runs every AD_PAYOUT_INTERVAL_H (24h), so a one-day period has
+    //     no headroom at all: one deferred run, and settlement is a whole period behind.
+    //     Deferral is normal, not exceptional — settlePeriod refuses to guess a
+    //     community when Hive RPC is unreachable, and waits.
+    //   - shorter windows mean smaller per-recipient amounts, so MORE people fall under
+    //     the minimum sendable amount and carry. Past a point, shortening the period
+    //     pays people less often rather than more.
+    //   - every period is an on-chain transfer per recipient. Seven days is ~4 a month
+    //     in someone's wallet, three is ~10, one is 30 of them too small to read.
+    //
+    // 🚨 Periods are epoch-anchored (floor(ts / PERIOD_MS)), so changing this re-derives
+    // every boundary AND every key. Safe to change while no period has settled; after
+    // that it orphans the carry chain, because a carryTo key written under the old
+    // length matches no period under the new one.
+    AD_PAYOUT_PERIOD_DAYS: parseInt(process.env.AD_PAYOUT_PERIOD_DAYS) || 3,
     AD_PAYOUT_PERIODS_COLLECTION: process.env.AD_PAYOUT_PERIODS_COLLECTION || 'ad_payout_periods',
     // How long an unpaid booking may hold credit before it is released back to the
     // advertiser's balance. Without this a booking that is created and abandoned

@@ -51,8 +51,12 @@ const near = (l, g, w, tol = 0.002) => { const ok = Math.abs(g - w) <= tol; if (
     // Both advertisers pay 50 HBD. A runs a short flight, B a long one — the exact
     // asymmetry that broke the old model.
     await camps.insertMany([
-      { _id: idA, name: `${TAG} A`, status: 'running', paidHbd: 50, priceHbd: 50, days: 7,
-        startAt: period.start, endAt: new Date(period.start.getTime() + 7 * 864e5),
+      /* A is the "fits entirely inside one period" case, so its flight is derived from
+       * the configured period rather than hardcoded. It was 7 days, which stopped
+       * fitting the moment the period became 3 and made this read as an accrual bug
+       * when accrual was doing exactly the right thing with a straddling flight. */
+      { _id: idA, name: `${TAG} A`, status: 'running', paidHbd: 50, priceHbd: 50, days: cfg.AD_PAYOUT_PERIOD_DAYS,
+        startAt: period.start, endAt: new Date(period.start.getTime() + cfg.AD_PAYOUT_PERIOD_DAYS * 864e5),
         slotPercent: 25, deliveredImpressions: 10, createdAt: new Date() },
       { _id: idB, name: `${TAG} B`, status: 'running', paidHbd: 50, priceHbd: 50, days: 90,
         startAt: period.start, endAt: new Date(period.start.getTime() + 90 * 864e5),
