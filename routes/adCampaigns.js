@@ -195,6 +195,12 @@ function publicCampaign(c, creative) {
     markets: c.markets || [],
     memo: c.memo,
     payTo: AD_PAYMENT_ACCOUNT,
+    /* The account this flight is booked under, and therefore the ONLY one whose
+     * transfer buys it. A payment from anywhere else is refused at claim and returned,
+     * because an unsigned registration is proved by paying from the account you claimed.
+     * Sent so the page can check the wallet it is about to sign with, rather than
+     * letting somebody discover the rule by having their money sent back. */
+    payFrom: c.hiveAccount || null,
     delivered: c.deliveredImpressions || 0,
     forecast: c.forecastImpressions ?? null,
     deliveryRate: c.deliveryRate ?? null,
