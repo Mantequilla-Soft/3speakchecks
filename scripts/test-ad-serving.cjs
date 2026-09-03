@@ -163,8 +163,26 @@ async function assertOurs(d, cfg, sid, ourCampaignId) {
     const t2 = await m2.text();
     check('variant served', m2.status, 200);
     check('discontinuity tags present', (t2.match(/#EXT-X-DISCONTINUITY/g) || []).length, 2);
-    ok('content segments absolutised to the CDN', (t2.match(/hotipfs-3speak-1\.b-cdn\.net/g) || []).length > 3,
-       `${(t2.match(/hotipfs-3speak-1\.b-cdn\.net/g)||[]).length} CDN segments`);
+    /* Every segment line must be absolute AND on a gateway a browser can actually read.
+     *
+     * This used to assert one specific hostname, hotipfs-3speak-1, and it passed only
+     * because the PREFERRED gateway was failing at the time and the code was falling
+     * back. When ipfs-3speak.b-cdn.net was fixed on the CDN side the splice got better
+     * and the test went red, which is exactly backwards.
+     *
+     * The real invariant is the one the code enforces in isBrowserSafe(): never sign a
+     * playlist pointing somewhere a browser cannot follow. ipfs.3speak.tv serves the
+     * bytes with no Access-Control-Allow-Origin, so a playlist naming it plays fine
+     * under curl and dies silently in the viewer's player. Assert that, not a host. */
+    const SAFE = ['ipfs-3speak.b-cdn.net', 'hotipfs-3speak-1.b-cdn.net', new URL(BASE).hostname];
+    const segLines = t2.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+    const notAbsolute = segLines.filter((l) => !/^https?:\/\//.test(l));
+    const unsafe = segLines.filter((l) => /^https?:\/\//.test(l) && !SAFE.includes(new URL(l).hostname));
+    const cdnCount = segLines.filter((l) => /^https?:\/\//.test(l) && new URL(l).hostname.endsWith('b-cdn.net')).length;
+    ok('every segment is absolute', notAbsolute.length === 0, `${notAbsolute.length} relative`);
+    ok('  and on a gateway a browser can read', unsafe.length === 0,
+      unsafe.length ? `unsafe: ${[...new Set(unsafe.map((l) => new URL(l).hostname))].join(', ')}` : '');
+    ok('  content segments point at the CDN', cdnCount > 3, `${cdnCount} CDN segments`);
     const beacons = t2.match(new RegExp(`/m/${sid}/(a|b|ab)`, 'g')) || [];
     ok('measured segments inserted', beacons.length >= 1, beacons.join(' '));
     // The splice must land at the booked position, not at the top.
