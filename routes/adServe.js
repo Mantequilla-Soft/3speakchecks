@@ -36,7 +36,7 @@ const { getDb } = require('../utils/db');
 const { adDecision } = require('../utils/adEligibility');
 const {
   AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_IMPRESSIONS_COLLECTION, ADVERTISERS_COLLECTION,
-  AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, ADS_STAGE,
+  AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, AD_BANNER_FREQUENCY_CAP_MINUTES, ADS_STAGE,
   AD_COOLDOWN_MINUTES, AD_PACING_ENABLED, AD_PACING_MIN_FRACTION, AD_SESSION_RATE_PER_MIN,
   AD_SHORTS_EVERY_N, AD_SHORTS_IGNORE_REPEAT_CAP,
   AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT,
@@ -848,13 +848,24 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // Frequency cap: the same viewer must not be shown the same spot again inside
     // the window. Without it a binge session carries one advertiser a dozen times
     // and burns the audience they paid for.
+    // Two windows, one query. A banner is cheaper to sit through than a roll — it
+    // shares the picture for a few seconds and never takes the viewer's time — so the
+    // window that stops a roll burning an audience is longer than a banner needs.
     let recent = new Set();
+    let recentBanner = new Set();
     const capKey = viewer ? { viewer } : (capId ? { capId } : null);
     if (capKey) {
       const since = new Date(Date.now() - AD_FREQUENCY_CAP_MINUTES * 60 * 1000);
+      const bannerSince = Date.now() - AD_BANNER_FREQUENCY_CAP_MINUTES * 60 * 1000;
       const rows = await db.collection(SESSIONS)
-        .find({ ...capKey, startedAt: { $gte: since } }, { projection: { campaignId: 1 } }).toArray();
-      recent = new Set(rows.map((r) => String(r.campaignId)));
+        .find({ ...capKey, startedAt: { $gte: since } }, { projection: { campaignId: 1, startedAt: 1 } }).toArray();
+      for (const r of rows) {
+        const id = String(r.campaignId);
+        recent.add(id);
+        // The banner window is the SHORTER of the two, so its set is a subset of the
+        // rows already fetched. Reading it back out of them costs nothing.
+        if (new Date(r.startedAt).getTime() >= bannerSince) recentBanner.add(id);
+      }
     }
 
     // A forged list can only cost a client ads, never earn it any, so it is trusted
@@ -881,7 +892,9 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       if (!c.advertiserRef || !approvedRefs.has(c.advertiserRef)) return false;
       const creative = byCampaign.get(String(c._id));
       if (servableReason(c, creative)) return false;
-      if (recent.has(String(c._id)) || claimedKeys.has(adKeyOf(c._id))) return false;
+      // Each format against its own window.
+      const cap = formatOf(c).key === 'video_banner' ? recentBanner : recent;
+      if (cap.has(String(c._id)) || claimedKeys.has(adKeyOf(c._id))) return false;
       if (c.markets && c.markets.length && country && !c.markets.includes(country)) return false;
 
       // Video-length targeting. A campaign that asked for a window does NOT serve
@@ -1327,28 +1340,41 @@ router.get('/:sid/s/:vk/:i', servingVisible, async (req, res) => {
     if (!Array.isArray(list) || i >= list.length) return res.status(404).send('not found');
     original = list[i];
 
-    // Pacing. The banner's segments are evenly spread across its run, so segment i
-    // cannot honestly be reached before i of them have played. A request that beats
-    // that still gets its bytes — the viewer's video is never the thing we break —
-    // it just is not counted, and the advertiser is not charged for it.
+    /* Pacing decides whether this COUNTS. It must never decide whether the banner
+     * appears.
+     *
+     * 🚨 `original` here is the plain CONTENT segment, not an ad segment. On the roll
+     * path redirecting to it on a refusal does what the rule says — the bytes go out,
+     * they just are not counted — because there the bytes ARE the ad. Here they are the
+     * viewer's video with no banner on it, so refusing removed the advertiser's banner
+     * from the picture entirely.
+     *
+     * And an HLS player refuses almost every one of them: the segments are fetched by
+     * the buffer, not by playback, so a player reading four of them inside two seconds
+     * fails the 3s, 6s and 9s marks and keeps only segment 0. A 20-second banner was
+     * showing for one segment, about six seconds, while the click target sat over the
+     * full 24 it was told about.
+     *
+     * So: burn and serve regardless, and let pacing gate the impression alone. An
+     * advertiser under-charged for a banner somebody genuinely saw is a far better
+     * failure than one who paid for twenty seconds and got six. */
     const perSeg = (Number(session.bannerDurationSeconds) || 0) / Math.max(1, list.length);
-    if (await pacingRefusal(db, session, sid, i * perSeg)) {
-      res.set('Cache-Control', 'no-store');
-      return res.redirect(302, original);
-    }
+    const counts = !(await pacingRefusal(db, session, sid, i * perSeg));
 
-    await recordDelivery({
-      db,
-      sid,
-      campaignId: session.banner.campaignId,
-      facts: {
+    if (counts) {
+      await recordDelivery({
+        db,
+        sid,
         campaignId: session.banner.campaignId,
-        owner: session.owner,
-        permlink: session.permlink,
-        country: session.country || null,
-      },
-      completed: i === list.length - 1,
-    });
+        facts: {
+          campaignId: session.banner.campaignId,
+          owner: session.owner,
+          permlink: session.permlink,
+          country: session.country || null,
+        },
+        completed: i === list.length - 1,
+      });
+    }
 
     const burned = await burnSegment({
       segmentUrl: original,

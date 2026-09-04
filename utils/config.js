@@ -785,6 +785,12 @@ module.exports = {
     AD_SLOT_MAX_SHARES: parseInt(process.env.AD_SLOT_MAX_SHARES) || 3,
 
     AD_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_FREQUENCY_CAP_MINUTES) || 30,
+    // The same cap for BANNERS, which are cheaper to sit through than a roll: a banner
+    // shares the picture for a few seconds and never takes the viewer's time away, so
+    // the window that stops a roll burning an audience is longer than a banner needs.
+    // Kept separate rather than derived, because the right number for one says nothing
+    // about the right number for the other.
+    AD_BANNER_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_BANNER_FREQUENCY_CAP_MINUTES) || 10,
     // An impression counts once the viewer has actually watched this much of the
     // spot. Measured server-side from segment fetches, never a client pixel.
     AD_IMPRESSION_MIN_SECONDS: parseFloat(process.env.AD_IMPRESSION_MIN_SECONDS) || 2,
