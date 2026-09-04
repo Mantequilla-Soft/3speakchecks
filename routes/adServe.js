@@ -1372,7 +1372,18 @@ router.get('/:sid/s/:vk/:i', servingVisible, async (req, res) => {
           permlink: session.permlink,
           country: session.country || null,
         },
-        completed: i === list.length - 1,
+        /* A banner is delivered the moment it is ON SCREEN, so ANY burned segment
+         * completes it. recordDelivery's transition guard makes that once per session
+         * however many segments follow.
+         *
+         * It used to complete on the LAST segment, borrowing the rule from a roll, where
+         * reaching the end means somebody sat through the whole spot. A banner is not sat
+         * through — it shares the picture with the video the viewer already chose. And the
+         * last segment is precisely the one pacing refuses most often, because a player
+         * fetches the whole banner in a burst from its buffer: measured, four sessions
+         * showed this banner and one was counted, and the one that counted only managed it
+         * ten minutes later when a re-request happened to arrive late enough. */
+        completed: true,
       });
     }
 
