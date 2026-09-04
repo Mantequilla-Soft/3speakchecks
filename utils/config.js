@@ -854,9 +854,15 @@ module.exports = {
      * hour either way.
      *
      * 🚨 Changing this re-derives every boundary AND every key, exactly like changing the
-     * period length. Safe while nothing has settled; afterwards it orphans the carry
-     * chain, because a carryTo written under the old anchor names a period that no
-     * longer exists.
+     * period length, and it does more than orphan the carry chain: it BLOCKS SETTLEMENT.
+     * A key is the start date, so moving a boundary within the same day gives the new
+     * window a key an already-settled period is holding — settlePeriod finds a settled
+     * doc under that key, returns immediately, and nothing after it ever settles. Seen
+     * for real: shifting 00:00 to 14:07 left fourteen impressions unpaid with no error
+     * anywhere, because a silent early return is what "already settled" looks like.
+     *
+     * So when this changes, the period documents have to go with it. Re-key them rather
+     * than delete: they record settlements that really moved money.
      */
     AD_PAYOUT_PERIOD_OFFSET_MIN: parseInt(process.env.AD_PAYOUT_PERIOD_OFFSET_MIN, 10) || 420,
     AD_PAYOUT_PERIODS_COLLECTION: process.env.AD_PAYOUT_PERIODS_COLLECTION || 'ad_payout_periods',
