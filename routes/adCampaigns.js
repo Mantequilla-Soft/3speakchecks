@@ -31,7 +31,7 @@ const {
   ADVERTISERS_COLLECTION, AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION,
   AD_PAYMENTS_COLLECTION, AD_PAYMENT_ACCOUNT,
   AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_SLOT_PERCENTS, AD_LENGTH_SECONDS,
-  AD_PRODUCTION_FEE_HBD, ADS_STAGE, AD_SLOT_MAX_SHARES, AD_SLOT_HOLD_HOURS,
+  AD_PRODUCTION_FEE_HBD, ADS_STAGE, AD_SLOT_MAX_SHARES, AD_SLOT_HOLD_HOURS, AD_DAY_CURVE_K,
 } = require('../utils/config');
 const {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, DAY_MS, ensureAdIndexes, priceForDays, ratePerDayFor,
@@ -277,6 +277,10 @@ router.get('/pricing', featureVisible, async (req, res) => {
       // silently: the note there used to say slots were settled at approval,
       // which stopped being true when booking started holding them.
       slotHoldHours: AD_SLOT_HOLD_HOURS,
+      // How steeply a longer flight gets cheaper: price is rate x seconds x days^K.
+      // Sent so the page computes the same number the server will write, rather than
+      // carrying its own copy of the formula — the quote and the charge must agree.
+      dayCurveK: AD_DAY_CURVE_K,
       hbdPerHive,
       // Flat tenancy, stated plainly so nobody arrives expecting a CPM.
       model: 'flat',

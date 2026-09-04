@@ -6,6 +6,34 @@ const parseBool = (v, fallback) => {
     return String(v).toLowerCase() === 'true';
 };
 
+/* ─── the ad revenue split ────────────────────────────────────────────────
+ * Resolved out here rather than inline in the object below, because the two
+ * numbers are not independent: together they must leave the platform a share it
+ * can actually pay them out of. Both are PERCENTAGE POINTS OF THE WHOLE, which is
+ * the way everybody says them out loud — "50 / 40 / 10".
+ */
+const CREATOR_POOL_PCT = (() => {
+    const n = parseFloat(process.env.AD_CREATOR_POOL_PCT);
+    return Number.isFinite(n) && n >= 0 && n <= 100 ? n : 50;
+})();
+
+const VIEWER_POOL_PCT = (() => {
+    const n = parseFloat(process.env.AD_VIEWER_POOL_PCT);
+    const wanted = Number.isFinite(n) && n >= 0 && n <= 100 ? n : 10;
+    // Clamped, not thrown. What is left after the creator side is what the platform
+    // has to give, and a config that asks for more than that must not be able to
+    // schedule a payout run that sends money we never took in. Clamping caps the
+    // damage at "the platform keeps nothing"; refusing to boot would take the whole
+    // checker down over one number, and it is loud either way.
+    const room = 100 - CREATOR_POOL_PCT;
+    if (wanted > room) {
+        console.warn(`[ads] AD_VIEWER_POOL_PCT=${wanted} leaves the platform nothing to `
+            + `pay it from (creator side is ${CREATOR_POOL_PCT}%). Clamped to ${room}%.`);
+        return room;
+    }
+    return wanted;
+})();
+
 module.exports = {
     // ─── Social-link verifier (merged from mantequilla-social-verifier) ───
     SOCIAL_LINKS_COLLECTION: process.env.SOCIAL_LINKS_COLLECTION || 'social_links',
@@ -530,10 +558,7 @@ module.exports = {
     // keep the rest. Both halves are optional — a creator who sets 0 keeps the lot.
     // Named rather than hardcoded because 50 otherwise ends up written into the
     // route, the signing endpoint, the UI and the message format independently.
-    AD_CREATOR_POOL_PCT: (() => {
-        const n = parseFloat(process.env.AD_CREATOR_POOL_PCT);
-        return Number.isFinite(n) && n >= 0 && n <= 100 ? n : 50;
-    })(),
+    AD_CREATOR_POOL_PCT: CREATOR_POOL_PCT,
     // What the community gets when a creator has never touched the setting: NOTHING.
     //
     // 🚨 This was an even split of the pool, and that was wrong. The argument for it
@@ -567,20 +592,20 @@ module.exports = {
     // collection rather than a surgical edit of the log we keep on all viewers.
     AD_VIEWER_WATCH_COLLECTION: process.env.AD_VIEWER_WATCH_COLLECTION || 'ad_viewer_watch',
 
-    // Share of the PLATFORM's own cut that is paid out to viewers.
+    // Share of AD REVENUE that is paid out to viewers, in points of the whole.
+    // At the defaults: creators+communities 50, viewers 10, platform 40.
     //
-    // 🚨 Taken from the platform pool, NOT from the creator pool. On 100 HBD of ad
-    // revenue the creator side still receives its full AD_CREATOR_POOL_PCT; the
-    // viewer share comes out of what we would otherwise keep. Funding it from the
-    // creator side would mean paying viewers with creators' money, which is not the
-    // deal creators agreed to.
+    // 🚨 This used to be a share of the PLATFORM's cut, so the 10 here paid viewers
+    // 5 of every 100 and the 50/40/10 split everyone had agreed on was quietly a
+    // 50/45/5. Changed 2026-09-04. If you are reading an older note, a period
+    // settled before that date earmarked half of what this number now means.
     //
-    // At the defaults (creator pool 50, viewer 10): creators+communities 50,
-    // viewers 5, platform 45.
-    AD_VIEWER_POOL_PCT: (() => {
-        const n = parseFloat(process.env.AD_VIEWER_POOL_PCT);
-        return Number.isFinite(n) && n >= 0 && n <= 100 ? n : 10;
-    })(),
+    // 🚨 Still funded from OUR side, which is the part that must not change: the
+    // creator side receives its full AD_CREATOR_POOL_PCT either way, and what the
+    // platform keeps is the remainder (100 - creator - viewer). Funding viewers out
+    // of the creator pool would be paying them with creators' money, which is not
+    // the deal creators agreed to.
+    AD_VIEWER_POOL_PCT: VIEWER_POOL_PCT,
 
     // --- Booking, payment, serving, payout ---
     AD_CAMPAIGNS_COLLECTION: process.env.AD_CAMPAIGNS_COLLECTION || 'ad_campaigns',
@@ -726,6 +751,32 @@ module.exports = {
     // price inside whichever settlement period contains it. What it does change is
     // that a creator can now wait most of a week to be paid for a flight that ran for
     // a day, which is a property of the settlement cadence, not of this number.
+    /* How steeply a longer flight gets cheaper per day.
+     *
+     * Price is rate x seconds x days^K. At K = 1 that is the old straight line, where
+     * thirty days costs thirty times one day. Below 1 the curve bends: each extra day
+     * costs a little less than the one before it, so a long booking is worth making.
+     *
+     * 0.85 leaves the ONE-DAY price untouched (1^K is 1, whatever K is) and discounts
+     * from there — about 17% off three days, 26% off a week, 39% off a month. The entry
+     * price is the one an advertiser judges us on, so the discount is funded by longer
+     * flights rather than by the cheapest thing on the card.
+     *
+     * ⚠️ Delivery stays LINEAR. A thirty-day flight still gets thirty days of plays and
+     * its forecast still says so; only the price bends. That is the whole trade: unsold
+     * slot time earns nothing and cannot be stockpiled, so discounting duration to fill
+     * it is worth more than holding the line.
+     *
+     * 🚨 Sent to the page as `dayCurveK` and used from there, never re-declared in the
+     * frontend. The quote shown and the price written have to be the same arithmetic.
+     */
+    AD_DAY_CURVE_K: (() => {
+      const k = parseFloat(process.env.AD_DAY_CURVE_K);
+      // Outside (0, 1] this stops being a volume discount: above 1 it PENALISES long
+      // flights, at or below 0 it inverts or divides by nothing.
+      return Number.isFinite(k) && k > 0 && k <= 1 ? k : 0.85;
+    })(),
+
     AD_MIN_CAMPAIGN_DAYS: parseInt(process.env.AD_MIN_CAMPAIGN_DAYS) || 1,
     AD_MAX_CAMPAIGN_DAYS: parseInt(process.env.AD_MAX_CAMPAIGN_DAYS) || 90,
     // A viewer sees at most one ad per this window, per campaign. Without it a

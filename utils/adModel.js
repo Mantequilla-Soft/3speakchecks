@@ -12,8 +12,7 @@
 const {
   AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_PAYMENTS_COLLECTION,
   AD_IMPRESSIONS_COLLECTION, AD_PAYOUTS_COLLECTION,
-  AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_LENGTH_SECONDS,
-} = require('./config');
+  AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_LENGTH_SECONDS, AD_DAY_CURVE_K } = require('./config');
 const { getDb } = require('./db');
 const { formatOf, defaultRateFor, DEFAULT_FORMAT } = require('./adFormats');
 
@@ -132,7 +131,15 @@ function priceForDays(days, ratePerSecondDay, spotSeconds) {
   // zero: a bad number must never hand somebody a free flight.
   const seconds = Number(spotSeconds);
   const secs = Number.isFinite(seconds) && seconds > 0 ? seconds : AD_LENGTH_SECONDS;
-  return Math.round(days * perSecondDay * secs * 1000) / 1000;
+  /* days^K, not days. Each extra day costs slightly less than the one before it, so a
+   * longer booking is worth making — see AD_DAY_CURVE_K. At K = 1 this is the straight
+   * line it replaced, and a one-day flight is unaffected at any K because 1^K is 1.
+   *
+   * Guarded against a nonsensical day count for the same reason the rate and length are:
+   * a bad number must never produce a free flight. */
+  const d = Number(days);
+  const chargeableDays = Number.isFinite(d) && d > 0 ? d ** AD_DAY_CURVE_K : 0;
+  return Math.round(chargeableDays * perSecondDay * secs * 1000) / 1000;
 }
 
 function validDayCount(days) {

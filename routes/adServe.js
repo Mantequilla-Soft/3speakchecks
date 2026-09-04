@@ -734,9 +734,20 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         .find({ reference: { $in: refsG }, status: 'approved' }, { projection: { reference: 1 } })
         .toArray()).map((a) => a.reference));
 
+      /* The cap counts spots they ACTUALLY WATCHED, not requests we answered.
+       *
+       * 🚨 Counting sessions here left the gate wide open. A gate impression is only
+       * written when the upload lands (see /:sid/posted), but a session row is written
+       * the moment the studio asks — so opening the studio, going back, and opening it
+       * again inside the window burned the cap on a spot nobody watched and served
+       * `no_eligible_campaign` the second time. The client fails open by design, so the
+       * second attempt posted with no ad at all. Reload twice and the gate was gone.
+       *
+       * Impressions are the honest unit: one completed spot per campaign per account per
+       * window, and an abandoned studio visit costs the creator nothing and re-serves. */
       const sinceG = new Date(Date.now() - AD_FREQUENCY_CAP_MINUTES * 60 * 1000);
-      const seenG = new Set((await dbG.collection(SESSIONS)
-        .find({ viewer: uploader, startedAt: { $gte: sinceG } }, { projection: { campaignId: 1 } })
+      const seenG = new Set((await dbG.collection(AD_IMPRESSIONS_COLLECTION)
+        .find({ owner: uploader, completed: true, completedAt: { $gte: sinceG } }, { projection: { campaignId: 1 } })
         .toArray()).map((r) => String(r.campaignId)));
 
       const fitG = candsG.filter((x) => x.advertiserRef && okG.has(x.advertiserRef)
@@ -1594,7 +1605,16 @@ router.get('/:sid/short.m3u8', servingVisible, async (req, res) => {
     if (!/^[0-9a-f]{32}$/.test(sid)) return res.status(400).send('bad session');
 
     const session = await getDb().collection(SESSIONS).findOne({ sid });
-    if (!session || session.surface !== 'shorts') return res.status(404).send('expired');
+    /* Shorts AND the pre-upload gate. Both are standalone spots rather than something
+     * spliced into content, so both are served by this playlist — the gate's session
+     * hands out exactly this URL.
+     *
+     * 🚨 This read `!== 'shorts'` and 404'd every gate manifest. The gate fails open on
+     * a load error, by design, so the spot never appeared and Post Video unlocked
+     * immediately. A 404 here is silent: nothing logs, and the gate simply looks off. */
+    if (!session || (session.surface !== 'shorts' && session.surface !== 'upload')) {
+      return res.status(404).send('expired');
+    }
     if (!session.adManifestUrl) return res.status(404).send('no spot on this session');
 
     const segments = await loadAdSegments(session.adManifestUrl);

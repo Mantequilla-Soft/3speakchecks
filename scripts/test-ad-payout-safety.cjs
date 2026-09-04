@@ -98,26 +98,43 @@ const midOf = (per) => new Date(per.start.getTime() + (per.end.getTime() - per.s
       startAt: per.start, endAt: per.end, createdAt: per.start,
     });
     await imps.insertOne({ sid: `${MARK}-i0`, campaignId: c1.insertedId, owner: `${MARK}-owner`, permlink: 'p0', completed: true, payoutId: null, completedAt: mid, at: mid });
-    /* Viewer pool on 20 HBD is 1.00 HBD. One heavy viewer and twenty casual ones, each
-     * with 5s of a 10,100s total — 0.000495 HBD apiece, under the 0.001 floor. That is
-     * the shape this actually takes in production: a long tail of people who watched
-     * something, qualified, and individually cannot be sent anything yet. A single
-     * small viewer would not do, because one viewer's unpayable share is by definition
-     * under the floor and rounds to nothing; it is their SUM that has to survive. */
-    await watch.insertOne({ viewer: `${MARK}-whale`, owner: 'x', permlink: `${MARK}-w0`, contentSeconds: 10000, watchedPct: 90, payoutId: null });
-    await watch.insertMany(Array.from({ length: 20 }, (_, i) => (
-      { viewer: `${MARK}-minnow${i}`, owner: 'x', permlink: `${MARK}-m${i}`, contentSeconds: 5, watchedPct: 90, payoutId: null }
+    /* One heavy viewer and twenty casual ones. That is the shape this takes in
+     * production: a long tail of people who watched something, qualified, and
+     * individually cannot be sent anything yet. A single small viewer would not do,
+     * because one viewer's unpayable share is by definition under the floor and rounds
+     * to nothing; it is their SUM that has to survive.
+     *
+     * ⚠️ Two conditions have to hold at once, and they pull against each other.
+     * EACH minnow must fall under the floor, and their SUM must be big enough to see.
+     * Payouts round to three decimals and the floor is now 0.001, so "under the
+     * minimum" means under half a milli-HBD — a share of 0.00099 rounds UP to the
+     * floor and is paid. An earlier fixture used 5s against 10,000s, which was under
+     * the floor at 0.01 and silently stopped testing anything when the floor dropped.
+     *
+     * 200 minnows on 1s against a 4,800s whale gives each of them 0.0004 HBD of a
+     * 2 HBD pool — rounds to nothing — while their combined 0.08 HBD is far too large
+     * to be mistaken for a rounding artefact in the carry. */
+    const MINNOWS = 200;
+    await watch.insertOne({ viewer: `${MARK}-whale`, owner: 'x', permlink: `${MARK}-w0`, contentSeconds: 4800, watchedPct: 90, payoutId: null });
+    await watch.insertMany(Array.from({ length: MINNOWS }, (_, i) => (
+      { viewer: `${MARK}-minnow${i}`, owner: 'x', permlink: `${MARK}-m${i}`, contentSeconds: 1, watchedPct: 90, payoutId: null }
     )));
     await P.settlePeriod(db, per);
+    const payRows = await pays.find({ periodKey: per.key }).toArray();
+    const by = (a) => payRows.find((r) => r.account === a);
     const minnowRow = await watch.findOne({ viewer: `${MARK}-minnow0` });
     const whaleRow = await watch.findOne({ viewer: `${MARK}-whale` });
     check('viewers under the minimum are NOT paid', await pays.countDocuments({ account: { $regex: `^${MARK}-minnow` } }), 0);
     check('  and their rows stay UNCLAIMED so they keep earning', minnowRow.payoutId, null);
-    check('  all 20 of them', await watch.countDocuments({ viewer: { $regex: `^${MARK}-minnow` }, payoutId: null }), 20);
+    check('  all of them', await watch.countDocuments({ viewer: { $regex: `^${MARK}-minnow` }, payoutId: null }), MINNOWS);
     check('  the paid viewer IS claimed', whaleRow.payoutId, per.key);
     const perDoc = await periods.findOne({ _id: per.key });
-    check('  their combined share is carried, not kept', perDoc.viewerCarriedOut, 0.01);
-    check('  and the carry names its asset', perDoc.viewerCarriedOutAssets, { HBD: 0.01 });
+    // Derived, not hardcoded: whatever the twenty could not be sent must be carried,
+    // so this holds at any pool percentage or floor.
+    const unpaid = Math.round((perDoc.viewerPoolHbd - (by(`${MARK}-whale`)?.hbd ?? 0)) * 1000) / 1000;
+    check('  their combined share is carried, not kept', Math.round(perDoc.viewerCarriedOut * 1000) / 1000, unpaid);
+    check('  the carry is material, not a rounding crumb', perDoc.viewerCarriedOut > 0.01, true);
+    check('  and the carry names its asset', Object.keys(perDoc.viewerCarriedOutAssets || {}), ['HBD']);
 
     /* ── 3. revenue with no impressions still settles ─────────────────────── */
     console.log('\n-- 3. a period that took revenue and served nothing --');

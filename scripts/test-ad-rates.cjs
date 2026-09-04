@@ -26,6 +26,15 @@ const { connectToMongo, getDb } = require('../utils/db');
 const adSettings = require('../utils/adSettings');
 const { FORMATS, FORMAT_KEYS, rateFor, defaultRateFor, snapshotRates, rateCard } = require('../utils/adFormats');
 const { priceForDays, ratePerDayFor } = require('../utils/adModel');
+const { AD_DAY_CURVE_K } = require('../utils/config');
+
+/* What a flight SHOULD cost, written out longhand.
+ *
+ * These used to say `7 * rate * seconds`, which stopped being the price the day the
+ * day-curve landed and turned four passing assertions into four failures that looked
+ * like a pricing bug. Stating the formula once, here, means a future change to the
+ * curve moves the expectations with it instead of against them. */
+const expect = (days, rate, secs) => Math.round((days ** AD_DAY_CURVE_K) * rate * secs * 1000) / 1000;
 const { AD_SETTINGS_COLLECTION } = require('../utils/config');
 
 let failed = 0;
@@ -48,14 +57,50 @@ function check(label, got, want) {
     await coll.deleteOne({ _id: adSettings.RATES_ID });
     await adSettings.refresh();
     check('no stored rate falls back to the built-in', defaultRateFor('video_roll'), builtIn);
-    check('a 10s spot for 7 days at the built-in rate', priceForDays(7, null, 10), 7 * builtIn * 10);
+    check('a 10s spot for 7 days at the built-in rate', priceForDays(7, null, 10), expect(7, builtIn, 10));
 
     // 2. A stored value wins, with no restart and no env change.
     await adSettings.setRate('video_roll', 3, 'test');
     check('stored rate is what a booking is quoted', defaultRateFor('video_roll'), 3);
-    check('the price follows it', priceForDays(7, null, 10), 210);
+    check('the price follows it', priceForDays(7, null, 10), expect(7, 3, 10));
     check('an advertiser with no deal gets it', rateFor(null, 'video_roll'), 3);
     check('and so does the legacy roll-rate helper', ratePerDayFor(null), 3);
+
+
+    // 2b. The day curve: a longer flight costs less per day, and only that.
+
+    //
+
+    // ⚠️ The one-day price is load-bearing. It is the number an advertiser judges the
+
+    // platform on and the one every rate card quotes, so the curve has to leave it
+
+    // exactly where the straight line put it and take the discount out of duration.
+
+    const oneDay = priceForDays(1, 3, 10);
+
+    check('one day is untouched by the curve', oneDay, 3 * 10);
+
+    check('  seven days costs less than seven of them', priceForDays(7, 3, 10) < oneDay * 7, true);
+
+    check('  but more in total than one', priceForDays(7, 3, 10) > oneDay, true);
+
+    check('  and thirty is cheaper per day than seven',
+
+      priceForDays(30, 3, 10) / 30 < priceForDays(7, 3, 10) / 7, true);
+
+    // Spot LENGTH stays linear. Only duration is discounted; a spot twice as long is
+
+    // twice the airtime on every single play and is charged as such.
+
+    check('  a 20s spot is twice a 10s spot, at any length of flight',
+
+      priceForDays(30, 3, 20), Math.round(priceForDays(30, 3, 10) * 2 * 1000) / 1000);
+
+    // A nonsensical day count must never come out free.
+
+    check('  zero days is not a free flight', priceForDays(0, 3, 10), 0);
+
 
     // 3. Each format is independent — repricing the roll must not move the banner.
     check('banner untouched by a roll change', defaultRateFor('video_banner'), FORMATS.video_banner.ratePerSecondDayHbd);
@@ -119,13 +164,13 @@ function check(label, got, want) {
     check('the platform rate rose', defaultRateFor('video_roll'), 2.5);
     check('the early advertiser keeps their roll rate', rateFor(early, 'video_roll'), 1.5);
     check('  and their banner rate', rateFor(early, 'video_banner'), 0.25);
-    check('  and their flight price', priceForDays(7, rateFor(early, 'video_roll'), 10), 105);
+    check('  and their flight price', priceForDays(7, rateFor(early, 'video_roll'), 10), expect(7, 1.5, 10));
 
     // Somebody registering now pays the new price.
     const late = { rates: snapshotRates(), ratesSource: 'registration' };
     check('a new advertiser pays the new rate', rateFor(late, 'video_roll'), 2.5);
     check('  and is quoted more for the same flight',
-      priceForDays(7, rateFor(late, 'video_roll'), 10), 175);
+      priceForDays(7, rateFor(late, 'video_roll'), 10), expect(7, 2.5, 10));
 
     // A year later: clearing their own rate drops them onto the platform rate AND
     // keeps them tracking it, which storing a copy of today's number would not.
