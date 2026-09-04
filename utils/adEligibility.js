@@ -118,6 +118,22 @@ async function adDecision({ viewer, owner }) {
     }
   }
 
+  /* A creator never sees an ad on their own video.
+   *
+   * They are the one person guaranteed to watch it over and over — checking the
+   * thumbnail, re-reading the title, making sure the encode came out right — and every
+   * one of those replays was an impression an advertiser paid for and the creator
+   * earned from. Effortless self-farming, billed to the advertiser, and it showed up
+   * the first day the gate ran live: @badadib opening their own video booked a roll and
+   * a banner off one playback.
+   *
+   * Free to check and it can never need a database, so it goes before the premium read.
+   *
+   * ⚠️ NOT the pre-upload gate, where the uploader IS the intended audience. That
+   * surface returns in routes/adServe.js long before it reaches this.
+   */
+  if (viewer && norm(viewer) === norm(owner)) return { ads: false, reason: 'own_video' };
+
   const premium = await isPremiumViewer(viewer);
   // null = the premium set could not be read. Fail safe: no ad. An ad withheld
   // costs us a fraction of a cent; an ad in front of a subscriber costs trust.
