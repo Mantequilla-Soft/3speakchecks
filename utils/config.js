@@ -687,6 +687,20 @@ module.exports = {
     // Backstop the hold cannot provide: it stops publish-and-delete, not someone
     // posting thirty real-but-worthless videos a day. Deliberately far above what any
     // genuine creator will hit in one payout period.
+    /* Who sees the PRE-UPLOAD spot, by the account doing the uploading.
+     *
+     * 🚨 OPPOSITE DEFAULT TO ADS_ALLOWED_OWNERS, deliberately. There, an explicit empty
+     * value DISABLES the allowlist and opens ads to every creator. Here an empty value
+     * means NOBODY sees the gate. This one stands between a creator and their own
+     * upload, so the failure that costs least is showing it to too few people, not too
+     * many — and a brand-new surface should not be able to open itself to everyone by
+     * someone clearing a variable.
+     */
+    AD_GATE_ALLOWED_UPLOADERS: (process.env.AD_GATE_ALLOWED_UPLOADERS === undefined
+      ? 'ashenadib'
+      : process.env.AD_GATE_ALLOWED_UPLOADERS)
+      .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
+
     AD_GATE_MAX_CREDITS_PER_PERIOD: parseInt(process.env.AD_GATE_MAX_CREDITS_PER_PERIOD) || 10,
     // A booked-but-unpaid campaign holds its slot this long. Without a hold, two
     // advertisers can book the same position and both then pay for it, and one of

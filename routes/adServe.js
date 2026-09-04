@@ -33,10 +33,10 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const { getDb } = require('../utils/db');
-const { adDecision } = require('../utils/adEligibility');
+const { adDecision, isPremiumViewer } = require('../utils/adEligibility');
 const {
   AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_IMPRESSIONS_COLLECTION, ADVERTISERS_COLLECTION,
-  AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, AD_BANNER_FREQUENCY_CAP_MINUTES, ADS_STAGE,
+  AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, AD_BANNER_FREQUENCY_CAP_MINUTES, AD_GATE_ALLOWED_UPLOADERS, ADS_STAGE,
   AD_COOLDOWN_MINUTES, AD_PACING_ENABLED, AD_PACING_MIN_FRACTION, AD_SESSION_RATE_PER_MIN,
   AD_SHORTS_EVERY_N, AD_SHORTS_IGNORE_REPEAT_CAP,
   AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT,
@@ -663,15 +663,133 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     const contentManifestUrl = str(b.manifestUrl, 2048);
     // Which surface is asking. 'watch' is the default and the only one that stitches;
     // 'shorts' is answered by its own branch below and never reaches the splicer.
-    const surface = str(b.surface, 16) === 'shorts' ? 'shorts' : 'watch';
-    if (!ID_RE.test(owner) || !ID_RE.test(permlink)) {
+    const rawSurface = str(b.surface, 16);
+    const surface = rawSurface === 'shorts' ? 'shorts' : (rawSurface === 'upload' ? 'upload' : 'watch');
+    /* The pre-upload gate has no video behind it. It runs before anything is posted, so
+     * there is no owner and no permlink to validate, and demanding them would reject
+     * every honest request from the surface. */
+    if (surface !== 'upload' && (!ID_RE.test(owner) || !ID_RE.test(permlink))) {
       return res.status(400).json({ error: 'Invalid owner/permlink' });
     }
-    // A shorts spot is its own item in the feed, so there is no content manifest to
-    // splice into and none is required of the caller.
-    if (surface !== 'shorts' && !/^https:\/\//i.test(contentManifestUrl)) {
+    // A shorts spot is its own item in the feed, and the pre-upload gate runs before
+    // any video exists at all, so neither has a content manifest to splice into and
+    // neither is asked for one.
+    if (surface === 'watch' && !/^https:\/\//i.test(contentManifestUrl)) {
       return res.status(400).json({ error: 'manifestUrl must be an https URL' });
     }
+    /* ── THE PRE-UPLOAD GATE ───────────────────────────────────────────────────
+     *
+     * A spot a creator watches before they may post. Like shorts, nothing is stitched:
+     * the spot IS the item, so this returns before the splicer.
+     *
+     * 🚨 IT STANDS BETWEEN SOMEBODY AND THEIR OWN UPLOAD. Every other surface interrupts
+     * consumption; this one interrupts work. So it fails OPEN in every direction: no
+     * campaign, no creative, an unreadable premium state, a database that will not
+     * answer — all of them return `ad: null` and the upload proceeds. The client is
+     * built to match: no ad means post immediately.
+     *
+     * No `owner` is recorded on the impression, and that is deliberate rather than an
+     * omission. There is no creator here — nobody's video is carrying this — so there is
+     * no creator share to pay, and settlePeriod already skips an ownerless impression
+     * while still counting it toward the rate. Crediting the UPLOADER instead would pay
+     * people to start uploads they never finish.
+     */
+    if (surface === 'upload') {
+      const uploader = viewer;
+      if (!uploader) return res.json({ ad: null, reason: 'no_uploader' });
+      if (!AD_GATE_ALLOWED_UPLOADERS.includes(uploader)) {
+        return res.json({ ad: null, reason: 'uploader_not_in_trial' });
+      }
+      // Pro subscribers are never gated. Read through the same helper the watch surface
+      // uses so "premium" means one thing across the system, and an unreadable answer
+      // withholds the ad rather than risking one in front of a subscriber.
+      const premium = await isPremiumViewer(uploader);
+      if (premium === null) return res.json({ ad: null, reason: 'unknown_premium_state' });
+      if (premium) return res.json({ ad: null, reason: 'premium_viewer', premium: true });
+
+      const dbG = getDb();
+      const nowG = new Date();
+      const candsG = await dbG.collection(AD_CAMPAIGNS_COLLECTION).find({
+        format: 'upload_gate',
+        status: { $in: [STATES.SCHEDULED, STATES.RUNNING] },
+        startAt: { $lte: nowG },
+        endAt: { $gt: nowG },
+      }).limit(50).toArray();
+      if (!candsG.length) return res.json({ ad: null, reason: 'no_campaign' });
+
+      const crsG = await dbG.collection(AD_CREATIVES_COLLECTION)
+        .find({ campaignId: { $in: candsG.map((x) => x._id) }, status: CREATIVE_STATES.READY }).toArray();
+      const byCG = new Map(crsG.map((cr) => [String(cr.campaignId), cr]));
+
+      // Same approval gate as everywhere else, and it fails closed for the same reason:
+      // anyone can fill in the form and be reviewed afterwards.
+      const refsG = [...new Set(candsG.map((x) => x.advertiserRef).filter(Boolean))];
+      const okG = new Set((await dbG.collection(ADVERTISERS_COLLECTION)
+        .find({ reference: { $in: refsG }, status: 'approved' }, { projection: { reference: 1 } })
+        .toArray()).map((a) => a.reference));
+
+      const sinceG = new Date(Date.now() - AD_FREQUENCY_CAP_MINUTES * 60 * 1000);
+      const seenG = new Set((await dbG.collection(SESSIONS)
+        .find({ viewer: uploader, startedAt: { $gte: sinceG } }, { projection: { campaignId: 1 } })
+        .toArray()).map((r) => String(r.campaignId)));
+
+      const fitG = candsG.filter((x) => x.advertiserRef && okG.has(x.advertiserRef)
+        && byCG.has(String(x._id)) && !seenG.has(String(x._id)));
+      if (!fitG.length) return res.json({ ad: null, reason: 'no_eligible_campaign' });
+
+      // Least-delivered first, the same fair split of scarce inventory as the watch side.
+      fitG.sort((a, b2) => (a.deliveredImpressions || 0) - (b2.deliveredImpressions || 0));
+      const pickG = fitG[0];
+      const pickCrG = byCG.get(String(pickG._id));
+
+      const brandG = await dbG.collection(ADVERTISERS_COLLECTION).findOne({ reference: pickG.advertiserRef });
+      const siteG = brandG && /^https?:\/\//i.test(String(brandG.website || '')) ? String(brandG.website) : null;
+
+      const sidG = crypto.randomBytes(16).toString('hex');
+      const baseG = publicBaseOf(req);
+      await dbG.collection(SESSIONS).insertOne({
+        sid: sidG,
+        surface: 'upload',
+        campaignId: pickG._id,
+        creativeId: pickCrG._id,
+        adManifestUrl: pickCrG.manifestUrl,
+        contentManifestUrl: null,
+        adFirstFetchAt: null,
+        slotPercent: null,
+        slotPosition: null,
+        banner: null,
+        // No creator behind this surface — see the note above.
+        owner: null,
+        permlink: null,
+        viewer: uploader,
+        capId,
+        country,
+        clickUrl: siteG,
+        adDurationSeconds: Number(pickCrG.durationSeconds) || Number(pickG.spotSeconds) || null,
+        startedAt: new Date(),
+        expiresAt: new Date(Date.now() + AD_SESSION_TTL_MINUTES * 60 * 1000),
+      });
+
+      return res.json({
+        ad: null,
+        uploadAd: {
+          manifestUrl: `${baseG}/m/${sidG}/short.m3u8`,
+          durationSeconds: Number(pickCrG.durationSeconds) || Number(pickG.spotSeconds) || null,
+          label: 'Sponsored',
+          adKey: adKeyOf(pickG._id),
+          advertiser: brandG ? brandG.projectName : null,
+          brand: brandG ? {
+            account: brandG.hiveAccount || null,
+            productName: brandG.projectName || null,
+            logoUrl: brandG.logoUrl || null,
+            slogan: brandG.slogan || null,
+            clickUrl: siteG ? `${baseG}/m/${sidG}/c` : null,
+          } : null,
+        },
+        reason: null,
+      });
+    }
+
 
     // Premium viewers and opted-out creators, decided in one place.
     const decision = await adDecision({ viewer, owner });
