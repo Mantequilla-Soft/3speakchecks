@@ -610,7 +610,12 @@ module.exports = {
     // Launch rate card, set 2026-08-26. Dearest of the four on purpose: a mid-roll is
     // the most disruptive thing we do to a regular viewer, so it should cost the most.
     // 5s over 7 days = 52.5 HBD.
-    AD_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_PRICE_PER_SECOND_DAY_HBD) || 1.5,
+    /* 🚨 THESE MUST TRACK ad_settings. They are the fallback used when the settings
+       document is missing, so a wipe of the ad_* collections falls back to whatever is
+       written here. They were left at double the live rates, which meant clearing
+       ad_settings would have silently doubled every price with nothing to show for it.
+       Change one, change the other, and `advertisers.cjs rates` prints both side by side. */
+    AD_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_PRICE_PER_SECOND_DAY_HBD) || 0.25,
     // --- Per-format rates. See utils/adFormats.js, which is the registry these feed.
     // Each format is a different product and prices on its own rate, on the SAME
     // per-second-per-day formula, so adding a format later is a rate plus a registry
@@ -620,7 +625,7 @@ module.exports = {
     // interrupts nothing, so it is priced well under a roll. 0.15 * 15s * 7d = 15.75.
     // Cheapest: barely intrusive for viewers, and priced to pull in community ads.
     // 5s over 7 days = 8.75 HBD.
-    AD_BANNER_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_BANNER_PRICE_PER_SECOND_DAY_HBD) || 0.25,
+    AD_BANNER_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_BANNER_PRICE_PER_SECOND_DAY_HBD) || 0.12,
     // How long a banner may stay on screen. Longer than a roll's cap on purpose —
     // fifteen seconds of banner is a fraction of the imposition of fifteen seconds
     // of spot, and the price already scales with it.
@@ -631,7 +636,7 @@ module.exports = {
     // Every uploader sees this one, and we have more uploaders than viewers — so it
     // carries a premium even though viewers on other frontends never meet it.
     // 5s over 7 days = 35 HBD.
-    AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD) || 1,
+    AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD) || 0.35,
     // --- Banner burn-in (services/adBurner.js) ---
     // Burned segments are the ONE thing under /m whose bytes leave this box rather
     // than 302-ing to the CDN, so the cache is what keeps that affordable: a burned
@@ -703,7 +708,7 @@ module.exports = {
     // type, not the mid-roll rules borrowed" — putting a 15s roll in front of a 12s
     // short delivers an impression to someone who never wanted the content.
     // Kept low while the shorts audience is small. 5s over 7 days = 17.5 HBD.
-    AD_SHORTS_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_SHORTS_PRICE_PER_SECOND_DAY_HBD) || 0.5,
+    AD_SHORTS_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_SHORTS_PRICE_PER_SECOND_DAY_HBD) || 0.2,
     // Shorter than a watch-page roll on purpose: the whole surface is built on quick
     // swipes and the tolerance for a spot is correspondingly lower.
     AD_SHORTS_MAX_SECONDS: parseInt(process.env.AD_SHORTS_MAX_SECONDS) || 10,
