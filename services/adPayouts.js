@@ -37,7 +37,7 @@ const {
   AD_PAYOUTS_COLLECTION, AD_PAYOUT_PERIODS_COLLECTION, AD_CREATOR_POOL_PCT,
   AD_EXCLUDED_ACCOUNTS, AD_REWARD_FLAG_COLLECTION,
   AD_DEFAULT_COMMUNITY_PCT, AD_CREATOR_PREFS_COLLECTION, AD_PAYMENT_ACCOUNT,
-  AD_PAYOUTS_ENABLED, AD_PAYOUT_INTERVAL_H, AD_PAYOUT_MIN_HBD, AD_CREDIT_MIN_HBD, AD_PAYOUT_PERIOD_DAYS, AD_PAYMENTS_COLLECTION, AD_BOOKING_EXPIRY_DAYS,
+  AD_PAYOUTS_ENABLED, AD_PAYOUT_INTERVAL_H, AD_PAYOUT_MIN_HBD, AD_CREDIT_MIN_HBD, AD_PAYOUT_PERIOD_DAYS, AD_PAYOUT_PERIOD_OFFSET_MIN, AD_PAYMENTS_COLLECTION, AD_BOOKING_EXPIRY_DAYS,
   AD_VIEWER_POOL_PCT, AD_VIEWER_WATCH_COLLECTION,
 } = require('../utils/config');
 const { STATES } = require('../utils/adModel');
@@ -64,10 +64,24 @@ function getClient() {
   return hiveClient;
 }
 
-/** Period boundaries are absolute, anchored to the epoch, so they never drift. */
+/**
+ * Period boundaries are absolute so they never drift, anchored to the epoch PLUS an
+ * offset. The offset is what moves them off 00:00 UTC — see AD_PAYOUT_PERIOD_OFFSET_MIN.
+ *
+ * Wrapped into one period's width, so an offset larger than the period (or a negative
+ * one) shifts the boundary rather than skipping periods entirely.
+ */
+function periodOffsetMs() {
+  const span = PERIOD_MS();
+  const raw = (Number(AD_PAYOUT_PERIOD_OFFSET_MIN) || 0) * 60 * 1000;
+  return ((raw % span) + span) % span;
+}
+
 function periodContaining(ts) {
-  const start = Math.floor(ts / PERIOD_MS()) * PERIOD_MS();
-  return { start: new Date(start), end: new Date(start + PERIOD_MS()), key: dayKey(start) };
+  const span = PERIOD_MS();
+  const off = periodOffsetMs();
+  const start = Math.floor((ts - off) / span) * span + off;
+  return { start: new Date(start), end: new Date(start + span), key: dayKey(start) };
 }
 
 /**

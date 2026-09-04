@@ -357,7 +357,11 @@ module.exports = {
     //     return part of an earmarked pool to us, which is the thing payViewers'
     //     no-date-filter comment exists to prevent.
     // Comma-separated, lowercased.
-    AD_EXCLUDED_ACCOUNTS: (process.env.AD_EXCLUDED_ACCOUNTS || 'badadib')
+    // ⚠️ `??`, not `||`. An operator clearing this deliberately writes an EMPTY value,
+    // and `||` treats that as unset and hands back the default — so switching the
+    // exclusion off would silently leave it on, which is the worst way for a money
+    // setting to fail. Unset still defaults; explicitly empty means empty.
+    AD_EXCLUDED_ACCOUNTS: (process.env.AD_EXCLUDED_ACCOUNTS ?? 'badadib')
         .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
 
     // Where the per-account `adRewardDisabled` flag lives. NOT the `users` collection:
@@ -840,6 +844,21 @@ module.exports = {
     // that it orphans the carry chain, because a carryTo key written under the old
     // length matches no period under the new one.
     AD_PAYOUT_PERIOD_DAYS: parseInt(process.env.AD_PAYOUT_PERIOD_DAYS) || 3,
+
+    /* Where a period BOUNDARY falls, as minutes past midnight UTC.
+     *
+     * Without this the anchor is the Unix epoch, so every boundary lands at 00:00 UTC —
+     * 02:00 in Berlin. A settlement that fails then is noticed the next morning at the
+     * earliest, and the run that moves real money is the one you least want to find out
+     * about late. 420 is 07:00 UTC: 09:00 Berlin in summer, 08:00 in winter, a working
+     * hour either way.
+     *
+     * 🚨 Changing this re-derives every boundary AND every key, exactly like changing the
+     * period length. Safe while nothing has settled; afterwards it orphans the carry
+     * chain, because a carryTo written under the old anchor names a period that no
+     * longer exists.
+     */
+    AD_PAYOUT_PERIOD_OFFSET_MIN: parseInt(process.env.AD_PAYOUT_PERIOD_OFFSET_MIN, 10) || 420,
     AD_PAYOUT_PERIODS_COLLECTION: process.env.AD_PAYOUT_PERIODS_COLLECTION || 'ad_payout_periods',
     // How long an unpaid booking may hold credit before it is released back to the
     // advertiser's balance. Without this a booking that is created and abandoned
