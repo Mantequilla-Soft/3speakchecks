@@ -1633,6 +1633,59 @@ router.get('/:sid/short.m3u8', servingVisible, async (req, res) => {
 });
 
 /* ─── GET /m/:sid/:n — the two measured segments ──────────────────────── */
+/**
+ * Complete a pre-upload impression, once the video it gated actually exists.
+ *
+ * The claim is not taken on trust. It names a permlink, and the video has to be on
+ * record under the SAME account the session was opened for, created after the spot was
+ * served. Without that check this is just "watch it and get credited" with an extra
+ * request in front, which is the thing it exists to stop.
+ *
+ * Answers 200 either way. The client calls this after publishing, and a publish that
+ * succeeded must not look like it failed because our accounting could not keep up.
+ */
+router.post('/:sid/posted', servingVisible, express.json({ limit: '2kb' }), async (req, res) => {
+  try {
+    const sid = str(req.params.sid, 64);
+    if (!/^[0-9a-f]{32}$/.test(sid)) return res.status(400).json({ ok: false });
+    const permlink = str((req.body || {}).permlink, 64);
+    if (!permlink) return res.json({ ok: false, reason: 'no_permlink' });
+
+    const db = getDb();
+    const session = await db.collection(SESSIONS).findOne({ sid });
+    if (!session || session.surface !== 'upload') return res.json({ ok: false, reason: 'not_a_gate' });
+    if (!session.viewer) return res.json({ ok: false, reason: 'no_uploader' });
+
+    // The proof. A row for this uploader, this permlink, created after the spot was
+    // served — so an old upload cannot be pointed at to settle a new spot.
+    // Named directly, as adCampaigns.js and shorts.js do — there is no config constant
+    // for it and inventing one here would make two names for one collection.
+    const video = await db.collection('embed-video').findOne({
+      owner: session.viewer,
+      $or: [{ permlink }, { hive_permlink: permlink }],
+      createdAt: { $gte: new Date(new Date(session.startedAt).getTime() - 60 * 60 * 1000) },
+    }, { projection: { _id: 1 } });
+    if (!video) return res.json({ ok: false, reason: 'no_matching_upload' });
+
+    await recordDelivery({
+      db,
+      sid,
+      campaignId: session.campaignId,
+      facts: {
+        campaignId: session.campaignId,
+        owner: session.viewer,
+        permlink,
+        country: session.country || null,
+      },
+      completed: true,
+    });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[ad-serve] gate confirmation failed:', err && err.message);
+    return res.json({ ok: false });
+  }
+});
+
 router.get('/:sid/:n', servingVisible, async (req, res) => {
   try {
     const sid = str(req.params.sid, 64);
@@ -1668,7 +1721,19 @@ router.get('/:sid/:n', servingVisible, async (req, res) => {
         permlink: session.permlink,
         country: session.country || null,
       },
-      completed: n === 'b' || n === 'ab',
+      /* 🚨 Watching the PRE-UPLOAD spot does not complete it. Posting does.
+       *
+       * Every other surface is watched by somebody consuming content, so reaching the
+       * end of the spot is the whole of what the advertiser bought. The gate is
+       * different: the person watching is the person being paid, so "watch it and get
+       * credited" is a loop somebody can sit in — open the studio, watch, never post,
+       * repeat. The frequency cap bounds that but does not close it.
+       *
+       * So the gate records a STARTED impression here and is completed by
+       * POST /:sid/posted, which will not accept a claim without a video to point at.
+       * An advertiser is then paying for spots watched by people who actually published,
+       * which is what a pre-upload placement is for. */
+      completed: session.surface === 'upload' ? false : (n === 'b' || n === 'ab'),
     });
 
     res.set('Cache-Control', 'no-store');
