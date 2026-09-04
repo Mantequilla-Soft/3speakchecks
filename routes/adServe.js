@@ -688,11 +688,17 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
      * answer — all of them return `ad: null` and the upload proceeds. The client is
      * built to match: no ad means post immediately.
      *
-     * No `owner` is recorded on the impression, and that is deliberate rather than an
-     * omission. There is no creator here — nobody's video is carrying this — so there is
-     * no creator share to pay, and settlePeriod already skips an ownerless impression
-     * while still counting it toward the rate. Crediting the UPLOADER instead would pay
-     * people to start uploads they never finish.
+     * THE UPLOADER IS THE CREATOR. They are the one giving up their attention, on their
+     * own upload, so the creator share of this impression is theirs — the same deal a
+     * creator gets when their video carries a roll, applied to the one surface where the
+     * creator and the viewer are the same person.
+     *
+     * ⚠️ That does make the gate farmable in a way the other surfaces are not: opening
+     * the studio and watching the spot earns without ever posting. The frequency cap is
+     * what bounds it — one impression per campaign per account per
+     * AD_FREQUENCY_CAP_MINUTES — so it is worth roughly two impressions an hour, not an
+     * income. If that stops being true, the honest fix is to complete the impression on
+     * the POST rather than on the watch.
      */
     if (surface === 'upload') {
       const uploader = viewer;
@@ -758,8 +764,8 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         slotPercent: null,
         slotPosition: null,
         banner: null,
-        // No creator behind this surface — see the note above.
-        owner: null,
+        // The uploader earns from their own gate — see the note above.
+        owner: uploader,
         permlink: null,
         viewer: uploader,
         capId,

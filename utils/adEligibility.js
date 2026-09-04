@@ -29,7 +29,7 @@
  * answers "no ads" rather than risking an ad in front of a paying subscriber.
  */
 const { getDb } = require('./db');
-const { PREMIUM_USERS_COLLECTION, AD_CREATOR_PREFS_COLLECTION, ADS_ALLOWED_OWNERS } = require('./config');
+const { PREMIUM_USERS_COLLECTION, AD_CREATOR_PREFS_COLLECTION, ADS_ALLOWED_OWNERS, AD_PREMIUM_OVERRIDE_ACCOUNTS } = require('./config');
 
 const TTL_MS = parseInt(process.env.AD_ELIGIBILITY_TTL_MS, 10) || 60 * 1000;
 
@@ -70,6 +70,10 @@ function warm(db) {
 async function isPremiumViewer(username) {
   const u = norm(username);
   if (!u) return false;                    // anonymous viewers are not subscribers
+  // Testing override: treat these accounts as non-subscribers so the ad surfaces can be
+  // exercised from a subscribed account. See AD_PREMIUM_OVERRIDE_ACCOUNTS — it must be
+  // empty in production, because every name in it is somebody who paid not to see ads.
+  if (AD_PREMIUM_OVERRIDE_ACCOUNTS.includes(u)) return false;
   const db = getDb();
 
   if (!cache) {

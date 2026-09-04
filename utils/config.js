@@ -696,6 +696,20 @@ module.exports = {
      * many — and a brand-new surface should not be able to open itself to everyone by
      * someone clearing a variable.
      */
+    /* Accounts treated as NOT premium for ad purposes, whatever their subscription says.
+     *
+     * Testing only. A Pro subscriber never sees an ad, which makes the ad surfaces
+     * impossible to exercise from a subscribed account — and the people testing them are
+     * exactly the people who subscribed. This overrides the check for those accounts
+     * without touching anybody's real subscription, so nothing has to be cancelled and
+     * restored to run a test.
+     *
+     * 🚨 EMPTY THIS BEFORE LAUNCH. Every name in here is a paying subscriber who will be
+     * shown advertising they have paid not to see.
+     */
+    AD_PREMIUM_OVERRIDE_ACCOUNTS: (process.env.AD_PREMIUM_OVERRIDE_ACCOUNTS || '')
+      .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
+
     AD_GATE_ALLOWED_UPLOADERS: (process.env.AD_GATE_ALLOWED_UPLOADERS === undefined
       ? 'ashenadib'
       : process.env.AD_GATE_ALLOWED_UPLOADERS)
