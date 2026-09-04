@@ -403,7 +403,24 @@ async function communitySharePctOf(db, owner) {
     .findOne({ _id: owner }, { projection: { communitySharePct: 1 } });
   const stored = doc && doc.communitySharePct;
   // Nullish, not falsy: a stored 0 is a creator who chose to keep the whole pool.
-  return (stored === undefined || stored === null) ? AD_DEFAULT_COMMUNITY_PCT : stored;
+  const pct = (stored === undefined || stored === null) ? AD_DEFAULT_COMMUNITY_PCT : stored;
+
+  /* 🚨 CLAMPED, because the arithmetic downstream cannot survive a bad value.
+   *
+   * settlePeriod computes `communityCut = rate * (pct / AD_CREATOR_POOL_PCT)`. Above
+   * AD_CREATOR_POOL_PCT that exceeds `rate`: the creator's own credit goes negative and
+   * is silently dropped by add(), while the community is credited MORE than the
+   * impression earned. The period then allocates more than its pool holds, and the
+   * platform pays out money it never took in.
+   *
+   * The write endpoint validates the range (routes/advertise.js), but this is the only
+   * place the number is READ, and it can arrive from two paths that endpoint never saw:
+   * AD_DEFAULT_COMMUNITY_PCT, which config.js bounds only at zero, and a value written
+   * straight into Mongo. Clamping here covers all three at once.
+   */
+  const n = Number(pct);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(n, AD_CREATOR_POOL_PCT);
 }
 
 /** Settle one closed period. Idempotent — a settled period is skipped. */
@@ -552,9 +569,10 @@ async function settlePeriod(db, period) {
 
   const owed = new Map();
   const withheld = [];
+  let withheldHbd = 0;
   const add = (account, hbd, kind) => {
     if (!account || hbd <= 0) return;
-    if (blocked.has(String(account).trim().toLowerCase())) { withheld.push(account); return; }
+    if (blocked.has(String(account).trim().toLowerCase())) { withheld.push(account); withheldHbd += hbd; return; }
     const cur = owed.get(account) || { hbd: 0, kind };
     cur.hbd += hbd;
     owed.set(account, cur);
@@ -626,6 +644,12 @@ async function settlePeriod(db, period) {
       viewerCarriedOut: viewerPaid.carriedOut,
       viewerCarriedOutAssets: scaleAssets(viewerAssetPool, viewerPoolHbd > 0 ? viewerPaid.carriedOut / viewerPoolHbd : 0),
       impressions: impressions.length, ratePerImpression: rate, carriedIn,
+      /* What blocked accounts would have been paid, and were not. Neither sent nor
+       * carried — it stays with the platform — so without this the money simply
+       * disappears from the period's own arithmetic and only a log line explains the
+       * gap between the pool and what was allocated. */
+      withheldHbd: Math.round(withheldHbd * 1000) / 1000,
+      withheldFrom: [...new Set(withheld)],
       carriedOut: dust,
       // Dust keeps the assets it is a remainder of, so it can be sent when it grows.
       carriedOutAssets: scaleAssets(creatorAssetPool, pool > 0 ? dust / pool : 0),
