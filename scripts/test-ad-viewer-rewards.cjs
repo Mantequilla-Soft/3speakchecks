@@ -56,12 +56,11 @@ const post = async (path, body) => {
     // 100 HBD of revenue, at the defaults.
     const revenue = 100;
     const creatorSide = revenue * (AD_CREATOR_POOL_PCT / 100);
-    const platformPool = revenue * (1 - AD_CREATOR_POOL_PCT / 100);
-    const viewerPool = Math.round(platformPool * (AD_VIEWER_POOL_PCT / 100) * 1000) / 1000;
+    const viewerPool = Math.round(revenue * (AD_VIEWER_POOL_PCT / 100) * 1000) / 1000;
     check(`creator side is still the full ${AD_CREATOR_POOL_PCT}%`, creatorSide, 50);
-    check('viewer pool comes from the platform cut', viewerPool, 5);
+    check('viewers get their points of the WHOLE, not of our cut', viewerPool, 10);
     check('  creators are NOT diluted by it', creatorSide + viewerPool <= revenue, true);
-    check('  platform keeps the remainder', Math.round((revenue - creatorSide - viewerPool) * 1000) / 1000, 45);
+    check('  platform keeps the remainder', Math.round((revenue - creatorSide - viewerPool) * 1000) / 1000, 40);
 
     console.log('\n── consent: three states, not two ──');
     let r = await (await fetch(`${BASE}/viewer/prefs/${TESTER}`)).json();
@@ -154,6 +153,13 @@ const post = async (path, body) => {
           { $set: { payoutId: null }, $unset: { settledAt: '' } });
       }
     };
+    // How many non-test viewer payouts exist BEFORE we settle anything. This used to
+    // be asserted as "zero in the whole collection", which held only while no real
+    // viewer had ever been paid — @tibfox's genuine 0.001 HBD row broke it on
+    // 2026-09-04 and would have masked a real sweep behind a permanent red.
+    // What actually matters is that this run adds none.
+    const realViewerPayoutsBefore = await db.collection(require('../utils/config').AD_PAYOUTS_COLLECTION)
+      .countDocuments({ kind: 'viewer', account: { $not: /^vrtest-/ } });
     const per = periodContaining(Date.now() - 3 * 864e5);
     await db.collection(require('../utils/config').AD_PAYOUTS_COLLECTION)
       .deleteMany({ periodKey: per.key, account: { $regex: '^vrtest-' } });
@@ -185,7 +191,7 @@ const post = async (path, body) => {
     await unpark();
     check('real viewers were NOT swept into the test pool',
       await db.collection(require('../utils/config').AD_PAYOUTS_COLLECTION)
-        .countDocuments({ kind: 'viewer', account: { $not: /^vrtest-/ } }), 0);
+        .countDocuments({ kind: 'viewer', account: { $not: /^vrtest-/ } }), realViewerPayoutsBefore);
     check('  and their rows are unpaid again',
       await watch.countDocuments({ payoutId: '__test-parked' }), 0);
 

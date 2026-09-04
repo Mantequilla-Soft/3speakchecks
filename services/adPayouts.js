@@ -451,11 +451,17 @@ async function settlePeriod(db, period) {
   );
 
   /* ─── viewer share ──────────────────────────────────────────────────────
-   * A slice of the PLATFORM's own cut, set aside for the people who watched.
+   * AD_VIEWER_POOL_PCT of the revenue, set aside for the people who watched.
    *
-   * 🚨 Taken from what we keep, never from `pool`. The creator side must not
-   * notice this exists — funding viewer rewards out of the creator pool would be
-   * paying viewers with creators' money.
+   * 🚨 Taken from what WE keep, never from `pool`. The creator side must not notice
+   * this exists — funding viewer rewards out of the creator pool would be paying
+   * viewers with creators' money. The platform's own share is the remainder,
+   * 100 - AD_CREATOR_POOL_PCT - AD_VIEWER_POOL_PCT, and config.js will not let those
+   * two add up past 100.
+   *
+   * ⚠️ This was `platformPool * (AD_VIEWER_POOL_PCT / 100)` until 2026-09-04, which
+   * made the 10 mean 5 points of the whole. Periods settled before that date hold a
+   * viewerPoolHbd computed at half the current rate.
    *
    * ⚠️ EARMARKED, NOT DISTRIBUTED. The metric we pay on is still an open question
    * (completed ad views? verified seconds? distinct days?), so this records what is
@@ -464,13 +470,12 @@ async function settlePeriod(db, period) {
    * rather than a number reconstructed after the fact from periods nobody measured.
    * Nothing is lost by waiting: it stays in the platform's own share until claimed.
    */
-  const platformPool = revenue * (1 - AD_CREATOR_POOL_PCT / 100);
-  const ownViewerPool = Math.round(platformPool * (AD_VIEWER_POOL_PCT / 100) * 1000) / 1000;
+  const ownViewerPool = Math.round(revenue * (AD_VIEWER_POOL_PCT / 100) * 1000) / 1000;
   // Viewers carry too. A period where nobody cleared the minimum sendable amount has
   // not stopped owing them; the money waits with the seconds that earned it.
   const viewerPoolHbd = Math.round((ownViewerPool + viewerCarriedIn) * 1000) / 1000;
   const viewerAssetPool = mergeAssets(
-    assetPoolFor(assetTotals, (100 - AD_CREATOR_POOL_PCT) * (AD_VIEWER_POOL_PCT / 100), ownViewerPool, revenue),
+    assetPoolFor(assetTotals, AD_VIEWER_POOL_PCT, ownViewerPool, revenue),
     viewerCarriedInAssets,
   );
 

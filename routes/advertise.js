@@ -59,6 +59,7 @@ const {
   ADS_BETA_USERS,
   AD_CREATOR_POOL_PCT,
   AD_DEFAULT_COMMUNITY_PCT,
+  AD_VIEWER_POOL_PCT,
   AD_CREATIVES_COLLECTION,
   AD_CAMPAIGNS_COLLECTION,
   AD_PAYMENTS_COLLECTION,
@@ -147,6 +148,9 @@ const account = (v) => str(v, 32).toLowerCase();
 // yielded '' and produced a baffling "Signature required" for a correctly signed
 // request. Accept either form; the signature is over the string either way.
 const stamp = (v) => (typeof v === 'number' && Number.isFinite(v) ? String(v) : str(v, 20));
+// One decimal place. These are percentages people read, and 5.000000000000001 is
+// what you get from the pool arithmetic on perfectly ordinary settings.
+const round1 = (n) => Math.round(n * 10) / 10;
 
 // The split as everyone downstream should see it. Nullish-checked on purpose: a
 // stored 0 is a creator who chose to keep the whole pool, NOT an unset field, and
@@ -156,10 +160,22 @@ function splitOf(doc) {
   const communityPct = (stored === undefined || stored === null)
     ? AD_DEFAULT_COMMUNITY_PCT
     : stored;
+  // Points of the whole, same as poolPct — which is what AD_VIEWER_POOL_PCT now is,
+  // so this is a pass-through rather than a conversion.
+  //
+  // Note what the viewer share does NOT change: poolPct. Viewers are paid out of the
+  // platform's own cut, so the creator side is the same number whether or not anyone
+  // watching is opted in.
+  const viewerPct = round1(AD_VIEWER_POOL_PCT);
   return {
     poolPct: AD_CREATOR_POOL_PCT,
     communityPct,
     creatorPct: AD_CREATOR_POOL_PCT - communityPct,
+    viewerPct,
+    // What is actually left for 3Speak once the viewers are paid. Sent rather than
+    // left as `100 - poolPct` for the client to work out, because that subtraction
+    // is the one that was silently wrong the moment viewer rewards existed.
+    platformPct: round1(100 - AD_CREATOR_POOL_PCT - viewerPct),
     isDefault: stored === undefined || stored === null,
   };
 }
