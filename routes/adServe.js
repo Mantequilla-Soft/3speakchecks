@@ -1342,13 +1342,21 @@ router.get('/:sid/i', servingVisible, async (req, res) => {
       // contract as the break: null until a variant has been rendered, because only
       // the stitcher knows which segments it actually landed on.
       bannerStartAt: typeof session.bannerStartAt === 'number' ? session.bannerStartAt : null,
-      // The BURNED span, not the booked one — see applyBanner. Null until a variant
-      // has been rendered, because only the stitcher knows which segments it landed
-      // on, and a target placed on the booked window disappears while the banner is
-      // still on screen.
-      bannerDurationSeconds: typeof session.bannerDurationSeconds === 'number'
-        ? session.bannerDurationSeconds
-        : null,
+      /* How long the banner is ON SCREEN. The click target follows it exactly.
+       *
+       * ⚠️ This used to report the BURNED span, the whole run of segments the banner
+       * landed on, because the burn painted whole segments and a target on the booked
+       * window would vanish while the banner was still showing. The burn now stops on
+       * time, so that reasoning inverts: reporting the span leaves the target, and the
+       * visible open-in-new mark it draws, sitting on plain video for the gap between
+       * the booking ending and the segment ending. Measured on a 20-second booking
+       * across four 6-second segments: 4.3 seconds of target with no banner under it.
+       *
+       * Sessions from before the booked figure existed really were burned for the full
+       * span, so they keep reporting it. */
+      bannerDurationSeconds: typeof session.bannerBookedSeconds === 'number'
+        ? Math.min(session.bannerBookedSeconds, session.bannerDurationSeconds || session.bannerBookedSeconds)
+        : (typeof session.bannerDurationSeconds === 'number' ? session.bannerDurationSeconds : null),
     });
   } catch (err) {
     res.status(500).json({ error: 'unavailable' });
