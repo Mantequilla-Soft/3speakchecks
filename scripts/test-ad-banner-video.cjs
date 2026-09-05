@@ -19,6 +19,7 @@ const fsp = require('fs/promises');
 const os = require('os');
 const path = require('path');
 const http = require('http');
+const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileP = promisify(execFile);
@@ -55,13 +56,34 @@ const frameAt = async (f, _t, out) => {
   // so a phase shift is visible in a single frame.
   const content = path.join(dir, 'content.ts');
   const banner = path.join(dir, 'banner.mp4');
+  /* ⚠️ `-output_ts_offset` is not decoration. A real HLS segment carries the
+   * timestamps of its position in the video, and the burn preserves them, so a
+   * segment that starts at zero is the ONE case that hides a whole class of bug: the
+   * banner is overlaid by timestamp, and a banner clock starting at 0 against a
+   * segment clock starting at 31s makes every banner frame look overdue. Overlay then
+   * races through the entire banner in the first seconds and freezes on its last
+   * frame. Tested against a zero-based segment that looks perfect. */
   await execFileP('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=size=640x360:rate=25:duration=6',
-    '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-f', 'mpegts', content]);
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+    '-output_ts_offset', '31.8', '-f', 'mpegts', content]);
   await execFileP('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x60:rate=25:duration=3',
-    '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', banner]);
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+    // moov at the FRONT. The throwaway server below answers no Range requests, so
+    // ffmpeg cannot seek back for an index written at the end of the file.
+    '-movflags', '+faststart', banner]);
+  /* A banner LONGER than the segment it is painted onto, which is the shape every real
+   * booking has and the only one that exposes a timestamp misalignment: overlay pairs
+   * by timestamp, so a banner whose clock starts behind the segment's is consumed all
+   * at once and the tail of the segment holds its final frame. A banner shorter than
+   * the segment finishes early anyway and hides it. */
+  const longBanner = path.join(dir, 'banner-long.mp4');
+  await execFileP('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x60:rate=25:duration=12',
+    '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+    '-movflags', '+faststart', longBanner]);
 
   const server = http.createServer((req, res) => {
-    const f = req.url === '/banner.mp4' ? banner : content;
+    const f = req.url === '/banner.mp4' ? banner
+      : (req.url === '/banner-long.mp4' ? longBanner : content);
     const body = fs.readFileSync(f);
     res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': body.length });
     res.end(body);
@@ -156,6 +178,62 @@ const frameAt = async (f, _t, out) => {
     check('  and is GONE once the booked seconds are up', late > 40, true);
     check('a window of zero burns nothing at all',
       await burnSegment({ segmentUrl: `${base}/content.ts`, videoUrl: `${base}/banner.mp4`, visibleSeconds: 0 }), null);
+
+    console.log('\n-- the banner PLAYS for the whole time it is on screen --');
+    /* The regression that shipped: everything above passed while the banner raced
+     * through its whole length in the first seconds of the segment and then held its
+     * last frame. Sampling only the opening frames cannot see it, so this walks the
+     * banner region across the segment and requires every sample to differ. */
+    /* Where the strip actually lands, derived the same way adBurner does it rather
+     * than eyeballed: box is 60% x 15% of the frame, the 320x60 banner fits inside it,
+     * and it sits centred above a 6% margin. A crop guessed a little off samples a
+     * static corner of testsrc and passes no matter what the banner does. */
+    const bannerRegion = 'crop=288:54:176:284';   // 640x360 frame, see adBurner geometry
+    const regionAt = async (f, n, out) => {
+      await execFileP('ffmpeg', ['-v', 'error', '-y', '-i', f,
+        '-vf', `select=gte(n\\,${n}),${bannerRegion}`, '-frames:v', '1', '-update', '1', out]);
+      // ⚠️ Hash the WHOLE file. The first bytes of a PNG are the signature and the
+      // IHDR, identical for every image of the same size, so a prefix comparison finds
+      // four "identical" frames however different the pictures are.
+      return crypto.createHash('md5').update(await fsp.readFile(out)).digest('hex');
+    };
+    const moving = await burnSegment({
+      segmentUrl: `${base}/content.ts`, videoUrl: `${base}/banner-long.mp4`, offsetSeconds: 0,
+    });
+    const samples = [];
+    for (const n of [0, 40, 80, 120, 145]) samples.push(await regionAt(moving, n, path.join(dir, `m${n}.png`)));
+    check('the banner region changes at every sample across the segment',
+      new Set(samples).size, samples.length);
+
+    /* 🚨 THE ONE THAT CATCHES A TIMESTAMP MISALIGNMENT.
+     *
+     * Motion alone is not enough: a banner played at the wrong rate still moves at
+     * every sample. What proves the seek is doing anything is that two burns starting
+     * at DIFFERENT points in the banner look different.
+     *
+     * When the banner's clock is not moved onto the segment's, overlay pairs frames by
+     * timestamp, finds every banner frame overdue, and consumes them from the top
+     * regardless of where -ss started. Both burns then open on the same banner frame,
+     * and this measured a flat 99 dB between them: pixel-identical. With the clocks
+     * aligned they land around 33 dB, which is two different pictures.
+     */
+    const nextSeg = await burnSegment({
+      segmentUrl: `${base}/content.ts`, videoUrl: `${base}/banner-long.mp4`, offsetSeconds: 6,
+    });
+    const cropPsnr = async (fileA, nA, fileB, nB) => {
+      const { stderr } = await execFileP('ffmpeg', ['-hide_banner', '-i', fileA, '-i', fileB,
+        // `trim`, not `select`: a select expression contains a comma, which the
+        // filtergraph parser reads as the end of the filter, and the escaping needed
+        // does not survive a JS template literal intact.
+        '-lavfi', `[0:v]trim=start_frame=${nA},${bannerRegion},setpts=N/TB[a];`
+          + `[1:v]trim=start_frame=${nB},${bannerRegion},setpts=N/TB[b];[a][b]psnr`,
+        '-frames:v', '1', '-f', 'null', '-'], { maxBuffer: 1 << 22 });
+      const m = String(stderr).match(/average:([0-9.]+|inf)/);
+      return m ? (m[1] === 'inf' ? 99 : Number(m[1])) : null;
+    };
+    const seekWorks = await cropPsnr(moving, 0, nextSeg, 0);
+    console.log(`        two burns 6s apart in the banner: ${seekWorks && seekWorks.toFixed(1)} dB apart`);
+    check('starting 6s into the banner shows a DIFFERENT picture', seekWorks < 45, true);
 
     console.log('\n-- a banner shorter than its booking STOPS, it does not restart --');
     /* 🚨 The regression this exists for. Removing -stream_loop is not enough: the seek

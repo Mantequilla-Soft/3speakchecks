@@ -67,7 +67,7 @@ const {
  * place and they kept being handed out, so the fix looked like it had not worked at
  * all. The cache lives at AD_BURN_CACHE_DIR (/var/cache/3speak-ad-burn), not in /tmp.
  */
-const RECIPE_VERSION = 'v4';
+const RECIPE_VERSION = 'v5';
 
 const CACHE_DIR = AD_BURN_CACHE_DIR || path.join(os.tmpdir(), '3speak-ad-burn');
 
@@ -286,7 +286,20 @@ function filterGraph(frame, image, visibleSeconds = null) {
   const label = String(AD_BANNER_LABEL || 'Ad').replace(/[\\':%]/g, '');
 
   return [
-    `[1:v]scale=${bw}:${bh}[bn]`,
+    /* 🚨 The banner's clock has to be moved onto the segment's clock.
+     *
+     * overlay pairs frames by TIMESTAMP, and the burn keeps the segment's own
+     * timestamps (`-copyts`), so a segment 31.8s into a video carries frames stamped
+     * 31.8 and up while the banner's start at 0. Every banner frame then looks
+     * overdue: overlay consumes the whole 10-second banner inside the first few
+     * seconds of the segment and holds the last frame for the rest, which on screen
+     * is a banner that flickers past and then freezes.
+     *
+     * `setpts=PTS-STARTPTS+start/TB` normalises the banner to zero and then moves it
+     * to where this segment begins, so one banner second maps to one segment second.
+     * The `-ss` above chooses WHERE in the banner to start; this decides WHEN it
+     * plays. Both are needed and they are not the same thing. */
+    `[1:v]scale=${bw}:${bh},setpts=PTS-STARTPTS+${frame.startTime.toFixed(3)}/TB[bn]`,
     /* No `shortest`, for either kind.
      *
      * It was needed while the banner looped: an endless input gives the overlay no
