@@ -40,7 +40,7 @@ const {
 const { getSnapshot, forecastPerDay } = require('../services/adInventory');
 const { videoShapeFromManifest } = require('../utils/videoDuration');
 const {
-  DEFAULT_FORMAT, FORMAT_KEYS, formatOf, isBookableFormat, rateFor, defaultRateFor, rateCard,
+  DEFAULT_FORMAT, FORMAT_KEYS, formatOf, isBookableFormat, rateFor, defaultRateFor, rateCard, formatAccepts,
   creativeSpecError,
 } = require('../utils/adFormats');
 const { findSlotConflict, slotAvailability, slotHolders } = require('../utils/adSlots');
@@ -718,18 +718,32 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
 
     const fmt = formatOf(campaign);
 
-    // A banner is made of a still, so attaching one is attaching an IMAGE — there is
-    // no upload and no encode in that path at all. Refuse the mismatch here with an
-    // answer, rather than accepting it and letting servableReason quietly report
-    // `creative_is_a_video` days later when the flight fails to run.
-    if (fmt.creativeKind === CREATIVE_KINDS.IMAGE) {
+    /* Which path this attach takes is decided by WHAT WAS SENT, not by the format.
+     *
+     * A banner accepts a still or a video, and they arrive by completely different
+     * routes: an image is a URL, a video is an uploaded embed that has to encode. So
+     * `imageUrl` in the body means the image path, and its absence means the upload
+     * path, with the format only deciding whether the result is allowed to serve.
+     *
+     * Refuse a mismatch here with an answer, rather than accepting it and letting
+     * servableReason report `creative_is_a_video` days later when the flight quietly
+     * fails to run. */
+    const sentImage = !!str(b.imageUrl, 1024);
+    if (sentImage && !formatAccepts(fmt, CREATIVE_KINDS.IMAGE)) {
+      return res.status(400).json({
+        success: false,
+        error: `A ${fmt.label.toLowerCase()} is a video. Upload the spot and send embedId, not imageUrl.`,
+      });
+    }
+    if (!sentImage && !formatAccepts(fmt, CREATIVE_KINDS.VIDEO)) {
+      return res.status(400).json({
+        success: false,
+        error: `A ${fmt.label.toLowerCase()} is an image. Send imageUrl, not embedId.`,
+      });
+    }
+
+    if (sentImage) {
       const imageUrl = str(b.imageUrl, 1024);
-      if (!imageUrl) {
-        return res.status(400).json({
-          success: false,
-          error: `A ${fmt.label.toLowerCase()} is an image. Send imageUrl, not embedId.`,
-        });
-      }
       if (!/^https:\/\//i.test(imageUrl)) {
         return res.status(400).json({ success: false, error: 'imageUrl must be an https URL' });
       }
@@ -799,7 +813,16 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
       ? Number(campaign.spotSeconds)
       : fmt.maxSeconds;
     const durationSeconds = Math.round(Number(embed.duration) || 0);
-    if (durationSeconds > 0 && durationSeconds > bookedSeconds) {
+    /* ⚠️ A BANNER is not capped by its own length, because it LOOPS.
+     *
+     * For a roll the two numbers mean the same thing: the slot is how long the spot
+     * plays, so a spot longer than the slot is a spot that does not fit. A banner's
+     * booked seconds are seconds ON SCREEN, and the video repeats to fill them. A
+     * 5-second banner under a 20-second booking is seen four times, and a 30-second
+     * one under the same booking shows its first 20. Neither is an error, and
+     * rejecting them would make short loops, the obvious thing to make, impossible
+     * to book. */
+    if (!fmt.burnsIn && durationSeconds > 0 && durationSeconds > bookedSeconds) {
       return res.status(400).json({
         success: false,
         error: `The spot is ${durationSeconds}s and this flight booked a ${bookedSeconds}s slot.`

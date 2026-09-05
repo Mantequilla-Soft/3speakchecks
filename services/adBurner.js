@@ -60,7 +60,7 @@ const {
 } = require('../utils/config');
 
 /** Bumped when the composite changes shape. Old cache entries then simply miss. */
-const RECIPE_VERSION = 'v1';
+const RECIPE_VERSION = 'v2';
 
 const CACHE_DIR = AD_BURN_CACHE_DIR || path.join(os.tmpdir(), '3speak-ad-burn');
 
@@ -77,9 +77,18 @@ async function ensureDir() {
  * Deliberately NOT keyed on session — that would make the cache useless and the
  * bandwidth argument above false.
  */
-function keyFor({ segmentUrl, imageUrl, position }) {
+function keyFor({ segmentUrl, imageUrl, videoUrl, offsetSeconds, position }) {
+  /* 🚨 `offsetSeconds` is part of the key for a VIDEO banner and must be.
+   *
+   * A still looks the same wherever in its run it lands, so one burn serves every
+   * segment. A moving banner does not: segment 2 has to show the banner two segments
+   * further in, or every segment restarts it and the viewer sees the first second of
+   * the ad on repeat. The phase is therefore an input to the bytes, so it is an input
+   * to the key. Quantised to the segment grid it comes from, so it stays a small
+   * finite set per (video, creative) rather than a new file per request. */
+  const phase = videoUrl ? String(Math.round((Number(offsetSeconds) || 0) * 1000)) : '';
   return crypto.createHash('sha256')
-    .update([RECIPE_VERSION, segmentUrl, imageUrl, position || 'bottom'].join('\n'))
+    .update([RECIPE_VERSION, segmentUrl, imageUrl || videoUrl || '', phase, position || 'bottom'].join('\n'))
     .digest('hex');
 }
 
@@ -91,10 +100,15 @@ async function probe(file) {
   const { stdout } = await execFileP('ffprobe', [
     '-v', 'error',
     '-select_streams', 'v:0',
-    '-show_entries', 'stream=width,height,r_frame_rate,profile,level,pix_fmt',
+    '-show_entries', 'stream=width,height,r_frame_rate,profile,level,pix_fmt,duration',
+    '-show_entries', 'format=duration',
     '-of', 'json', file,
   ], { timeout: 15000 });
-  const s = (JSON.parse(stdout).streams || [])[0] || {};
+  const parsed = JSON.parse(stdout);
+  const s = (parsed.streams || [])[0] || {};
+  // Stream duration first, container second: a stream-copied MPEG-TS often carries
+  // one and not the other, and a banner with no known length cannot be looped.
+  const dur = Number(s.duration) || Number((parsed.format || {}).duration) || 0;
   const [num, den] = String(s.r_frame_rate || '').split('/');
   const fps = Number(den) > 0 ? Number(num) / Number(den) : Number(num) || 0;
   return {
@@ -103,6 +117,7 @@ async function probe(file) {
     fps: Number.isFinite(fps) && fps > 0 ? fps : 0,
     pixFmt: s.pix_fmt || 'yuv420p',
     profile: String(s.profile || '').toLowerCase(),
+    duration: Number.isFinite(dur) && dur > 0 ? dur : 0,
   };
 }
 
@@ -119,6 +134,76 @@ async function download(url, dest, timeoutMs) {
 }
 
 /**
+ * A local, loopable copy of a banner VIDEO, produced once and reused.
+ *
+ * The creative is an HLS manifest, because a video creative goes through the normal
+ * encoder. ffmpeg can read a manifest directly, but not usefully here: `-stream_loop`
+ * over the HLS demuxer is unreliable, and every segment burn would re-fetch the whole
+ * playlist. So the banner is flattened once into a single local file and every burn
+ * loops THAT.
+ *
+ * Audio is dropped on the way in. A banner shares the frame with a video the viewer
+ * chose to watch, and taking over their sound is not something an advertiser gets to
+ * buy at this price. Nothing downstream maps it either, so this only saves work.
+ *
+ * Returns null on failure, and the caller then serves the segment unburned: a banner
+ * that cannot be fetched must never cost somebody their playback.
+ */
+async function ensureBannerSource(videoUrl) {
+  await ensureDir();
+  const key = crypto.createHash('sha256').update(`${RECIPE_VERSION}\nsrc\n${videoUrl}`).digest('hex');
+  const out = path.join(CACHE_DIR, `src-${key}.mp4`);
+
+  try {
+    const st = await fsp.stat(out);
+    if (st.size > 0) {
+      const now = new Date();
+      fsp.utimes(out, now, now).catch(() => {});
+      const p = await probe(out);
+      if (p.duration > 0) return { file: out, duration: p.duration };
+    }
+  } catch { /* not cached yet */ }
+
+  const inflightKey = `src:${key}`;
+  if (inflight.has(inflightKey)) return inflight.get(inflightKey);
+
+  const work = (async () => {
+    const tmp = path.join(CACHE_DIR, `.src-${key}.mp4`);
+    try {
+      await execFileP('ffmpeg', [
+        '-v', 'error', '-y',
+        '-i', videoUrl,
+        '-an',                          // silent, deliberately: see above
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+        '-pix_fmt', 'yuv420p',
+        // faststart is pointless for a local file, but movflags is where a
+        // non-seekable input would otherwise produce an unseekable output, and the
+        // loop below seeks into this on every burn.
+        '-movflags', '+faststart',
+        tmp,
+      ], { timeout: AD_BURN_TIMEOUT_MS, maxBuffer: 1 << 20 });
+
+      const st = await fsp.stat(tmp);
+      if (!st.size) throw new Error('ffmpeg produced no banner source');
+      const p = await probe(tmp);
+      if (!(p.duration > 0)) throw new Error('banner source has no duration');
+      await fsp.rename(tmp, out);
+      sweep().catch(() => {});
+      return { file: out, duration: p.duration };
+    } catch (err) {
+      console.error('[ad-burn] banner source failed:', err && err.message);
+      await fsp.unlink(tmp).catch(() => {});
+      return null;
+    } finally {
+      inflight.delete(inflightKey);
+    }
+  })();
+
+  inflight.set(inflightKey, work);
+  return work;
+}
+
+/**
  * The composite.
  *
  * Geometry is computed from the probed frame rather than expressed as filter-graph
@@ -131,7 +216,7 @@ async function download(url, dest, timeoutMs) {
  * banner itself survives; a label in the DOM would be the one removable part of an
  * otherwise unremovable ad, which is precisely the wrong way round.
  */
-function filterGraph(frame, image) {
+function filterGraph(frame, image, moving = false) {
   const { width, height } = frame;
 
   // The banner BOX: bounded on both axes. Width alone is not enough — an advertiser
@@ -165,7 +250,15 @@ function filterGraph(frame, image) {
 
   return [
     `[1:v]scale=${bw}:${bh}[bn]`,
-    `[0:v][bn]overlay=${x}:${y}:format=auto[ov]`,
+    /* ⚠️ `shortest=1` ONLY for a moving banner, and it is what stops the output
+     * running forever. Its input is `-stream_loop -1`, an endless stream, so without
+     * this the overlay has no reason to ever finish and ffmpeg would encode until the
+     * timeout killed it. With it, the output ends when input 0 does: the content
+     * segment, which is exactly the length this is replacing.
+     *
+     * A still must NOT have it. A single-frame input ends immediately, so `shortest=1`
+     * would truncate the segment to one frame and the viewer would lose the video. */
+    `[0:v][bn]overlay=${x}:${y}:format=auto${moving ? ':shortest=1' : ''}[ov]`,
     // Bottom-left corner of the banner itself, so the disclosure travels with the
     // ad whatever shape the creative turned out to be.
     `[ov]drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf`
@@ -181,9 +274,12 @@ function filterGraph(frame, image) {
  * caller then serves the ORIGINAL segment, so a burn failure costs an impression
  * and never a playback.
  */
-async function burnSegment({ segmentUrl, imageUrl, position = 'bottom' }) {
+async function burnSegment({
+  segmentUrl, imageUrl, videoUrl, offsetSeconds = 0, position = 'bottom',
+}) {
   await ensureDir();
-  const key = keyFor({ segmentUrl, imageUrl, position });
+  if (!imageUrl && !videoUrl) return null;
+  const key = keyFor({ segmentUrl, imageUrl, videoUrl, offsetSeconds, position });
   const out = path.join(CACHE_DIR, `${key}.ts`);
 
   try {
@@ -204,14 +300,41 @@ async function burnSegment({ segmentUrl, imageUrl, position = 'bottom' }) {
     const tmpImg = path.join(CACHE_DIR, `.${key}.img`);
     const tmpOut = path.join(CACHE_DIR, `.${key}.out.ts`);
     try {
-      await Promise.all([
-        download(segmentUrl, tmpSeg, AD_BURN_TIMEOUT_MS),
-        download(imageUrl, tmpImg, AD_BURN_TIMEOUT_MS),
-      ]);
+      /* A moving banner is flattened once and looped; a still is downloaded per burn
+       * as it always was. Both end up as "a local file to overlay", so everything
+       * below this point is the same either way apart from the two input flags. */
+      let bannerFile = null;
+      let bannerDuration = 0;
+      if (videoUrl) {
+        const src = await ensureBannerSource(videoUrl);
+        if (!src) throw new Error('banner video unavailable');
+        bannerFile = src.file;
+        bannerDuration = src.duration;
+        await download(segmentUrl, tmpSeg, AD_BURN_TIMEOUT_MS);
+      } else {
+        await Promise.all([
+          download(segmentUrl, tmpSeg, AD_BURN_TIMEOUT_MS),
+          download(imageUrl, tmpImg, AD_BURN_TIMEOUT_MS),
+        ]);
+        bannerFile = tmpImg;
+      }
 
-      const [p, img] = await Promise.all([probe(tmpSeg), probe(tmpImg)]);
+      const [p, img] = await Promise.all([probe(tmpSeg), probe(bannerFile)]);
       if (!p.width || !p.height) throw new Error('could not probe segment');
-      if (!img.width || !img.height) throw new Error('could not probe banner image');
+      if (!img.width || !img.height) throw new Error('could not probe the banner');
+
+      /* Where in the banner this segment picks it up.
+       *
+       * Taken modulo the banner's own length so a 5-second banner under a 20-second
+       * booking is seen four times through rather than once followed by nothing, and
+       * so the seek stays inside the file no matter how long the run is. `-stream_loop`
+       * then carries it past the end if this segment spans a wrap. */
+      const phase = bannerDuration > 0
+        ? ((Number(offsetSeconds) || 0) % bannerDuration + bannerDuration) % bannerDuration
+        : 0;
+      const bannerInput = videoUrl
+        ? ['-stream_loop', '-1', '-ss', phase.toFixed(3), '-i', bannerFile]
+        : ['-i', bannerFile];
 
       // Mirror the source's parameters. A segment whose codec parameters differ from
       // its neighbours can stall hls.js at the join, and unlike the roll there is no
@@ -221,8 +344,8 @@ async function burnSegment({ segmentUrl, imageUrl, position = 'bottom' }) {
       const args = [
         '-v', 'error', '-y', '-copyts',
         '-i', tmpSeg,
-        '-i', tmpImg,
-        '-filter_complex', filterGraph(p, img),
+        ...bannerInput,
+        '-filter_complex', filterGraph(p, img, !!videoUrl),
         '-map', '[v]', '-map', '0:a?',
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21',
         '-pix_fmt', p.pixFmt,

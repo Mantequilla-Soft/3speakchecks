@@ -41,7 +41,7 @@ const {
   AD_SHORTS_EVERY_N, AD_SHORTS_IGNORE_REPEAT_CAP,
   AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT,
 } = require('../utils/config');
-const { STATES, CREATIVE_STATES, servableReason, ensureAdIndexes, slotSecondsFor } = require('../utils/adModel');
+const { STATES, CREATIVE_STATES, CREATIVE_KINDS, servableReason, ensureAdIndexes, slotSecondsFor } = require('../utils/adModel');
 const { formatOf } = require('../utils/adFormats');
 const { burnSegment } = require('../services/adBurner');
 
@@ -1108,6 +1108,11 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         campaignId: bannerCampaign._id,
         creativeId: bannerCreative._id,
         imageUrl: bannerCreative.imageUrl,
+        /* A banner can be a VIDEO, which loops for the seconds it runs. Resolved onto
+         * the session for the same reason the still is: the creative can be swapped
+         * mid-playback, and every burn behind one manifest has to come from the asset
+         * that manifest was built for. Exactly one of these is ever set. */
+        videoUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO ? bannerCreative.manifestUrl : null,
         slotPercent: bannerCampaign.slotPercent ?? null,
         slotPosition: bannerCampaign.slotPosition ?? null,
         seconds: Number(bannerCampaign.spotSeconds) || 0,
@@ -1262,7 +1267,7 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
 
     // BANNER FIRST — see applyBanner. Its window is content-relative, and splicing a
     // roll in ahead of it would move it.
-    if (session.banner && session.banner.imageUrl) {
+    if (session.banner && (session.banner.imageUrl || session.banner.videoUrl)) {
       const variantKey = crypto.createHash('sha1').update(content.url).digest('hex').slice(0, 12);
       const b = applyBanner(text, session, sid, publicBase, variantKey);
       if (b.covered.length) {
@@ -1525,6 +1530,12 @@ router.get('/:sid/s/:vk/:i', servingVisible, async (req, res) => {
     const burned = await burnSegment({
       segmentUrl: original,
       imageUrl: session.banner.imageUrl,
+      videoUrl: session.banner.videoUrl || null,
+      /* Where in the banner this segment picks up. `perSeg` is already the per-segment
+       * share of the run, computed just above for pacing, so segment i starts i of them
+       * in. A still ignores this; a video needs it, or every segment restarts the banner
+       * and the ad stutters in place instead of playing. */
+      offsetSeconds: i * perSeg,
     });
     if (!burned) return res.redirect(302, original);
 

@@ -14,7 +14,7 @@ const {
   AD_IMPRESSIONS_COLLECTION, AD_PAYOUTS_COLLECTION,
   AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_LENGTH_SECONDS, AD_DAY_CURVE_K } = require('./config');
 const { getDb } = require('./db');
-const { formatOf, defaultRateFor, DEFAULT_FORMAT } = require('./adFormats');
+const { formatOf, defaultRateFor, DEFAULT_FORMAT, formatAccepts } = require('./adFormats');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -199,6 +199,22 @@ function missingAssetFor(creative) {
 }
 
 /**
+ * Is this creative a MOVING banner: a video booked on a format that composites into
+ * the frame rather than splicing into the playlist?
+ *
+ * Asked in several places and worth one name, because the combination behaves like
+ * neither of the things it is made of. It is not a roll — nothing is spliced, the
+ * viewer's video keeps playing underneath. And it is not a still — it has a duration
+ * of its own that has nothing to do with how long it is on screen, because it loops
+ * to fill the booked window.
+ */
+function isMotionBanner(campaign, creative) {
+  if (!creative || !campaign) return false;
+  const fmt = formatOf(campaign);
+  return !!fmt.burnsIn && (creative.kind || CREATIVE_KINDS.VIDEO) === CREATIVE_KINDS.VIDEO;
+}
+
+/**
  * Is this campaign servable right now? Returns a reason when not, because "why is
  * my campaign not running" is the question an advertiser asks, and deriving the
  * answer twice in two places is how the console ends up disagreeing with reality.
@@ -221,7 +237,9 @@ function servableReason(campaign, creative, now = Date.now()) {
   // it the two disagree: the advertiser's console calls a legacy row a video while
   // serving refuses it as the wrong kind, and nothing on either screen says why.
   const creativeKind = creative.kind || CREATIVE_KINDS.VIDEO;
-  if (creativeKind !== fmt.creativeKind) {
+  // Membership, not equality: a banner takes a still OR a video, and asking the
+  // format rather than comparing to its single `creativeKind` is what lets it.
+  if (!formatAccepts(fmt, creativeKind)) {
     return creativeKind === CREATIVE_KINDS.IMAGE ? 'creative_is_an_image' : 'creative_is_a_video';
   }
   if (creative.status !== CREATIVE_STATES.READY) return `creative_${creative.status}`;
@@ -236,6 +254,7 @@ function servableReason(campaign, creative, now = Date.now()) {
 module.exports = {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, DAY_MS,
   ensureAdIndexes, priceForDays, ratePerDayFor, validDayCount, windowFrom, servableReason,
+  isMotionBanner,
   missingAssetFor,
   slotSecondsFor,
 };
