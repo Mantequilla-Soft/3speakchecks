@@ -157,6 +157,24 @@ const frameAt = async (f, _t, out) => {
     check('a window of zero burns nothing at all',
       await burnSegment({ segmentUrl: `${base}/content.ts`, videoUrl: `${base}/banner.mp4`, visibleSeconds: 0 }), null);
 
+    console.log('\n-- a banner shorter than its booking STOPS, it does not restart --');
+    /* 🚨 The regression this exists for. Removing -stream_loop is not enough: the seek
+     * was taken modulo the banner's length, so a segment past the end wrapped back to
+     * the beginning and played it again. That is a loop with the flag removed.
+     *
+     * The banner here is 3s. A segment seeking 4s in has nothing left, so it must not
+     * be burned at all, and the viewer sees plain video rather than the ad a second
+     * time. */
+    const past = await burnSegment({
+      segmentUrl: `${base}/content.ts`, videoUrl: `${base}/banner.mp4`, offsetSeconds: 4,
+    });
+    check('a segment past the end of the banner is NOT burned', past, null);
+    const atEnd = await burnSegment({
+      segmentUrl: `${base}/content.ts`, videoUrl: `${base}/banner.mp4`, offsetSeconds: 2.5,
+    });
+    check('  one that still has footage left IS burned', !!atEnd, true);
+    check('  and it keeps the whole segment', Math.abs((await durationOf(atEnd)) - srcDur) < 0.5, true);
+
     console.log('\n-- the banner is silent --');
     const { stdout: aud } = await execFileP('ffprobe', ['-v', 'error', '-select_streams', 'a',
       '-show_entries', 'stream=codec_type', '-of', 'json', cut]);

@@ -60,8 +60,14 @@ const {
   AD_BANNER_MARGIN_PCT, AD_BANNER_LABEL,
 } = require('../utils/config');
 
-/** Bumped when the composite changes shape. Old cache entries then simply miss. */
-const RECIPE_VERSION = 'v3';
+/* Bumped when the composite changes shape. Old cache entries then simply miss.
+ *
+ * 🚨 BUMP IT, and remember that a cached burn is served BEFORE any of the decisions
+ * below are reached. Removing the loop without bumping this left the previous burns in
+ * place and they kept being handed out, so the fix looked like it had not worked at
+ * all. The cache lives at AD_BURN_CACHE_DIR (/var/cache/3speak-ad-burn), not in /tmp.
+ */
+const RECIPE_VERSION = 'v4';
 
 const CACHE_DIR = AD_BURN_CACHE_DIR || path.join(os.tmpdir(), '3speak-ad-burn');
 
@@ -371,15 +377,17 @@ async function burnSegment({
       if (!p.width || !p.height) throw new Error('could not probe segment');
       if (!img.width || !img.height) throw new Error('could not probe the banner');
 
-      /* Where in the banner this segment picks it up.
+      /* Where in the banner this segment picks it up. NOT taken modulo anything.
        *
-       * Taken modulo the banner's own length purely as a guard: the creative is
-       * required to be at least as long as the booking, so the modulo is a no-op on
-       * anything that got through validation, and on anything that did not it keeps
-       * the seek inside the file rather than past the end of it. */
-      const phase = bannerDuration > 0
-        ? ((Number(offsetSeconds) || 0) % bannerDuration + bannerDuration) % bannerDuration
-        : 0;
+       * 🚨 A modulo here IS a loop, whatever the ffmpeg flags say. It was left behind
+       * as a "guard" when -stream_loop went, and it quietly kept doing the same job: a
+       * 10-second banner under a 20-second booking seeks to 0.0, then 6.1, then 2.1 and
+       * 8.2, so the third segment restarts the video. That is exactly the loop removing
+       * the flag was supposed to have removed.
+       *
+       * Past the end of the banner there is nothing left to paint, and the segment is
+       * served untouched. */
+      const phase = Number(offsetSeconds) || 0;
       /* PLAYED ONCE, never looped.
        *
        * Looping was the obvious way to fill a booking with a short clip and a worse
@@ -390,6 +398,19 @@ async function burnSegment({
        *
        * `-ss` is still per segment: each one picks the banner up where the last left
        * it, which is what stops it restarting at every segment boundary. */
+      /* How much banner is LEFT from here, and the window is the smaller of that and
+       * what is still booked.
+       *
+       * A creative that covers its booking never reaches this: the footage remaining
+       * always outlasts the booking remaining. It matters for the ones attached before
+       * that became a requirement, where the alternative is the overlay holding a
+       * frozen last frame for the rest of the window. Stopping is the honest version
+       * of running out. */
+      const remaining = (videoUrl && bannerDuration > 0) ? bannerDuration - phase : Infinity;
+      if (!(remaining > 0)) return null;
+      const window = Math.min(visibleSeconds != null ? visibleSeconds : Infinity, remaining);
+      const paintFor = Number.isFinite(window) ? window : null;
+
       const bannerInput = videoUrl
         ? ['-ss', phase.toFixed(3), '-i', bannerFile]
         : ['-i', bannerFile];
@@ -403,7 +424,7 @@ async function burnSegment({
         '-v', 'error', '-y', '-copyts',
         '-i', tmpSeg,
         ...bannerInput,
-        '-filter_complex', filterGraph(p, img, visibleSeconds),
+        '-filter_complex', filterGraph(p, img, paintFor),
         '-map', '[v]', '-map', '0:a?',
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21',
         '-pix_fmt', p.pixFmt,
