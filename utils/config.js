@@ -676,6 +676,15 @@ module.exports = {
     // Bounded on the other axis too, so a square creative lands as a small centred
     // mark along the bottom instead of a 60%-of-the-frame takeover.
     AD_BANNER_MAX_HEIGHT_PCT: parseFloat(process.env.AD_BANNER_MAX_HEIGHT_PCT) || 15,
+    /* Hard ceiling on how tall a burned banner may be, in pixels of the rendition it
+     * is burned into. Paired with AD_BANNER_MAX_HEIGHT_PCT, and the smaller wins.
+     *
+     * The percentage keeps a banner legible on a small rendition; this stops it
+     * growing with the screen on a large one. 240 is the height the recommended
+     * creative (1456x240) already is, so a well-made banner is unaffected and only an
+     * oversized or squarer upload is scaled down to fit. */
+    AD_BANNER_MAX_HEIGHT_PX: parseInt(process.env.AD_BANNER_MAX_HEIGHT_PX, 10) || 240,
+
     AD_BANNER_MARGIN_PCT: parseFloat(process.env.AD_BANNER_MARGIN_PCT) || 6,
     // Burned into the picture with the banner, never drawn in the page: disclosure
     // has to survive everything the ad itself survives.

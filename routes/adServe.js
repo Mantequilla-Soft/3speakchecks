@@ -593,6 +593,14 @@ function applyBanner(text, session, sid, publicBase, variantKey) {
     // rather than where it was booked.
     startAt: realStart === null ? bookedAt : realStart,
     durationSeconds: realStart === null ? 0 : realEnd - realStart,
+    /* What was BOUGHT, kept separate from the span of segments it landed on.
+     *
+     * `durationSeconds` is how much video the run touches and is what the click target
+     * and the pacing maths follow. `bookedSeconds` is how long the banner is actually
+     * painted, which is shorter whenever the booking ends mid-segment. Two numbers
+     * because they answer two questions, and conflating them is how a banner ends up
+     * on screen for 24 seconds under a 20-second booking. */
+    bookedSeconds,
   };
 }
 
@@ -1277,6 +1285,10 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
         mark[`bannerSegs.${variantKey}`] = b.covered;
         mark.bannerStartAt = b.startAt;
         mark.bannerDurationSeconds = b.durationSeconds;
+        // What was PAID for, as distinct from the span of whole segments it lands on.
+        // The burn paints the banner for exactly this long and leaves the rest of the
+        // last segment plain, so 20 seconds booked is 20 seconds on screen.
+        mark.bannerBookedSeconds = b.bookedSeconds;
       }
     }
 
@@ -1527,10 +1539,27 @@ router.get('/:sid/s/:vk/:i', servingVisible, async (req, res) => {
       });
     }
 
+    /* How much of THIS segment carries the banner.
+     *
+     * The run covers whole segments because a burn cannot paint half of one, but the
+     * booked seconds usually end partway through the last of them. Passing the
+     * remainder lets the burn stop the banner exactly on time and leave the rest of
+     * the segment untouched, so a 20-second booking is 20 seconds rather than the
+     * 24 its four segments happen to add up to.
+     *
+     * Older sessions have no booked figure. `null` then means "the whole segment",
+     * which is precisely the behaviour they were burned with. */
+    const bookedTotal = Number(session.bannerBookedSeconds);
+    const visibleSeconds = Number.isFinite(bookedTotal) && bookedTotal > 0
+      ? bookedTotal - (i * perSeg)
+      : null;
+    if (visibleSeconds != null && visibleSeconds <= 0) return res.redirect(302, original);
+
     const burned = await burnSegment({
       segmentUrl: original,
       imageUrl: session.banner.imageUrl,
       videoUrl: session.banner.videoUrl || null,
+      visibleSeconds,
       /* Where in the banner this segment picks up. `perSeg` is already the per-segment
        * share of the run, computed just above for pacing, so segment i starts i of them
        * in. A still ignores this; a video needs it, or every segment restarts the banner

@@ -56,11 +56,12 @@ const execFileP = promisify(execFile);
 
 const {
   AD_BURN_CACHE_DIR, AD_BURN_CACHE_MAX_MB, AD_BURN_TIMEOUT_MS,
-  AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT, AD_BANNER_LABEL,
+  AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MAX_HEIGHT_PX,
+  AD_BANNER_MARGIN_PCT, AD_BANNER_LABEL,
 } = require('../utils/config');
 
 /** Bumped when the composite changes shape. Old cache entries then simply miss. */
-const RECIPE_VERSION = 'v2';
+const RECIPE_VERSION = 'v3';
 
 const CACHE_DIR = AD_BURN_CACHE_DIR || path.join(os.tmpdir(), '3speak-ad-burn');
 
@@ -77,7 +78,7 @@ async function ensureDir() {
  * Deliberately NOT keyed on session — that would make the cache useless and the
  * bandwidth argument above false.
  */
-function keyFor({ segmentUrl, imageUrl, videoUrl, offsetSeconds, position }) {
+function keyFor({ segmentUrl, imageUrl, videoUrl, offsetSeconds, visibleSeconds, position }) {
   /* 🚨 `offsetSeconds` is part of the key for a VIDEO banner and must be.
    *
    * A still looks the same wherever in its run it lands, so one burn serves every
@@ -87,8 +88,11 @@ function keyFor({ segmentUrl, imageUrl, videoUrl, offsetSeconds, position }) {
    * to the key. Quantised to the segment grid it comes from, so it stays a small
    * finite set per (video, creative) rather than a new file per request. */
   const phase = videoUrl ? String(Math.round((Number(offsetSeconds) || 0) * 1000)) : '';
+  // How much of this segment carries the banner is also an input to the bytes: the
+  // final segment of a run shows it for part of its length and the rest plain.
+  const visible = Number.isFinite(visibleSeconds) ? String(Math.round(visibleSeconds * 1000)) : 'all';
   return crypto.createHash('sha256')
-    .update([RECIPE_VERSION, segmentUrl, imageUrl || videoUrl || '', phase, position || 'bottom'].join('\n'))
+    .update([RECIPE_VERSION, segmentUrl, imageUrl || videoUrl || '', phase, visible, position || 'bottom'].join('\n'))
     .digest('hex');
 }
 
@@ -100,7 +104,7 @@ async function probe(file) {
   const { stdout } = await execFileP('ffprobe', [
     '-v', 'error',
     '-select_streams', 'v:0',
-    '-show_entries', 'stream=width,height,r_frame_rate,profile,level,pix_fmt,duration',
+    '-show_entries', 'stream=width,height,r_frame_rate,profile,level,pix_fmt,duration,start_time',
     '-show_entries', 'format=duration',
     '-of', 'json', file,
   ], { timeout: 15000 });
@@ -118,6 +122,9 @@ async function probe(file) {
     pixFmt: s.pix_fmt || 'yuv420p',
     profile: String(s.profile || '').toLowerCase(),
     duration: Number.isFinite(dur) && dur > 0 ? dur : 0,
+    // Where this segment sits on the video's own clock. The burn preserves timestamps,
+    // so a filter expression in `t` is measured from here, not from zero.
+    startTime: Number(s.start_time) || 0,
   };
 }
 
@@ -174,6 +181,16 @@ async function ensureBannerSource(videoUrl) {
         '-v', 'error', '-y',
         '-i', videoUrl,
         '-an',                          // silent, deliberately: see above
+        /* Scaled down to the banner height on the way in, never up.
+         *
+         * A banner is fitted into a box when it is composited, so an oversized upload
+         * would be scaled down there anyway and this changes nothing about how it
+         * looks. What it changes is the work: every segment burn overlays this file,
+         * and scaling a 4K strip down to a few hundred pixels once beats doing it on
+         * every burn. `-2` keeps the aspect ratio and forces an even width, which
+         * libx264 requires on yuv420p; `min` is what stops a small banner being
+         * blown up into a blurry one. */
+        '-vf', `scale=-2:'min(${AD_BANNER_MAX_HEIGHT_PX},ih)'`,
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
         '-pix_fmt', 'yuv420p',
         // faststart is pointless for a local file, but movflags is where a
@@ -216,7 +233,7 @@ async function ensureBannerSource(videoUrl) {
  * banner itself survives; a label in the DOM would be the one removable part of an
  * otherwise unremovable ad, which is precisely the wrong way round.
  */
-function filterGraph(frame, image, moving = false) {
+function filterGraph(frame, image, moving = false, visibleSeconds = null) {
   const { width, height } = frame;
 
   // The banner BOX: bounded on both axes. Width alone is not enough — an advertiser
@@ -226,7 +243,21 @@ function filterGraph(frame, image, moving = false) {
   // along the bottom of it. Fitting inside a box makes every aspect ratio behave:
   // a 728x90 strip fills it, a square lands small and centred.
   const boxW = Math.max(2, Math.round((width * AD_BANNER_WIDTH_PCT) / 100));
-  const boxH = Math.max(2, Math.round((height * AD_BANNER_MAX_HEIGHT_PCT) / 100));
+  /* Bounded as a share of the frame AND in absolute pixels.
+   *
+   * The percentage alone scales with the variant, which is what keeps a banner
+   * legible on a 480p rendition. But it also means a tall creative on a 1080p frame
+   * is allowed to be genuinely large: 20% of 1080 is 216px of banner, and a squarer
+   * upload takes all of it. AD_BANNER_MAX_HEIGHT_PX is the ceiling that stops a
+   * banner growing with the screen past the point of being a banner.
+   *
+   * The smaller of the two wins, so small frames stay governed by the percentage and
+   * big ones by the pixel cap. Aspect is preserved either way: this is the BOX, and
+   * the scale below fits the creative inside it without distorting it. */
+  const boxH = Math.max(2, Math.min(
+    Math.round((height * AD_BANNER_MAX_HEIGHT_PCT) / 100),
+    AD_BANNER_MAX_HEIGHT_PX,
+  ));
 
   // Fitted here rather than with force_original_aspect_ratio, because the label has
   // to be pinned to the banner's REAL left edge and that is not knowable inside the
@@ -258,13 +289,27 @@ function filterGraph(frame, image, moving = false) {
      *
      * A still must NOT have it. A single-frame input ends immediately, so `shortest=1`
      * would truncate the segment to one frame and the viewer would lose the video. */
-    `[0:v][bn]overlay=${x}:${y}:format=auto${moving ? ':shortest=1' : ''}[ov]`,
+    /* `enable` is what makes a booking mean what it says.
+     *
+     * A burn paints whole segments, so a 20-second banner whose run covers four
+     * 6-second segments was on screen for 24. Tolerable for a still, obvious for a
+     * looping video: the viewer watches it start a third time and stop halfway.
+     *
+     * ⚠️ Measured against the segment's OWN start time, not zero. The burn keeps
+     * timestamps (`-copyts`), so `t` here is the position in the whole video: a naive
+     * `lt(t,20)` is false for every frame of a segment that begins at 30s, and the
+     * banner would never appear at all. */
+    `[0:v][bn]overlay=${x}:${y}:format=auto${moving ? ':shortest=1' : ''}`
+      + `${visibleSeconds != null ? `:enable='lt(t-${frame.startTime.toFixed(3)},${visibleSeconds.toFixed(3)})'` : ''}[ov]`,
     // Bottom-left corner of the banner itself, so the disclosure travels with the
     // ad whatever shape the creative turned out to be.
     `[ov]drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf`
       + `:text='${label}':fontcolor=white@0.92:fontsize=${fontSize}`
       + `:box=1:boxcolor=black@0.55:boxborderw=${pad}`
-      + `:x=${x + pad}:y=${y + bh - fontSize - pad * 2}[v]`,
+      + `:x=${x + pad}:y=${y + bh - fontSize - pad * 2}`
+      // The disclosure travels with the ad. Left running past the banner it labels, it
+      // would sit on plain video announcing an ad that is no longer there.
+      + `${visibleSeconds != null ? `:enable='lt(t-${frame.startTime.toFixed(3)},${visibleSeconds.toFixed(3)})'` : ''}[v]`,
   ].join(';');
 }
 
@@ -275,11 +320,14 @@ function filterGraph(frame, image, moving = false) {
  * and never a playback.
  */
 async function burnSegment({
-  segmentUrl, imageUrl, videoUrl, offsetSeconds = 0, position = 'bottom',
+  segmentUrl, imageUrl, videoUrl, offsetSeconds = 0, visibleSeconds = null, position = 'bottom',
 }) {
   await ensureDir();
   if (!imageUrl && !videoUrl) return null;
-  const key = keyFor({ segmentUrl, imageUrl, videoUrl, offsetSeconds, position });
+  // Nothing of this segment is inside the booked window. The caller serves the
+  // original, which is cheaper than burning an unchanged picture.
+  if (visibleSeconds != null && !(visibleSeconds > 0)) return null;
+  const key = keyFor({ segmentUrl, imageUrl, videoUrl, offsetSeconds, visibleSeconds, position });
   const out = path.join(CACHE_DIR, `${key}.ts`);
 
   try {
@@ -345,7 +393,7 @@ async function burnSegment({
         '-v', 'error', '-y', '-copyts',
         '-i', tmpSeg,
         ...bannerInput,
-        '-filter_complex', filterGraph(p, img, !!videoUrl),
+        '-filter_complex', filterGraph(p, img, !!videoUrl, visibleSeconds),
         '-map', '[v]', '-map', '0:a?',
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21',
         '-pix_fmt', p.pixFmt,

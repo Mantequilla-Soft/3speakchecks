@@ -114,6 +114,55 @@ const frameAt = async (f, _t, out) => {
     check('  and keeps the full segment', Math.abs((await durationOf(still)) - srcDur) < 0.5, true);
     stillServer.close();
 
+    console.log('\n-- the banner stops when the booking does, not when the segment does --');
+    // 6s of content carrying a banner booked for only 2 of them: the first frame must
+    // have it and a frame after 2s must not, or a 20s booking runs for 24.
+    const cut = await burnSegment({
+      segmentUrl: `${base}/content.ts`, videoUrl: `${base}/banner.mp4`,
+      offsetSeconds: 0, visibleSeconds: 2,
+    });
+    check('a partly-covered segment burns', !!cut, true);
+    /* Compared against a SECOND burn rather than against the source.
+     *
+     * The burn re-encodes, so a frame carrying no banner is still not byte-identical
+     * to the same frame of the original file, and comparing the two proves nothing.
+     * Two burns of the same segment at different banner PHASES go through an identical
+     * encoder path, so any difference between them is the banner and nothing else:
+     * early frames must differ (different phase) and late ones must match (no banner
+     * in either, because the booked window has closed). */
+    const cutB = await burnSegment({
+      segmentUrl: `${base}/content.ts`, videoUrl: `${base}/banner.mp4`,
+      offsetSeconds: 1.5, visibleSeconds: 2,
+    });
+    /* Measured with PSNR, not by comparing bytes.
+     *
+     * Two burns differ slightly EVERYWHERE, even where the picture is the same: the
+     * banner earlier in the segment changes what the encoder does with the rest of the
+     * GOP, so identical-looking frames decode to slightly different pixels. A byte
+     * comparison therefore says "different" for every frame and proves nothing. PSNR
+     * separates the two cases cleanly: a visible banner lands around 29 dB, encoder
+     * noise alone around 48. */
+    const psnr = async (range) => {
+      const { stderr } = await execFileP('ffmpeg', ['-hide_banner', '-i', cut, '-i', cutB,
+        '-lavfi', `[0:v]trim=${range},setpts=PTS-STARTPTS[a];[1:v]trim=${range},setpts=PTS-STARTPTS[b];[a][b]psnr`,
+        '-f', 'null', '-'], { maxBuffer: 1 << 22 });
+      const m = String(stderr).match(/average:([0-9.]+|inf)/);
+      return m ? (m[1] === 'inf' ? 99 : Number(m[1])) : null;
+    };
+    const early = await psnr('end_frame=40');
+    const late = await psnr('start_frame=120');
+    console.log(`        early ${early && early.toFixed(1)} dB, late ${late && late.toFixed(1)} dB`);
+    check('  the banner IS there at the start, and differs by phase', early < 40, true);
+    check('  and is GONE once the booked seconds are up', late > 40, true);
+    check('a window of zero burns nothing at all',
+      await burnSegment({ segmentUrl: `${base}/content.ts`, videoUrl: `${base}/banner.mp4`, visibleSeconds: 0 }), null);
+
+    console.log('\n-- the banner is silent --');
+    const { stdout: aud } = await execFileP('ffprobe', ['-v', 'error', '-select_streams', 'a',
+      '-show_entries', 'stream=codec_type', '-of', 'json', cut]);
+    // The content here has no audio either, so this asserts the banner did not ADD one.
+    check('no audio stream comes from the banner', (JSON.parse(aud).streams || []).length, 0);
+
     console.log('\n-- nothing to burn is not a crash --');
     check('no image and no video returns null', await burnSegment({ segmentUrl: `${base}/content.ts` }), null);
   } finally {
