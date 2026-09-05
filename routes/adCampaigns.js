@@ -822,6 +822,24 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
      * one under the same booking shows its first 20. Neither is an error, and
      * rejecting them would make short loops, the obvious thing to make, impossible
      * to book. */
+    /* A BANNER video has to COVER the booking, because it is played once.
+     *
+     * Looping a short clip to fill the window was tried and removed: the seam lands
+     * wherever the loop happens to fall, and a clip a fraction under the booked length
+     * restarts and stops immediately, which looks broken rather than looking like an
+     * ad. Requiring the length up front is the version an advertiser can reason about,
+     * and the automatic-length box on the booking form sets the booking FROM the video
+     * so the two match by construction.
+     *
+     * Longer than the booking is fine: the burn stops at the booked second. */
+    if (fmt.burnsIn && durationSeconds > 0 && durationSeconds < bookedSeconds) {
+      return res.status(400).json({
+        success: false,
+        error: `This banner runs for ${bookedSeconds}s and that video is ${durationSeconds}s. `
+          + 'A banner video is played once, not looped, so it has to be at least as long '
+          + 'as the banner runs. Use a longer video, or book a shorter banner.',
+      });
+    }
     if (!fmt.burnsIn && durationSeconds > 0 && durationSeconds > bookedSeconds) {
       return res.status(400).json({
         success: false,

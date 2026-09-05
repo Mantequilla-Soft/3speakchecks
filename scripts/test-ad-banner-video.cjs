@@ -90,14 +90,14 @@ const frameAt = async (f, _t, out) => {
     const f1 = await frameAt(b, 0.2, path.join(dir, 'b.png'));
     check('  the same instant shows a DIFFERENT banner frame', f0.equals(f1), false);
 
-    console.log('\n-- looping: an offset past the banner wraps rather than running dry --');
-    // 4s into a 3s banner is 1s in. Same phase as offset 1, so the picture must match.
-    const wrapped = await burnSegment({ segmentUrl: `${base}/content.ts`, videoUrl: `${base}/banner.mp4`, offsetSeconds: 4 });
-    const atOne = await burnSegment({ segmentUrl: `${base}/content.ts`, videoUrl: `${base}/banner.mp4`, offsetSeconds: 1 });
-    check('a wrapped offset still produces a segment', !!wrapped, true);
-    const fw = await frameAt(wrapped, 0.2, path.join(dir, 'w.png'));
-    const fo = await frameAt(atOne, 0.2, path.join(dir, 'o.png'));
-    check('  4s into a 3s banner looks exactly like 1s in', fw.equals(fo), true);
+    console.log('\n-- played once: a banner shorter than the segment does not truncate it --');
+    /* The banner here is 3s and the content 6s, which is the shape that breaks if the
+     * overlay is told to end with its shortest input: the output would stop when the
+     * banner ran out and the viewer would lose half their video. */
+    const short = await burnSegment({ segmentUrl: `${base}/content.ts`, videoUrl: `${base}/banner.mp4`, offsetSeconds: 0 });
+    check('a banner shorter than the segment still burns', !!short, true);
+    check('  and the viewer keeps the WHOLE segment',
+      Math.abs((await durationOf(short)) - srcDur) < 0.5, true);
 
     console.log('\n-- the still path still works --');
     const png = path.join(dir, 'still.png');

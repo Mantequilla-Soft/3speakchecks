@@ -233,7 +233,7 @@ async function ensureBannerSource(videoUrl) {
  * banner itself survives; a label in the DOM would be the one removable part of an
  * otherwise unremovable ad, which is precisely the wrong way round.
  */
-function filterGraph(frame, image, moving = false, visibleSeconds = null) {
+function filterGraph(frame, image, visibleSeconds = null) {
   const { width, height } = frame;
 
   // The banner BOX: bounded on both axes. Width alone is not enough — an advertiser
@@ -281,14 +281,14 @@ function filterGraph(frame, image, moving = false, visibleSeconds = null) {
 
   return [
     `[1:v]scale=${bw}:${bh}[bn]`,
-    /* ⚠️ `shortest=1` ONLY for a moving banner, and it is what stops the output
-     * running forever. Its input is `-stream_loop -1`, an endless stream, so without
-     * this the overlay has no reason to ever finish and ffmpeg would encode until the
-     * timeout killed it. With it, the output ends when input 0 does: the content
-     * segment, which is exactly the length this is replacing.
+    /* No `shortest`, for either kind.
      *
-     * A still must NOT have it. A single-frame input ends immediately, so `shortest=1`
-     * would truncate the segment to one frame and the viewer would lose the video. */
+     * It was needed while the banner looped: an endless input gives the overlay no
+     * reason to finish and ffmpeg would encode until the timeout. The banner is finite
+     * now and usually SHORTER than the segment it decorates, so `shortest=1` would end
+     * the output when the banner ran out and truncate the viewer's video. The overlay's
+     * own default holds the last frame instead, and that frame never shows because
+     * `enable` has switched it off by then. */
     /* `enable` is what makes a booking mean what it says.
      *
      * A burn paints whole segments, so a 20-second banner whose run covers four
@@ -299,7 +299,7 @@ function filterGraph(frame, image, moving = false, visibleSeconds = null) {
      * timestamps (`-copyts`), so `t` here is the position in the whole video: a naive
      * `lt(t,20)` is false for every frame of a segment that begins at 30s, and the
      * banner would never appear at all. */
-    `[0:v][bn]overlay=${x}:${y}:format=auto${moving ? ':shortest=1' : ''}`
+    `[0:v][bn]overlay=${x}:${y}:format=auto`
       + `${visibleSeconds != null ? `:enable='lt(t-${frame.startTime.toFixed(3)},${visibleSeconds.toFixed(3)})'` : ''}[ov]`,
     // Bottom-left corner of the banner itself, so the disclosure travels with the
     // ad whatever shape the creative turned out to be.
@@ -348,7 +348,7 @@ async function burnSegment({
     const tmpImg = path.join(CACHE_DIR, `.${key}.img`);
     const tmpOut = path.join(CACHE_DIR, `.${key}.out.ts`);
     try {
-      /* A moving banner is flattened once and looped; a still is downloaded per burn
+      /* A moving banner is flattened once and reused; a still is downloaded per burn
        * as it always was. Both end up as "a local file to overlay", so everything
        * below this point is the same either way apart from the two input flags. */
       let bannerFile = null;
@@ -373,15 +373,25 @@ async function burnSegment({
 
       /* Where in the banner this segment picks it up.
        *
-       * Taken modulo the banner's own length so a 5-second banner under a 20-second
-       * booking is seen four times through rather than once followed by nothing, and
-       * so the seek stays inside the file no matter how long the run is. `-stream_loop`
-       * then carries it past the end if this segment spans a wrap. */
+       * Taken modulo the banner's own length purely as a guard: the creative is
+       * required to be at least as long as the booking, so the modulo is a no-op on
+       * anything that got through validation, and on anything that did not it keeps
+       * the seek inside the file rather than past the end of it. */
       const phase = bannerDuration > 0
         ? ((Number(offsetSeconds) || 0) % bannerDuration + bannerDuration) % bannerDuration
         : 0;
+      /* PLAYED ONCE, never looped.
+       *
+       * Looping was the obvious way to fill a booking with a short clip and a worse
+       * deal than it looks: the seam lands wherever the loop happens to fall, and a
+       * clip a fraction under the booked length restarts and stops immediately. The
+       * length is the advertiser's to get right, enforced when the creative is
+       * attached, and this just seeks to the right point and plays.
+       *
+       * `-ss` is still per segment: each one picks the banner up where the last left
+       * it, which is what stops it restarting at every segment boundary. */
       const bannerInput = videoUrl
-        ? ['-stream_loop', '-1', '-ss', phase.toFixed(3), '-i', bannerFile]
+        ? ['-ss', phase.toFixed(3), '-i', bannerFile]
         : ['-i', bannerFile];
 
       // Mirror the source's parameters. A segment whose codec parameters differ from
@@ -393,7 +403,7 @@ async function burnSegment({
         '-v', 'error', '-y', '-copyts',
         '-i', tmpSeg,
         ...bannerInput,
-        '-filter_complex', filterGraph(p, img, !!videoUrl, visibleSeconds),
+        '-filter_complex', filterGraph(p, img, visibleSeconds),
         '-map', '[v]', '-map', '0:a?',
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21',
         '-pix_fmt', p.pixFmt,
