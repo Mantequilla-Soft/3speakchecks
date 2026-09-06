@@ -39,7 +39,7 @@ const {
   AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, AD_SKIP_AFTER_SECONDS, AD_SKIP_MIN_SPOT_SECONDS, AD_BANNER_FREQUENCY_CAP_MINUTES, AD_GATE_ALLOWED_UPLOADERS, ADS_STAGE,
   AD_COOLDOWN_MINUTES, AD_PACING_ENABLED, AD_PACING_MIN_FRACTION, AD_SESSION_RATE_PER_MIN,
   AD_SHORTS_EVERY_N, AD_SHORTS_IGNORE_REPEAT_CAP,
-  AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT,
+  AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT, AD_BANNER_LABEL,
 } = require('../utils/config');
 const { STATES, CREATIVE_STATES, CREATIVE_KINDS, servableReason, ensureAdIndexes, slotSecondsFor } = require('../utils/adModel');
 const { formatOf } = require('../utils/adFormats');
@@ -671,6 +671,10 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     const contentManifestUrl = str(b.manifestUrl, 2048);
     // Which surface is asking. 'watch' is the default and the only one that stitches;
     // 'shorts' is answered by its own branch below and never reaches the splicer.
+    // Does the client want the banner drawn in the page rather than burned in? Asked
+    // by the client because it is the only thing that knows what it can do; see
+    // bannerMode below.
+    const bannerOverlay = b.bannerOverlay === true || String(b.bannerOverlay) === 'true';
     const rawSurface = str(b.surface, 16);
     const surface = rawSurface === 'shorts' ? 'shorts' : (rawSurface === 'upload' ? 'upload' : 'watch');
     /* The pre-upload gate has no video behind it. It runs before anything is posted, so
@@ -1114,6 +1118,17 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       // now: the creative can be edited or a campaign paused mid-playback, and a
       // session that changed shape underneath a playing manifest would produce a
       // different picture for the same seek.
+      /* How this playback will show its banner.
+       *
+       * 'burn' composites it into the frame, which is unblockable and is what every
+       * desktop playback gets. 'overlay' hands the creative to the player to draw in
+       * the page instead, which a filter rule can hide. That is accepted deliberately
+       * on mobile: a burned banner cannot be closed without a second video stream, and
+       * mobile browsers will not reliably give us one.
+       *
+       * The CLIENT asks, because it is the only thing that knows what it can do. No
+       * user-agent sniffing here. */
+      bannerMode: bannerOverlay ? 'overlay' : 'burn',
       banner: bannerCampaign && bannerCreative ? {
         campaignId: bannerCampaign._id,
         creativeId: bannerCreative._id,
@@ -1186,6 +1201,18 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       // roll to carry it), where the banner runs so a click target can sit over it,
       // and where a click goes.
       banner: bannerCampaign && bannerCreative ? {
+        /* The creative itself, for a player that is going to DRAW it.
+         *
+         * Only sent in overlay mode. A burned playback has no use for it — the pixels
+         * are already in the video — and handing an asset url to a client that does
+         * not need it is just a wider surface. */
+        overlay: bannerOverlay ? {
+          imageUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO ? null : bannerCreative.imageUrl,
+          videoUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO ? bannerCreative.manifestUrl : null,
+          // Required disclosure. Burned banners carry it in the pixels; an overlay has
+          // to draw its own, and it is not optional in either case.
+          label: AD_BANNER_LABEL || 'Ad',
+        } : null,
         manifestUrl: `${publicBase}/m/${sid}.m3u8`,
         adKey: adKeyOf(bannerCampaign._id),
         positionPercent: bannerCampaign.slotPercent ?? null,
@@ -1315,6 +1342,8 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
      */
 
     if (session.banner && !session.bannerDismissedAt && !wantsClean
+      // An overlay banner is drawn in the page, so the video must stay untouched.
+      && session.bannerMode !== 'overlay'
       && (session.banner.imageUrl || session.banner.videoUrl)) {
       const variantKey = crypto.createHash('sha1').update(content.url).digest('hex').slice(0, 12);
       const b = applyBanner(text, session, sid, publicBase, variantKey);
@@ -1877,6 +1906,64 @@ router.post('/:sid/skipped', servingVisible, express.json({ limit: '1kb' }), asy
     return res.json({ ok: true });
   } catch (err) {
     console.error('[ad-serve] skip record failed:', err && err.message);
+    return res.json({ ok: false });
+  }
+});
+
+/* ─── POST /m/:sid/banner-shown — an OVERLAY banner was displayed ─────── */
+/**
+ * Record a banner impression the server cannot see for itself.
+ *
+ * A burned banner measures itself: the player has to fetch bytes only we can produce,
+ * so delivery is a fact we observe. An overlay is drawn by the page from an asset on a
+ * CDN, and nothing about that reaches us. So the client reports it, and this is
+ * necessarily weaker evidence than a segment fetch.
+ *
+ * It is not taken on trust. The banner has to have been on screen for most of what was
+ * booked, measured from when the SERVER handed the session over, so a page cannot claim
+ * an impression the moment it loads. That is the same shape as the pacing rule on the
+ * burned path, and for the same reason: an advertiser should pay for seconds that
+ * actually elapsed.
+ *
+ * 🚨 Overlay sessions ONLY. A burned playback is measured properly and must never be
+ * able to shortcut that by claiming here instead.
+ */
+router.post('/:sid/banner-shown', servingVisible, express.json({ limit: '1kb' }), async (req, res) => {
+  try {
+    const sid = str(req.params.sid, 64);
+    if (!/^[0-9a-f]{32}$/.test(sid)) return res.status(400).json({ ok: false });
+
+    const db = getDb();
+    const session = await db.collection(SESSIONS).findOne({ sid });
+    if (!session || !session.banner) return res.json({ ok: false, reason: 'no_banner' });
+    if (session.bannerMode !== 'overlay') return res.json({ ok: false, reason: 'not_an_overlay' });
+
+    const booked = Number(session.banner.seconds) || 0;
+    const elapsed = (Date.now() - new Date(session.startedAt).getTime()) / 1000;
+    // The same fraction the burned path paces against, so the two agree about what
+    // counts as shown.
+    if (booked > 0 && elapsed < booked * AD_PACING_MIN_FRACTION) {
+      return res.json({ ok: false, reason: 'too_soon', elapsed: Math.round(elapsed) });
+    }
+
+    await recordDelivery({
+      db,
+      sid,
+      campaignId: session.banner.campaignId,
+      facts: {
+        campaignId: session.banner.campaignId,
+        owner: session.owner,
+        permlink: session.permlink,
+        country: session.country || null,
+        // So overlay-delivered impressions can be told apart from burned ones in any
+        // report. They are worth the same, and they are not the same evidence.
+        bannerOverlay: true,
+      },
+      completed: true,
+    });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[ad-serve] overlay banner record failed:', err && err.message);
     return res.json({ ok: false });
   }
 });
