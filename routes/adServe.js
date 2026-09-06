@@ -1277,7 +1277,17 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
 
     // BANNER FIRST — see applyBanner. Its window is content-relative, and splicing a
     // roll in ahead of it would move it.
-    if (session.banner && (session.banner.imageUrl || session.banner.videoUrl)) {
+    /* A dismissed banner is not written into the playlist at all.
+     *
+     * 🚨 THIS is what makes a close button possible. Everything else only changes what
+     * a given URL returns, and the player has already been handed that URL and usually
+     * the bytes behind it. Leaving the covered seconds pointing at the CDN original
+     * means the reloaded playlist has genuinely DIFFERENT urls there, so nothing the
+     * browser cached under the burned ones can come back.
+     *
+     * The client reloads the source after dismissing, which is what fetches this. */
+    if (session.banner && !session.bannerDismissedAt
+      && (session.banner.imageUrl || session.banner.videoUrl)) {
       const variantKey = crypto.createHash('sha1').update(content.url).digest('hex').slice(0, 12);
       const b = applyBanner(text, session, sid, publicBase, variantKey);
       if (b.covered.length) {
