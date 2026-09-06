@@ -699,6 +699,19 @@ module.exports = {
      * seconds was never billed for; skipping just stops us holding somebody hostage to
      * an ad nobody is being charged for anyway.
      */
+    /* Accounts exempt from the never-an-ad-on-your-own-video rule.
+     *
+     * ⚠️ TESTING ONLY, and empty by default so the rule holds for everybody unless
+     * somebody deliberately opts an account out. It exists because the trial has one
+     * allowlisted owner and that owner is also the tester: every ad is on their own
+     * content, so the self-view rule blocks every test they try to run.
+     *
+     * 🚨 REMOVE BEFORE LAUNCH. An account left in here earns from replaying its own
+     * uploads, which is the exact behaviour the rule was added to stop.
+     */
+    AD_SELF_VIEW_ALLOWED_ACCOUNTS: (process.env.AD_SELF_VIEW_ALLOWED_ACCOUNTS || '')
+      .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
+
     AD_SKIP_AFTER_SECONDS: parseFloat(process.env.AD_SKIP_AFTER_SECONDS) || 5,
     AD_SKIP_MIN_SPOT_SECONDS: parseFloat(process.env.AD_SKIP_MIN_SPOT_SECONDS) || 7,
 

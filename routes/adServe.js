@@ -1803,6 +1803,56 @@ function skipAfterFor(durationSeconds) {
   return AD_SKIP_AFTER_SECONDS < d ? AD_SKIP_AFTER_SECONDS : null;
 }
 
+/* ─── POST /m/:sid/skipped — the viewer pressed Skip on a spot ────────── */
+/**
+ * A skipped spot counts as WATCHED.
+ *
+ * The button only appears after the threshold, so pressing it means the viewer sat
+ * through the part we ask them to sit through and then chose to move on. That is a
+ * delivered impression by any honest reading: they saw the ad, they know whose it was,
+ * and the alternative — billing nothing — would mean an advertiser is charged less the
+ * more clearly their message landed in the time it had.
+ *
+ * It also removes a perverse incentive on our side. Without this, every skip is
+ * revenue we lose, and the cheapest way to protect revenue would be to make skipping
+ * harder. Counting it means the skip costs us nothing and can stay generous.
+ *
+ * recordDelivery's own transition guard makes this idempotent: a second press, or a
+ * press on a spot the segments already completed, changes nothing and bills nothing
+ * twice.
+ */
+router.post('/:sid/skipped', servingVisible, express.json({ limit: '1kb' }), async (req, res) => {
+  try {
+    const sid = str(req.params.sid, 64);
+    if (!/^[0-9a-f]{32}$/.test(sid)) return res.status(400).json({ ok: false });
+
+    const db = getDb();
+    const session = await db.collection(SESSIONS).findOne({ sid });
+    if (!session || !session.campaignId) return res.json({ ok: false, reason: 'no_spot' });
+
+    await recordDelivery({
+      db,
+      sid,
+      campaignId: session.campaignId,
+      facts: {
+        campaignId: session.campaignId,
+        owner: session.owner,
+        permlink: session.permlink,
+        country: session.country || null,
+        // Kept so "how often is this creative skipped" is answerable without joining
+        // anything. It is a real signal about a spot, and a skipped impression is not
+        // the same as one watched to the end even though both are billed.
+        skipped: true,
+      },
+      completed: true,
+    });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[ad-serve] skip record failed:', err && err.message);
+    return res.json({ ok: false });
+  }
+});
+
 /* ─── POST /m/:sid/dismiss — the viewer closed the banner ─────────────── */
 /**
  * Stop showing this session's banner.

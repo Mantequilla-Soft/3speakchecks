@@ -29,7 +29,7 @@
  * answers "no ads" rather than risking an ad in front of a paying subscriber.
  */
 const { getDb } = require('./db');
-const { PREMIUM_USERS_COLLECTION, AD_CREATOR_PREFS_COLLECTION, ADS_ALLOWED_OWNERS, AD_PREMIUM_OVERRIDE_ACCOUNTS } = require('./config');
+const { PREMIUM_USERS_COLLECTION, AD_CREATOR_PREFS_COLLECTION, ADS_ALLOWED_OWNERS, AD_PREMIUM_OVERRIDE_ACCOUNTS , AD_SELF_VIEW_ALLOWED_ACCOUNTS } = require('./config');
 
 const TTL_MS = parseInt(process.env.AD_ELIGIBILITY_TTL_MS, 10) || 60 * 1000;
 
@@ -132,7 +132,10 @@ async function adDecision({ viewer, owner }) {
    * ⚠️ NOT the pre-upload gate, where the uploader IS the intended audience. That
    * surface returns in routes/adServe.js long before it reaches this.
    */
-  if (viewer && norm(viewer) === norm(owner)) return { ads: false, reason: 'own_video' };
+  if (viewer && norm(viewer) === norm(owner)
+    && !AD_SELF_VIEW_ALLOWED_ACCOUNTS.includes(norm(viewer))) {
+    return { ads: false, reason: 'own_video' };
+  }
 
   const premium = await isPremiumViewer(viewer);
   // null = the premium set could not be read. Fail safe: no ad. An ad withheld
