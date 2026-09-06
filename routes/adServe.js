@@ -42,7 +42,10 @@ const {
   AD_SHORTS_EVERY_N, AD_SHORTS_IGNORE_REPEAT_CAP,
   AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT, AD_BANNER_LABEL,
 } = require('../utils/config');
-const { STATES, CREATIVE_STATES, CREATIVE_KINDS, servableReason, ensureAdIndexes, slotSecondsFor } = require('../utils/adModel');
+const {
+  STATES, CREATIVE_STATES, CREATIVE_KINDS, servableReason, ensureAdIndexes, slotSecondsFor,
+  creativesByCampaign,
+} = require('../utils/adModel');
 const { formatOf } = require('../utils/adFormats');
 const { burnSegment } = require('../services/adBurner');
 
@@ -736,9 +739,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       }).limit(50).toArray();
       if (!candsG.length) return res.json({ ad: null, reason: 'no_campaign' });
 
-      const crsG = await dbG.collection(AD_CREATIVES_COLLECTION)
-        .find({ campaignId: { $in: candsG.map((x) => x._id) }, status: CREATIVE_STATES.READY }).toArray();
-      const byCG = new Map(crsG.map((cr) => [String(cr.campaignId), cr]));
+      const byCG = await creativesByCampaign(dbG, candsG);
 
       // Same approval gate as everywhere else, and it fails closed for the same reason:
       // anyone can fill in the form and be reviewed afterwards.
@@ -864,9 +865,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       }).limit(50).toArray();
       if (!cands.length) return res.json({ ad: null, reason: 'no_campaign', everyN: AD_SHORTS_EVERY_N });
 
-      const crs = await db2.collection(AD_CREATIVES_COLLECTION)
-        .find({ campaignId: { $in: cands.map((c) => c._id) }, status: CREATIVE_STATES.READY }).toArray();
-      const byC = new Map(crs.map((cr) => [String(cr.campaignId), cr]));
+      const byC = await creativesByCampaign(db2, cands);
 
       // Same approval gate as the watch surface, and it fails closed for the same
       // reason: anyone can fill in the whole form now and be reviewed afterwards.
@@ -991,9 +990,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     }).limit(50).toArray();
     if (!candidates.length) return res.json({ ad: null, reason: 'no_campaign' });
 
-    const creatives = await db.collection(AD_CREATIVES_COLLECTION)
-      .find({ campaignId: { $in: candidates.map((c) => c._id) }, status: CREATIVE_STATES.READY }).toArray();
-    const byCampaign = new Map(creatives.map((cr) => [String(cr.campaignId), cr]));
+    const byCampaign = await creativesByCampaign(db, candidates);
 
     // Frequency cap: the same viewer must not be shown the same spot again inside
     // the window. Without it a binge session carries one advertiser a dozen times

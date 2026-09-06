@@ -251,10 +251,42 @@ function servableReason(campaign, creative, now = Date.now()) {
   return null;
 }
 
+/**
+ * The creative each of these campaigns will run, keyed by campaign id.
+ *
+ * 🚨 THE LINK POINTS CAMPAIGN → CREATIVE, not the other way round.
+ *
+ * It used to live on the creative, as a single `campaignId`. That made a creative
+ * the property of one flight: attaching the same spot to a second flight moved the
+ * pointer and silently pulled it off the first, and an advertiser running one ad
+ * across three bookings had no way to say so. Pointing from the campaign instead
+ * lets one creative serve any number of flights, and makes "one spot per flight"
+ * structural rather than something an updateMany has to keep tidying up.
+ *
+ * `readyOnly` is the serving path's rule — nothing runs before a human approved it.
+ * The advertiser's own listing passes false, because a spot still in review is
+ * exactly what they are waiting to be told about.
+ */
+async function creativesByCampaign(db, campaigns, { readyOnly = true } = {}) {
+  const wanted = [...new Set((campaigns || []).map((c) => c.creativeEmbedId).filter(Boolean))];
+  if (!wanted.length) return new Map();
+  const query = { embedId: { $in: wanted } };
+  if (readyOnly) query.status = CREATIVE_STATES.READY;
+  const rows = await db.collection(AD_CREATIVES_COLLECTION).find(query).toArray();
+  const byEmbed = new Map(rows.map((cr) => [cr.embedId, cr]));
+  const out = new Map();
+  for (const c of campaigns) {
+    const cr = c.creativeEmbedId ? byEmbed.get(c.creativeEmbedId) : null;
+    if (cr) out.set(String(c._id), cr);
+  }
+  return out;
+}
+
 module.exports = {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, DAY_MS,
   ensureAdIndexes, priceForDays, ratePerDayFor, validDayCount, windowFrom, servableReason,
   isMotionBanner,
   missingAssetFor,
   slotSecondsFor,
+  creativesByCampaign,
 };

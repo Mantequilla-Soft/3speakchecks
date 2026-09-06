@@ -35,7 +35,7 @@ const {
 } = require('../utils/config');
 const {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, DAY_MS, ensureAdIndexes, priceForDays, ratePerDayFor,
-  validDayCount, windowFrom, servableReason,
+  validDayCount, windowFrom, servableReason, creativesByCampaign,
 } = require('../utils/adModel');
 const { getSnapshot, forecastPerDay } = require('../services/adInventory');
 const { videoShapeFromManifest } = require('../utils/videoDuration');
@@ -150,7 +150,10 @@ function publicCreative(cr) {
     durationSeconds: cr.durationSeconds,
     encoded: !!cr.manifestUrl,
     note: cr.reviewNote || null,
-    campaignId: cr.campaignId ? String(cr.campaignId) : null,
+    // Deliberately absent: a creative is no longer owned by one flight, so a single
+    // `campaignId` here could only ever be wrong. Which flights use it is a property
+    // of the flights, and the campaign list already says so.
+
     createdAt: cr.createdAt,
     // Playable straight away so the advertiser (and we) can watch it back before
     // it ever runs — the whole point of reviewing a spot beforehand.
@@ -680,9 +683,8 @@ router.get('/campaigns', featureVisible, async (req, res) => {
     const db = getDb();
     const camps = await db.collection(AD_CAMPAIGNS_COLLECTION)
       .find({ advertiserRef: advertiser.reference }).sort({ createdAt: -1 }).limit(100).toArray();
-    const creatives = await db.collection(AD_CREATIVES_COLLECTION)
-      .find({ campaignId: { $in: camps.map((c) => c._id) } }).toArray();
-    const byCampaign = new Map(creatives.map((cr) => [String(cr.campaignId), cr]));
+    // Not readyOnly: a spot still in review is the thing this list exists to report.
+    const byCampaign = await creativesByCampaign(db, camps, { readyOnly: false });
 
     res.set('Cache-Control', 'no-store');
     res.json({
@@ -770,7 +772,6 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
         { embedId: key },
         {
           $set: {
-            campaignId: id,
             advertiserRef: advertiser.reference,
             kind: CREATIVE_KINDS.IMAGE,
             imageUrl,
@@ -788,6 +789,12 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
           $setOnInsert: { embedId: key, reviewNote: null, createdAt: new Date() },
         },
         { upsert: true },
+      );
+      // The flight points at the creative, never the reverse: one banner can be on
+      // as many flights as the advertiser books.
+      await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
+        { _id: id },
+        { $set: { creativeEmbedId: key, updatedAt: new Date() } },
       );
       const saved = await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: key });
       return res.json({ success: true, creative: publicCreative(saved) });
@@ -907,7 +914,6 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
       { embedId: creativeKey },
       {
         $set: {
-          campaignId: id,
           advertiserRef: advertiser.reference,
           kind: CREATIVE_KINDS.VIDEO,
           // Measured once from the media; null until an encode exists to measure.
@@ -925,13 +931,13 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
       { upsert: true },
     );
 
-    // One spot per flight. Serving maps creatives by campaignId, so a second row
-    // pointing at the same campaign would leave which one runs down to document
-    // order. Release the previous spot rather than leaving two attached — it stays
-    // in the advertiser's library, just no longer on this flight.
-    await db.collection(AD_CREATIVES_COLLECTION).updateMany(
-      { campaignId: id, embedId: { $ne: creativeKey } },
-      { $set: { campaignId: null, updatedAt: new Date() } },
+    // One spot per flight, and it is structural now: the flight holds a single
+    // pointer, so naming a new creative replaces the old one by definition. This
+    // used to be a sweep that nulled `campaignId` on every other creative attached
+    // to this flight, which also meant a creative could only ever be on ONE flight.
+    await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
+      { _id: id },
+      { $set: { creativeEmbedId: creativeKey, updatedAt: new Date() } },
     );
 
     const creative = await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: creativeKey });
@@ -1155,7 +1161,9 @@ router.post('/campaigns/:id/claim', featureVisible, express.json({ limit: '8kb' 
 
     if (!reserved.length) {
       const current = await db.collection(AD_CAMPAIGNS_COLLECTION).findOne({ _id: id });
-      const creative = await db.collection(AD_CREATIVES_COLLECTION).findOne({ campaignId: id });
+      const creative = current?.creativeEmbedId
+        ? await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: current.creativeEmbedId })
+        : null;
       // Nothing creditable. Say WHICH of the two it is — "already credited" in
       // front of somebody whose payment was just refused would be actively
       // misleading about where their money went.
@@ -1254,7 +1262,9 @@ router.post('/campaigns/:id/claim', featureVisible, express.json({ limit: '8kb' 
     }
 
     const fresh = await db.collection(AD_CAMPAIGNS_COLLECTION).findOne({ _id: id });
-    const creative = await db.collection(AD_CREATIVES_COLLECTION).findOne({ campaignId: id });
+    const creative = fresh?.creativeEmbedId
+      ? await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: fresh.creativeEmbedId })
+      : null;
     console.log(`[ad-campaigns] ${id} credited ${credited.toFixed(3)} HBD (total ${paidHbd}/${campaign.priceHbd})`);
     res.json({
       success: true,
