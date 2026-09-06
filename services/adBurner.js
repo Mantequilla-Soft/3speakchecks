@@ -67,7 +67,7 @@ const {
  * place and they kept being handed out, so the fix looked like it had not worked at
  * all. The cache lives at AD_BURN_CACHE_DIR (/var/cache/3speak-ad-burn), not in /tmp.
  */
-const RECIPE_VERSION = 'v5';
+const RECIPE_VERSION = 'v8';
 
 const CACHE_DIR = AD_BURN_CACHE_DIR || path.join(os.tmpdir(), '3speak-ad-burn');
 
@@ -299,7 +299,24 @@ function filterGraph(frame, image, visibleSeconds = null) {
      * to where this segment begins, so one banner second maps to one segment second.
      * The `-ss` above chooses WHERE in the banner to start; this decides WHEN it
      * plays. Both are needed and they are not the same thing. */
-    `[1:v]scale=${bw}:${bh},setpts=PTS-STARTPTS+${frame.startTime.toFixed(3)}/TB[bn]`,
+    /* 🚨 The banner is TRIMMED to the segment's length before it is placed.
+     *
+     * Without this the output runs until the LONGEST input ends, and a 10-second
+     * banner on a 6-second segment produced a 10-second segment: the viewer's video
+     * froze at 6s while the banner played on, and then the NEXT segment showed the
+     * banner from 6s again. On screen that is the ad, then the tail of the ad a second
+     * time, which is what it looked like.
+     *
+     * `shortest=1` on the overlay is the other way to bound it and is the wrong one:
+     * it ends the output when the SHORTEST input ends, so a banner shorter than the
+     * segment would cut the viewer's video off instead.
+     *
+     * Order matters. Rebase the banner to zero, cut it to the segment's length, then
+     * move it onto the segment's clock: trimming after the shift would measure the cut
+     * from the wrong origin. */
+    `[1:v]scale=${bw}:${bh},setpts=PTS-STARTPTS,`
+      + `trim=end=${(frame.duration > 0 ? frame.duration : 60).toFixed(3)},`
+      + `setpts=PTS+${frame.startTime.toFixed(3)}/TB[bn]`,
     /* No `shortest`, for either kind.
      *
      * It was needed while the banner looped: an endless input gives the overlay no
@@ -450,6 +467,18 @@ async function burnSegment({
         // segment — measured at 9MB against the 431KB original, a 20x regression
         // that plays correctly and would only ever have shown up as a bandwidth bill.
         '-c:a', 'copy',
+        /* A hard ceiling on the output's length, on top of trimming the banner input.
+         *
+         * The trim alone left a segment 83ms long: the banner's frames are 30fps and
+         * the content's are 24, so cutting the banner at the segment's duration lands
+         * mid-frame and the last one extends past it. A segment that does not have the
+         * length the playlist promises drifts the timeline against every other
+         * rendition, so it is bounded here as well as there. */
+        /* ⚠️ `-to`, an ABSOLUTE end, not `-t`. With `-copyts` the timestamps are the
+         * video's own, so a segment beginning at 31.8s is already "past" any relative
+         * duration and `-t 6.042` ends the output before it starts: every segment came
+         * back unburned. `-to` is measured on the same clock the segment carries. */
+        '-to', (p.startTime + (p.duration > 0 ? p.duration : 60)).toFixed(3),
         '-muxdelay', '0', '-muxpreload', '0',
         '-f', 'mpegts', tmpOut,
       ];

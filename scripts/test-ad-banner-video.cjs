@@ -121,6 +121,24 @@ const frameAt = async (f, _t, out) => {
     check('  and the viewer keeps the WHOLE segment',
       Math.abs((await durationOf(short)) - srcDur) < 0.5, true);
 
+    /* 🚨 A burned segment must be EXACTLY as long as the one it replaces.
+     *
+     * The playlist still declares the original EXTINF, so a segment that runs longer
+     * pushes everything after it out of step. It happened: a 10-second banner on a
+     * 6-second segment produced a 10-second segment, because the output ran until the
+     * LONGEST input ended. The viewer's video froze at 6s while the banner played on,
+     * and the next segment then showed the banner from 6s again, so the ad appeared to
+     * play and then repeat its tail.
+     *
+     * Checked to a frame rather than to half a second, which is the tolerance the
+     * check above uses and far too loose to see a timeline drift. */
+    const longer = await burnSegment({
+      segmentUrl: `${base}/content.ts`, videoUrl: `${base}/banner-long.mp4`, offsetSeconds: 0,
+    });
+    const got = await durationOf(longer);
+    console.log(`        segment ${srcDur.toFixed(3)}s, banner 12s, burned ${got.toFixed(3)}s`);
+    check('a banner LONGER than the segment does not stretch it', Math.abs(got - srcDur) < 0.05, true);
+
     console.log('\n-- the still path still works --');
     const png = path.join(dir, 'still.png');
     await execFileP('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=red:size=320x60:d=1', '-frames:v', '1', png]);
