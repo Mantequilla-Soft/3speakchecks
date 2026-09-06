@@ -712,6 +712,18 @@ module.exports = {
     AD_SELF_VIEW_ALLOWED_ACCOUNTS: (process.env.AD_SELF_VIEW_ALLOWED_ACCOUNTS || '')
       .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
 
+    /* How long a banner runs before its close button appears.
+     *
+     * Not from the first frame: an ad that can be dismissed instantly is an ad nobody
+     * reads, and the advertiser bought seconds on screen rather than a button. Five is
+     * long enough to see whose it is and short enough not to feel trapped, which is
+     * the same bargain the skippable roll makes.
+     *
+     * Sent to every player, so the burned banner, the mobile overlay and the watch
+     * page cannot drift apart on a number that is really one decision.
+     */
+    AD_BANNER_CLOSE_AFTER_SECONDS: parseFloat(process.env.AD_BANNER_CLOSE_AFTER_SECONDS) || 5,
+
     AD_SKIP_AFTER_SECONDS: parseFloat(process.env.AD_SKIP_AFTER_SECONDS) || 5,
     AD_SKIP_MIN_SPOT_SECONDS: parseFloat(process.env.AD_SKIP_MIN_SPOT_SECONDS) || 7,
 

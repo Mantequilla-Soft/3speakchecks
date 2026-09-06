@@ -36,7 +36,8 @@ const { getDb } = require('../utils/db');
 const { adDecision, isPremiumViewer } = require('../utils/adEligibility');
 const {
   AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_IMPRESSIONS_COLLECTION, ADVERTISERS_COLLECTION,
-  AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, AD_SKIP_AFTER_SECONDS, AD_SKIP_MIN_SPOT_SECONDS, AD_BANNER_FREQUENCY_CAP_MINUTES, AD_GATE_ALLOWED_UPLOADERS, ADS_STAGE,
+  AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, AD_SKIP_AFTER_SECONDS, AD_SKIP_MIN_SPOT_SECONDS,
+  AD_BANNER_CLOSE_AFTER_SECONDS, AD_BANNER_FREQUENCY_CAP_MINUTES, AD_GATE_ALLOWED_UPLOADERS, ADS_STAGE,
   AD_COOLDOWN_MINUTES, AD_PACING_ENABLED, AD_PACING_MIN_FRACTION, AD_SESSION_RATE_PER_MIN,
   AD_SHORTS_EVERY_N, AD_SHORTS_IGNORE_REPEAT_CAP,
   AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT, AD_BANNER_LABEL,
@@ -1342,16 +1343,26 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
      */
 
     if (session.banner && !session.bannerDismissedAt && !wantsClean
-      // An overlay banner is drawn in the page, so the video must stay untouched.
-      && session.bannerMode !== 'overlay'
       && (session.banner.imageUrl || session.banner.videoUrl)) {
       const variantKey = crypto.createHash('sha1').update(content.url).digest('hex').slice(0, 12);
       const b = applyBanner(text, session, sid, publicBase, variantKey);
       if (b.covered.length) {
-        text = b.text;
+        /* 🚨 The WINDOW is recorded either way. Only the burn is conditional.
+         *
+         * applyBanner is what works out WHERE the banner runs, and an overlay needs
+         * that answer more than a burn does: the player is drawing the banner itself
+         * and has nothing else to tell it when. Skipping this block for an overlay
+         * left bannerStartAt unset, the player never learned there was a banner, and
+         * it drew nothing — no burn and no overlay, which looks exactly like no ad was
+         * ever sold.
+         *
+         * So the numbers are always kept, and only the rewritten playlist is dropped. */
+        const overlayMode = session.bannerMode === 'overlay';
+        if (!overlayMode) text = b.text;
         // The originals this variant's burns read from. Keyed by variant so a player
         // switching resolution mid-playback gets the right source for each.
-        mark[`bannerSegs.${variantKey}`] = b.covered;
+        // Burned-segment map: meaningless for an overlay, which has none.
+        if (!overlayMode) mark[`bannerSegs.${variantKey}`] = b.covered;
         mark.bannerStartAt = b.startAt;
         mark.bannerDurationSeconds = b.durationSeconds;
         // What was PAID for, as distinct from the span of whole segments it lands on.
@@ -1427,6 +1438,9 @@ router.get('/:sid/i', servingVisible, async (req, res) => {
        *
        * Sessions from before the booked figure existed really were burned for the full
        * span, so they keep reporting it. */
+      // When the close button may appear, in seconds into the banner. One decision,
+      // sent to every player, so the burned banner and the mobile overlay cannot drift.
+      bannerCloseAfterSeconds: AD_BANNER_CLOSE_AFTER_SECONDS,
       bannerDurationSeconds: typeof session.bannerBookedSeconds === 'number'
         ? Math.min(session.bannerBookedSeconds, session.bannerDurationSeconds || session.bannerBookedSeconds)
         : (typeof session.bannerDurationSeconds === 'number' ? session.bannerDurationSeconds : null),
