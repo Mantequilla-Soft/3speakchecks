@@ -1587,9 +1587,23 @@ router.get('/:sid/s/:vk/:i', servingVisible, async (req, res) => {
     if (!burned) return res.redirect(302, original);
 
     res.set('Content-Type', 'video/mp2t');
-    // The bytes for this (segment, creative) never change, and a viewer seeking back
-    // over the banner should not make us serve them twice.
-    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    /* 🚨 REVALIDATE. Not `immutable`, which this was.
+     *
+     * The bytes for a (segment, creative) really do never change, so a year-long
+     * immutable cache was right until the viewer could close the banner. It made the
+     * close button impossible to implement: dismissing tells the server to stop
+     * burning, but the player refetches the SAME URL, and an immutable response is
+     * served straight from the browser's own cache without ever asking us. The banner
+     * stayed on screen no matter what the server had been told.
+     *
+     * `no-cache` still allows storing, it just requires asking first. A dismissed
+     * session then gets the 302 to the plain segment, which is the whole point.
+     *
+     * The cost is a re-download when somebody seeks back over a banner they have
+     * already seen: a few hundred KB, a few times, against a feature that does not
+     * work at all otherwise. The server-side burn cache is untouched, so we never
+     * re-encode — only re-send. */
+    res.set('Cache-Control', 'private, no-cache');
     return res.sendFile(burned);
   } catch (err) {
     console.error('[ad-serve] burned segment failed:', err && err.message);
