@@ -1222,6 +1222,21 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
 /* ─── GET /m/:sid.m3u8 ────────────────────────────────────────────────── */
 router.get('/:sid.m3u8', servingVisible, async (req, res) => {
   try {
+    /* `?nobanner=1` asks for this playlist WITHOUT the banner burned in.
+     *
+     * The player preloads it into a hidden element while a banner is running, so
+     * closing the ad becomes a switch between two decoded streams rather than a
+     * refetch. It does NOT dismiss anything: the session is untouched, the impression
+     * stands, and a viewer who never presses the button is unaffected.
+     *
+     * 🚨 IT HAS TO TRAVEL INTO THE VARIANT URLS. The master lists variants that point
+     * back at this route, and dropping the flag there meant the shadow fetched a clean
+     * master and then BURNED variants: it played the banner too, so closing the ad
+     * swapped one banner for another and appeared to do nothing at all.
+     */
+    const wantsClean = String(req.query.nobanner || '') === '1';
+    const cleanQ = wantsClean ? '&nobanner=1' : '';
+
     const sid = str(req.params.sid, 64);
     if (!/^[0-9a-f]{32}$/.test(sid)) return res.status(400).send('bad session');
 
@@ -1263,11 +1278,11 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
         if (!line || line.startsWith('#')) {
           return raw.replace(/URI="([^"]+)"/i, (full, u) => {
             const abs = new URL(u, content.url).href;
-            return `URI="${publicBase}/m/${sid}.m3u8?p=${encodeURIComponent(abs)}"`;
+            return `URI="${publicBase}/m/${sid}.m3u8?p=${encodeURIComponent(abs)}${cleanQ}"`;
           });
         }
         const abs = new URL(line, content.url).href;
-        return `${publicBase}/m/${sid}.m3u8?p=${encodeURIComponent(abs)}`;
+        return `${publicBase}/m/${sid}.m3u8?p=${encodeURIComponent(abs)}${cleanQ}`;
       }).join('\n');
       return res.send(rewritten);
     }
@@ -1298,7 +1313,6 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
      * and a viewer who never presses the button is unaffected. This is only a second
      * copy of the same content for the player to hold ready.
      */
-    const wantsClean = String(req.query.nobanner || '') === '1';
 
     if (session.banner && !session.bannerDismissedAt && !wantsClean
       && (session.banner.imageUrl || session.banner.videoUrl)) {
