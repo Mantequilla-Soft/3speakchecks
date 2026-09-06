@@ -1286,7 +1286,21 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
      * browser cached under the burned ones can come back.
      *
      * The client reloads the source after dismissing, which is what fetches this. */
-    if (session.banner && !session.bannerDismissedAt
+    /* `?nobanner=1` asks for the same playlist WITHOUT the banner burned in.
+     *
+     * The player preloads this alongside the real one while a banner is running, so
+     * that when the viewer closes the ad the clean seconds are already buffered and
+     * nothing has to be fetched. Refetching is what makes closing a banner pause: the
+     * burned bytes are already downloaded, and replacing them means downloading again
+     * however cleverly it is asked for.
+     *
+     * It does NOT dismiss anything. The session stays as it is, the impression stands,
+     * and a viewer who never presses the button is unaffected. This is only a second
+     * copy of the same content for the player to hold ready.
+     */
+    const wantsClean = String(req.query.nobanner || '') === '1';
+
+    if (session.banner && !session.bannerDismissedAt && !wantsClean
       && (session.banner.imageUrl || session.banner.videoUrl)) {
       const variantKey = crypto.createHash('sha1').update(content.url).digest('hex').slice(0, 12);
       const b = applyBanner(text, session, sid, publicBase, variantKey);
