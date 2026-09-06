@@ -41,7 +41,7 @@ const { getSnapshot, forecastPerDay } = require('../services/adInventory');
 const { videoShapeFromManifest } = require('../utils/videoDuration');
 const {
   DEFAULT_FORMAT, FORMAT_KEYS, formatOf, isBookableFormat, rateFor, defaultRateFor, rateCard, formatAccepts,
-  creativeSpecError,
+  creativeSpecError, acceptedKinds,
 } = require('../utils/adFormats');
 const { findSlotConflict, slotAvailability, slotHolders } = require('../utils/adSlots');
 const { balanceOf, ledgerOf } = require('../utils/adBalance');
@@ -169,6 +169,11 @@ function publicCampaign(c, creative) {
     format: formatOf(c).key,
     formatLabel: formatOf(c).label,
     creativeKind: formatOf(c).creativeKind,
+    // EVERY kind this flight can run, not just the one its copy leads with. The
+    // banner takes a still or a video; publishing only the singular is what made the
+    // bookings list tell an advertiser with a finished video banner that the flight
+    // "needs an approved banner image" and then refuse to offer it.
+    creativeKinds: acceptedKinds(formatOf(c)),
     creativeSpec: formatOf(c).creativeSpec || null,
     status: c.status,
     // Percent for anything booked since slots became relative; `slotPosition` is
