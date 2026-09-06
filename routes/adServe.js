@@ -780,6 +780,8 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         adManifestUrl: pickCrG.manifestUrl,
         contentManifestUrl: null,
         adFirstFetchAt: null,
+        // Set when the viewer closes the banner; from then on segments serve unburned.
+        bannerDismissedAt: null,
         slotPercent: null,
         slotPosition: null,
         banner: null,
@@ -1557,6 +1559,10 @@ router.get('/:sid/s/:vk/:i', servingVisible, async (req, res) => {
      *
      * Older sessions have no booked figure. `null` then means "the whole segment",
      * which is precisely the behaviour they were burned with. */
+    // Closed by the viewer: everything from here is the plain video. Checked before
+    // any burn work, so dismissing also stops us spending CPU on frames nobody wants.
+    if (session.bannerDismissedAt) return res.redirect(302, original);
+
     const bookedTotal = Number(session.bannerBookedSeconds);
     const visibleSeconds = Number.isFinite(bookedTotal) && bookedTotal > 0
       ? bookedTotal - (i * perSeg)
@@ -1750,6 +1756,51 @@ router.post('/:sid/posted', servingVisible, express.json({ limit: '2kb' }), asyn
     return res.json({ ok: true });
   } catch (err) {
     console.error('[ad-serve] gate confirmation failed:', err && err.message);
+    return res.json({ ok: false });
+  }
+});
+
+/* ─── POST /m/:sid/dismiss — the viewer closed the banner ─────────────── */
+/**
+ * Stop showing this session's banner.
+ *
+ * 🚨 THE PIXELS ALREADY SENT CANNOT BE TAKEN BACK. A banner is composited into the
+ * frame, which is the whole reason it cannot be hidden with a CSS rule, and that cuts
+ * both ways: whatever the player has already buffered still carries it. What this can
+ * do is make every segment from here on clean, and the client flushes its buffer so
+ * the change is reached in about a second rather than whenever the buffer drains.
+ *
+ * The impression is NOT withdrawn. It was delivered: the banner was on screen and the
+ * viewer saw enough of it to want it gone. Dismissal is recorded alongside it instead,
+ * because "how often is this closed" is a real signal about a creative and refunding
+ * the impression would make closing it an attack on the advertiser.
+ *
+ * Deliberately unauthenticated, like every other route here. The worst a forged call
+ * can do is remove an ad from somebody else's playback if they also know their session
+ * id, which is not a thing worth defending against.
+ */
+router.post('/:sid/dismiss', servingVisible, express.json({ limit: '1kb' }), async (req, res) => {
+  try {
+    const sid = str(req.params.sid, 64);
+    if (!/^[0-9a-f]{32}$/.test(sid)) return res.status(400).json({ ok: false });
+
+    const db = getDb();
+    const session = await db.collection(SESSIONS).findOne({ sid });
+    if (!session || !session.banner) return res.json({ ok: false, reason: 'no_banner' });
+
+    await db.collection(SESSIONS).updateOne(
+      { sid, bannerDismissedAt: null },
+      { $set: { bannerDismissedAt: new Date() } },
+    );
+    // Recorded on the impression too, so a creative that people close can be seen for
+    // what it is without joining two collections to find out.
+    await db.collection(AD_IMPRESSIONS_COLLECTION).updateOne(
+      { sid, campaignId: session.banner.campaignId },
+      { $set: { bannerDismissed: true, bannerDismissedAt: new Date() } },
+    ).catch(() => {});
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[ad-serve] banner dismiss failed:', err && err.message);
     return res.json({ ok: false });
   }
 });
