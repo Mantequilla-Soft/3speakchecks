@@ -683,6 +683,25 @@ module.exports = {
      * growing with the screen on a large one. 240 is the height the recommended
      * creative (1456x240) already is, so a well-made banner is unaffected and only an
      * oversized or squarer upload is scaled down to fit. */
+    /* Skippable rolls: how long a viewer must watch before a Skip button appears, and
+     * the shortest spot that gets one at all.
+     *
+     * A short spot is over before a skip would help, and offering one on a 6-second ad
+     * mostly teaches people to look for the button instead of the ad. Below the
+     * threshold the spot simply plays.
+     *
+     * ⚠️ Sent to the player rather than hardcoded there, so these can move without a
+     * frontend deploy — and so what the page offers can never disagree with what the
+     * server believes it sold.
+     *
+     * This does NOT change what an advertiser is billed. An impression still completes
+     * only once enough of the spot has actually played, so a spot skipped at five
+     * seconds was never billed for; skipping just stops us holding somebody hostage to
+     * an ad nobody is being charged for anyway.
+     */
+    AD_SKIP_AFTER_SECONDS: parseFloat(process.env.AD_SKIP_AFTER_SECONDS) || 5,
+    AD_SKIP_MIN_SPOT_SECONDS: parseFloat(process.env.AD_SKIP_MIN_SPOT_SECONDS) || 7,
+
     AD_BANNER_MAX_HEIGHT_PX: parseInt(process.env.AD_BANNER_MAX_HEIGHT_PX, 10) || 240,
 
     AD_BANNER_MARGIN_PCT: parseFloat(process.env.AD_BANNER_MARGIN_PCT) || 6,

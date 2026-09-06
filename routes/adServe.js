@@ -36,7 +36,7 @@ const { getDb } = require('../utils/db');
 const { adDecision, isPremiumViewer } = require('../utils/adEligibility');
 const {
   AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_IMPRESSIONS_COLLECTION, ADVERTISERS_COLLECTION,
-  AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, AD_BANNER_FREQUENCY_CAP_MINUTES, AD_GATE_ALLOWED_UPLOADERS, ADS_STAGE,
+  AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, AD_SKIP_AFTER_SECONDS, AD_SKIP_MIN_SPOT_SECONDS, AD_BANNER_FREQUENCY_CAP_MINUTES, AD_GATE_ALLOWED_UPLOADERS, ADS_STAGE,
   AD_COOLDOWN_MINUTES, AD_PACING_ENABLED, AD_PACING_MIN_FRACTION, AD_SESSION_RATE_PER_MIN,
   AD_SHORTS_EVERY_N, AD_SHORTS_IGNORE_REPEAT_CAP,
   AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT,
@@ -1340,6 +1340,10 @@ router.get('/:sid/i', servingVisible, async (req, res) => {
       // guessing, because a wrong offset silently corrupts watch data.
       adStartAt: typeof session.adStartAt === 'number' ? session.adStartAt : null,
       adDurationSeconds: session.adDurationSeconds || null,
+      /* When a Skip button may appear, in seconds into the spot, or null for a spot
+       * too short to be worth skipping. Decided here rather than in the page so the
+       * thresholds can move without a deploy. */
+      skipAfterSeconds: skipAfterFor(session.adDurationSeconds),
       // Where the banner runs, so a click target can be positioned over it. Same
       // contract as the break: null until a variant has been rendered, because only
       // the stitcher knows which segments it actually landed on.
@@ -1759,6 +1763,21 @@ router.post('/:sid/posted', servingVisible, express.json({ limit: '2kb' }), asyn
     return res.json({ ok: false });
   }
 });
+
+/**
+ * When a Skip may be offered on a spot of this length, or null for never.
+ *
+ * One definition, used by both the session payload and the info endpoint, because a
+ * page that decided this for itself could offer a skip on a spot the server thinks is
+ * unskippable and there would be no way to tell which was right.
+ */
+function skipAfterFor(durationSeconds) {
+  const d = Number(durationSeconds);
+  if (!Number.isFinite(d) || d <= AD_SKIP_MIN_SPOT_SECONDS) return null;
+  // Never a skip that lands at or past the end: on a spot barely over the threshold
+  // that is a button which appears just as the ad finishes, which is worse than none.
+  return AD_SKIP_AFTER_SECONDS < d ? AD_SKIP_AFTER_SECONDS : null;
+}
 
 /* ─── POST /m/:sid/dismiss — the viewer closed the banner ─────────────── */
 /**
