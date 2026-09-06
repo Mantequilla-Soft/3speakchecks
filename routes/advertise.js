@@ -1127,8 +1127,44 @@ router.get('/admin/creatives', requireAdmin, async (req, res) => {
       : { status: CREATIVE_STATES.REVIEW };   // the queue that needs a person
     const rows = await getDb().collection(AD_CREATIVES_COLLECTION)
       .find(query).sort({ createdAt: -1 }).limit(100).toArray();
+
+    /* WHICH FLIGHTS EACH CREATIVE IS ON.
+     *
+     * A reverse lookup, because the link points campaign → creative: the flight holds
+     * `creativeEmbedId`, and one creative can be on any number of flights. It used to
+     * be a single `campaignId` on the creative, which is why attaching a spot to a
+     * second flight silently pulled it off the first.
+     *
+     * The stale `campaignId` is stripped from the row rather than passed through. It
+     * is no longer written or read anywhere, so anything rendering it would be showing
+     * a flight the creative may well no longer be on. */
+    const embedIds = rows.map((r) => r.embedId).filter(Boolean);
+    const flights = embedIds.length
+      ? await getDb().collection(AD_CAMPAIGNS_COLLECTION).find(
+        { creativeEmbedId: { $in: embedIds } },
+        { projection: { name: 1, status: 1, format: 1, advertiserRef: 1, creativeEmbedId: 1, startAt: 1, endAt: 1 } },
+      ).toArray()
+      : [];
+    const byEmbed = new Map();
+    for (const f of flights) {
+      if (!byEmbed.has(f.creativeEmbedId)) byEmbed.set(f.creativeEmbedId, []);
+      byEmbed.get(f.creativeEmbedId).push({
+        id: String(f._id),
+        name: f.name || null,
+        status: f.status || null,
+        format: f.format || 'video_roll',
+        advertiserRef: f.advertiserRef || null,
+        startAt: f.startAt || null,
+        endAt: f.endAt || null,
+      });
+    }
+
     res.set('Cache-Control', 'no-store');
-    res.json({ success: true, count: rows.length, creatives: rows });
+    res.json({
+      success: true,
+      count: rows.length,
+      creatives: rows.map(({ campaignId, ...r }) => ({ ...r, campaigns: byEmbed.get(r.embedId) || [] })),
+    });
   } catch (err) {
     console.error('[advertise] creative queue failed:', err && err.message);
     res.status(500).json({ success: false, error: 'Internal server error' });

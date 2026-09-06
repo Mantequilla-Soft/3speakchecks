@@ -65,7 +65,12 @@ async function ensureAdIndexes() {
     await db.collection(AD_PAYMENTS_COLLECTION).createIndex({ trx_id: 1 }, { unique: true });
     await db.collection(AD_PAYMENTS_COLLECTION).createIndex({ campaignId: 1 });
 
+    // Legacy. Nothing reads `campaignId` on a creative any more; the link lives on the
+    // campaign as `creativeEmbedId`. Kept so an old row is still reachable by hand.
     await db.collection(AD_CREATIVES_COLLECTION).createIndex({ campaignId: 1 });
+    // The reverse lookup "which flights run this creative", which the review queue
+    // needs and which is now the only way to answer that question.
+    await db.collection(AD_CAMPAIGNS_COLLECTION).createIndex({ creativeEmbedId: 1 });
     await db.collection(AD_CREATIVES_COLLECTION).createIndex({ embedId: 1 }, { unique: true, sparse: true });
 
     const imps = db.collection(AD_IMPRESSIONS_COLLECTION);
