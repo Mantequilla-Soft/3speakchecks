@@ -180,6 +180,42 @@ router.get('/profile/:handle', async (req, res) => {
     }
 });
 
+/**
+ * Attach the off-chain like and reply counts to a page of posts.
+ *
+ * TWO aggregations for the whole page rather than two per card: the card footer
+ * asks for both on every post, and doing it per row is how a profile becomes
+ * 2N queries.
+ *
+ * Without these the cards render the same empty placeholders a Hive post shows
+ * while its stats load, except here they would never arrive: an off-chain post
+ * has no Hive stats to fetch.
+ */
+async function withCounts(db, handle, rows) {
+    const shaped = rows.map(shapePost);
+    if (!shaped.length) return shaped;
+    const permlinks = shaped.map((r) => r.permlink);
+
+    const [votes, replies] = await Promise.all([
+        db.collection(VOTES).aggregate([
+            { $match: { author: handle, permlink: { $in: permlinks } } },
+            { $group: { _id: '$permlink', n: { $sum: 1 } } },
+        ]).toArray(),
+        db.collection(COMMENTS).aggregate([
+            { $match: { parentAuthor: handle, parentPermlink: { $in: permlinks } } },
+            { $group: { _id: '$parentPermlink', n: { $sum: 1 } } },
+        ]).toArray(),
+    ]);
+
+    const voteBy = new Map(votes.map((v) => [v._id, v.n]));
+    const replyBy = new Map(replies.map((r) => [r._id, r.n]));
+    return shaped.map((r) => ({
+        ...r,
+        likeCount: voteBy.get(r.permlink) || 0,
+        replyCount: replyBy.get(r.permlink) || 0,
+    }));
+}
+
 // GET /incubation/user/:handle/posts — one user's posts, newest first.
 router.get('/user/:handle/posts', async (req, res) => {
     try {
@@ -204,7 +240,7 @@ router.get('/user/:handle/posts', async (req, res) => {
                 ],
             })
             .sort({ createdAt: -1 }).limit(limit).toArray();
-        res.json({ author: who, items: rows.map(shapePost) });
+        res.json({ author: who, items: await withCounts(db, handle, rows) });
     } catch (err) {
         console.error('[incubation] user posts:', err.message);
         res.status(500).json({ error: 'Internal error' });
@@ -289,8 +325,19 @@ router.get('/likes', async (req, res) => {
         const count = await col.countDocuments({ author, permlink });
         let liked = false;
         if (typeof viewer === 'string' && viewer) {
+            // A Hive viewer is matched by voterKey; an incubating one by the
+            // handle stored on the row. `inc:<handle>` was never a voterKey --
+            // those are `inc:<butrauthUserId>` -- so an incubating user's own
+            // vote came back unliked and the heart reset on every reload.
             liked = !!(await col.findOne(
-                { author, permlink, voterKey: { $in: [`hive:${viewer.toLowerCase()}`, `inc:${viewer}`] } },
+                {
+                    author,
+                    permlink,
+                    $or: [
+                        { voterKey: `hive:${viewer.toLowerCase()}` },
+                        { handle: viewer },
+                    ],
+                },
                 { projection: { _id: 1 } },
             ));
         }
