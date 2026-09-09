@@ -354,7 +354,20 @@ router.get('/feed/:username', async (req, res) => {
         const skip = (page - 1) * limit;
 
         // Get following list from Hive API
-        const followingList = await getFollowingList(username);
+        let followingList = await getFollowingList(username);
+
+        // ...or from the incubation store, for a name that is not on Hive at
+        // all. getFollowingList answers empty for a handle with no account, and
+        // empty means "no following list" a few lines down, which drops the
+        // reader into the unfiltered fallback: every published video on the
+        // site, in a page they asked to be about the people they follow. Their
+        // picks are real, they are simply kept somewhere else until graduation.
+        if (!followingList || followingList.length === 0) {
+            const offChain = await db.collection('incubation_follows')
+                .find({ handle: username, state: 'following' }, { projection: { following: 1 } })
+                .limit(1000).toArray();
+            if (offChain.length) followingList = offChain.map(r => r.following);
+        }
 
         const videosCollection = db.collection('videos');
         const embedVideoCollection = db.collection('embed-video');
