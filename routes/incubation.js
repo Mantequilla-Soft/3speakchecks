@@ -58,8 +58,35 @@ async function resolveHandles(db, handles) {
     return out;
 }
 
-function shapePost(r) {
+/**
+ * Pull the bits a video card needs out of the post's own metadata.
+ *
+ * The upload writes a legacy `video.info` block so other Hive frontends can
+ * render the player, and it is already stored verbatim on the incubation row —
+ * so the thumbnail and duration are here, in the same shape a published post
+ * would carry them. No second source to keep in step.
+ */
+function videoBitsOf(meta) {
+    const info = meta?.video?.info || {};
+    let thumbnail = null;
+    if (Array.isArray(info.sourceMap)) {
+        const t = info.sourceMap.find((x) => x && x.type === 'thumbnail');
+        if (t) thumbnail = t.url || null;
+    }
+    if (!thumbnail && Array.isArray(meta?.image) && meta.image[0]) thumbnail = meta.image[0];
     return {
+        thumbnail,
+        duration: Number(info.duration) || 0,
+        // The embed asset this post is about, so a player can be pointed at it.
+        assetAuthor: info.author || null,
+        assetPermlink: info.permlink || null,
+    };
+}
+
+function shapePost(r) {
+    const bits = videoBitsOf(r.jsonMetadata);
+    return {
+        ...bits,
         permlink: r.permlink,
         title: r.title || '',
         body: r.body || '',
@@ -211,6 +238,40 @@ router.get('/replies', async (req, res) => {
         });
     } catch (err) {
         console.error('[incubation] replies:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// GET /incubation/post/:handle/:permlink — one off-chain post.
+//
+// The watch page falls back to this when Hive has no such post, which is what
+// lets an incubating user's video open on a real watch page instead of a dead
+// link from its own card.
+router.get('/post/:handle/:permlink', async (req, res) => {
+    try {
+        const db = getDb();
+        const handle = String(req.params.handle || '').toLowerCase();
+        const who = (await resolveHandles(db, [handle]))[handle];
+        if (!who) return res.status(404).json({ error: 'No such user' });
+
+        const row = await db.collection(COMMENTS).findOne({
+            butrauthUserId: who.userId,
+            permlink: String(req.params.permlink || ''),
+        });
+        if (!row) return res.status(404).json({ error: 'Not found' });
+
+        // A published row is served from Hive, not here: returning it too would
+        // give the watch page two sources for one post and no rule for which wins.
+        if (row.publishedAt) {
+            return res.status(409).json({
+                error: 'Published to Hive',
+                reason: 'published',
+                publishedAs: row.publishedAs || null,
+            });
+        }
+        res.json({ author: who, post: shapePost(row) });
+    } catch (err) {
+        console.error('[incubation] post:', err.message);
         res.status(500).json({ error: 'Internal error' });
     }
 });
