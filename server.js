@@ -61,6 +61,7 @@ const subtitleProxyRoutes = require('./routes/subtitleProxy');
 const advertiseRoutes = require('./routes/advertise');
 const adCampaignRoutes = require('./routes/adCampaigns');
 const adServeRoutes = require('./routes/adServe');
+const badgeRoutes = require('./routes/badges');
 
 const app = express();
 
@@ -126,6 +127,7 @@ app.use('/advertise', adCampaignRoutes);  // booking + payment, same mount, same
 app.use('/m', adServeRoutes);
 app.use('/push', pushRoutes);             // same ordering rule as above
 app.use('/incubation', incubationRoutes); // same ordering rule as above
+app.use('/badges', badgeRoutes);          // same ordering rule as above
 app.use('/', streamStatsRoutes);
 
 // Track whether heavy sync tasks are running
