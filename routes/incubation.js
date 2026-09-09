@@ -28,6 +28,7 @@ const ACCOUNTS = 'incubation_accounts';
 const COMMENTS = 'incubation_comments';
 const PROFILES = 'incubation_profiles';
 const FOLLOWS = 'incubation_follows';
+const VOTES = 'incubation_votes';
 
 const clampLimit = (v, def, max) => Math.min(Math.max(parseInt(v, 10) || def, 1), max);
 
@@ -91,6 +92,11 @@ function shapePost(r) {
         title: r.title || '',
         body: r.body || '',
         handle: r.handle,
+        // A reply written by someone who ALREADY has a Hive account. Rendered
+        // under their real account so the thread shows who actually spoke —
+        // and so their avatar and reputation resolve normally.
+        hiveAuthor: r.hiveAuthor || null,
+        authorKind: r.authorKind || 'incubating',
         videoId: r.videoId || null,
         parentAuthor: r.parentAuthor || '',
         parentPermlink: r.parentPermlink || '',
@@ -238,6 +244,35 @@ router.get('/replies', async (req, res) => {
         });
     } catch (err) {
         console.error('[incubation] replies:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// GET /incubation/likes?author=&permlink= — how many people liked an off-chain
+// post, and whether the named viewer is one of them.
+//
+// These are 3Speak likes, not Hive votes: they move no rewards and are never
+// replayed to the chain. The route is named accordingly so nothing downstream
+// mistakes the number for a vote count with a payout behind it.
+router.get('/likes', async (req, res) => {
+    try {
+        const { author, permlink, viewer } = req.query;
+        if (typeof author !== 'string' || typeof permlink !== 'string') {
+            return res.status(400).json({ error: 'author and permlink are required' });
+        }
+        const db = getDb();
+        const col = db.collection(VOTES);
+        const count = await col.countDocuments({ author, permlink });
+        let liked = false;
+        if (typeof viewer === 'string' && viewer) {
+            liked = !!(await col.findOne(
+                { author, permlink, voterKey: { $in: [`hive:${viewer.toLowerCase()}`, `inc:${viewer}`] } },
+                { projection: { _id: 1 } },
+            ));
+        }
+        res.json({ count, liked });
+    } catch (err) {
+        console.error('[incubation] likes:', err.message);
         res.status(500).json({ error: 'Internal error' });
     }
 });
