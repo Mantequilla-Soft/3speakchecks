@@ -325,6 +325,41 @@ router.get('/replies', async (req, res) => {
     }
 });
 
+// POST /incubation/replies/for  { permlinks: [...] }
+//
+// Every off-chain reply hanging under ANY of these parents, in one round trip.
+//
+// The single-parent GET above answers "replies to this post", which is only the
+// first level of a thread. An off-chain reply to a COMMENT -- someone with no
+// Hive account answering a Hive user under their own video -- hung off that
+// comment's permlink, so nothing ever asked for it and the author could not see
+// their own reply. Asking per comment would be one request per node.
+router.post('/replies/for', async (req, res) => {
+    try {
+        const { permlinks } = req.body || {};
+        if (!Array.isArray(permlinks)) {
+            return res.status(400).json({ error: 'permlinks must be an array' });
+        }
+        const clean = [...new Set(
+            permlinks.filter(p => typeof p === 'string' && p && p.length <= 256)
+        )].slice(0, 500);
+        if (!clean.length) return res.json({ items: [] });
+
+        const db = getDb();
+        const rows = await db.collection(COMMENTS)
+            .find({ parentPermlink: { $in: clean }, publishedAt: null })
+            .sort({ createdAt: -1 }).limit(500).toArray();
+
+        const authors = await resolveHandles(db, rows.map(r => r.handle));
+        res.json({
+            items: rows.map(r => ({ ...shapePost(r), author: authors[r.handle] || null })),
+        });
+    } catch (err) {
+        console.error('[incubation] replies/for:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
 // GET /incubation/likes?author=&permlink= — how many people liked an off-chain
 // post, and whether the named viewer is one of them.
 //
