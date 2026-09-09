@@ -98,6 +98,9 @@ function shapePost(r) {
         hiveAuthor: r.hiveAuthor || null,
         authorKind: r.authorKind || 'incubating',
         videoId: r.videoId || null,
+        // 'video' | 'short' | 'comment'. Derived at write time from the post's
+        // OpenAttribute envelope; absent on rows older than that field.
+        contentType: r.contentType || null,
         parentAuthor: r.parentAuthor || '',
         parentPermlink: r.parentPermlink || '',
         jsonMetadata: r.jsonMetadata || {},
@@ -135,7 +138,16 @@ router.get('/profile/:handle', async (req, res) => {
 
         const [profileRow, postCount, followingCount] = await Promise.all([
             db.collection(PROFILES).findOne({ butrauthUserId: who.userId }),
-            db.collection(COMMENTS).countDocuments({ butrauthUserId: who.userId, kind: 'post' }),
+            // Same rule as the posts list below: counted by contentType, so
+            // shorts are included. Counting kind:'post' said "1 post" on a
+            // profile showing three.
+            db.collection(COMMENTS).countDocuments({
+                butrauthUserId: who.userId,
+                $or: [
+                    { contentType: { $in: ['video', 'short'] } },
+                    { contentType: { $exists: false }, kind: 'post' },
+                ],
+            }),
             db.collection(FOLLOWS).countDocuments({ butrauthUserId: who.userId, state: 'following' }),
         ]);
 
@@ -177,8 +189,20 @@ router.get('/user/:handle/posts', async (req, res) => {
         if (!who) return res.status(404).json({ error: 'No such user' });
 
         const limit = clampLimit(req.query.limit, 30, 100);
+        // By contentType, NOT by kind. A short is published as a reply to the
+        // snaps container, so its `kind` is 'comment' and filtering on
+        // kind:'post' hid every short the user had uploaded from their own
+        // profile. The $or keeps rows written before contentType existed
+        // working off the old field.
         const rows = await db.collection(COMMENTS)
-            .find({ butrauthUserId: who.userId, kind: 'post', publishedAt: null })
+            .find({
+                butrauthUserId: who.userId,
+                publishedAt: null,
+                $or: [
+                    { contentType: { $in: ['video', 'short'] } },
+                    { contentType: { $exists: false }, kind: 'post' },
+                ],
+            })
             .sort({ createdAt: -1 }).limit(limit).toArray();
         res.json({ author: who, items: rows.map(shapePost) });
     } catch (err) {
