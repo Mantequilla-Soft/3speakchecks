@@ -136,7 +136,7 @@ router.get('/profile/:handle', async (req, res) => {
         const who = (await resolveHandles(db, [handle]))[handle];
         if (!who) return res.status(404).json({ error: 'No such user' });
 
-        const [profileRow, postCount, followingCount] = await Promise.all([
+        const [profileRow, postCount, followingCount, followerCount, viewerFollows] = await Promise.all([
             db.collection(PROFILES).findOne({ butrauthUserId: who.userId }),
             // Same rule as the posts list below: counted by contentType, so
             // shorts are included. Counting kind:'post' said "1 post" on a
@@ -149,6 +149,22 @@ router.get('/profile/:handle', async (req, res) => {
                 ],
             }),
             db.collection(FOLLOWS).countDocuments({ butrauthUserId: who.userId, state: 'following' }),
+            // People who follow THEM. Real now: a Hive user following an
+            // incubating creator is stored here, because the account does not
+            // exist on chain to be followed.
+            db.collection(FOLLOWS).countDocuments({ following: handle, state: 'following' }),
+            // Whether the person asking already follows them, so the button
+            // does not come back saying Follow to someone who does.
+            (typeof req.query.viewer === 'string' && req.query.viewer)
+                ? db.collection(FOLLOWS).findOne({
+                    following: handle,
+                    state: 'following',
+                    $or: [
+                        { hiveFollower: req.query.viewer.toLowerCase() },
+                        { handle: req.query.viewer },
+                    ],
+                }, { projection: { _id: 1 } })
+                : null,
         ]);
 
         const profile = profileRow?.profile || {};
@@ -168,11 +184,12 @@ router.get('/profile/:handle', async (req, res) => {
             counts: {
                 posts: postCount,
                 following: followingCount,
-                // Followers are NOT counted: nobody can follow an incubating
-                // user yet (there is no account to follow), and returning 0
-                // would read as "has no followers" rather than "not applicable".
-                followers: null,
+                // Real now. This used to be null because nobody COULD follow an
+                // incubating user: there was no account to follow. Those follows
+                // are stored off-chain instead, so the number means something.
+                followers: followerCount,
             },
+            viewerFollows: !!viewerFollows,
         });
     } catch (err) {
         console.error('[incubation] profile:', err.message);
