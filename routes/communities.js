@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
 const { HIVE_RPC_ENDPOINTS } = require('../utils/config');
+const { indexOneCommunity } = require('../services/communitySync');
 
 // Full community metadata (about + description + rules) lives in this
 // checker-OWNED collection. We can't use the shared `hivecommunities`
@@ -49,6 +50,32 @@ const stripMeta = ({ _id, cachedAt, ...rest }) => rest;
 // GET /community/:name — full metadata for one Hive community, served from a
 // checker-owned cache and backfilled from Hive (bridge.get_community) on a
 // cache miss, so the frontend never has to query the blockchain directly.
+/**
+ * POST /community/created  { name }
+ *
+ * Index a community the moment it is created, instead of leaving it invisible
+ * in 3Speak's own list until the next scheduled pass.
+ *
+ * Unauthenticated but chain-verified: the community is read from Hive and only
+ * stored if it actually exists, so this cannot plant a row for a name nobody
+ * has created. Editing an existing row is not possible either — the values all
+ * come from the chain, never from the caller.
+ */
+router.post('/community/created', async (req, res) => {
+    const name = String(req.body?.name || '').trim().toLowerCase();
+    if (!/^hive-\d{5,8}$/.test(name)) {
+        return res.status(400).json({ error: 'Invalid community name' });
+    }
+    try {
+        const ok = await indexOneCommunity(name);
+        if (!ok) return res.status(404).json({ error: 'No such community on Hive' });
+        res.json({ ok: true, name });
+    } catch (error) {
+        console.error('Error indexing a new community:', error.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
 router.get('/community/:name', async (req, res) => {
     try {
         const name = String(req.params.name || '').trim().toLowerCase();

@@ -23,6 +23,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
 const { getFollowingList, hiveRpcBatch } = require('../utils/hive');
+const { REGISTRY, REGISTRY_ACCOUNT, indexOneBadge } = require('../utils/badgeIndex');
 const { buildFollowFeed } = require('../utils/followFeed');
 const { feedAgeMatch } = require('../utils/feedAge');
 const { unavailableMatch } = require('../utils/unavailable');
@@ -34,7 +35,6 @@ const { hiddenListSync } = require('../utils/hiddenCreators');
 const { slimFeed } = require('../utils/slimFeed');
 const { videoStatsMiddleware } = require('../services/videoStats');
 
-const REGISTRY_ACCOUNT = process.env.BADGE_REGISTRY_ACCOUNT || 'badge-500500';
 const DIRECTORY_TTL_MS = 60 * 60 * 1000;   // the registry changes a few times a year
 const PROFILE_TTL_MS = 15 * 60 * 1000;
 const PROFILE_BATCH = 20;                  // accounts per JSON-RPC batch
@@ -143,34 +143,138 @@ async function getRegistryAccounts() {
     return Array.isArray(list) ? list : [];
 }
 
-/** GET /badges — the badge directory, newest-and-biggest first. */
-router.get('/', async (req, res) => {
-    const key = 'directory';
+// Who holds posting authority over which badge.
+//
+// 🚨 Hive has NO reverse index from an account to the accounts that granted it
+// authority, so "which badges may I award?" cannot be asked of the chain. The
+// registry directory above does not answer it either: it lists badges @peakd
+// has accepted, has no creator field, and a badge made five minutes ago is not
+// in it.
+//
+// This was localStorage first, which meant a badge made on a laptop could not be
+// awarded from a phone -- the same per-browser trap that made warm-up sessions
+// go stale across devices.
+const CREATORS = 'badge-creators';
+const BADGE_NAME_RE = /^badge-\d{4,10}$/;
+
+
+/** Does `creator` hold posting authority over `account`, according to the chain? */
+async function verifyBadgeAuthority(creator, account) {
+    const results = await hiveRpcBatch([{
+        jsonrpc: '2.0', method: 'condenser_api.get_accounts', params: [[account]], id: 1,
+    }]);
+    const acct = results?.[0]?.result?.[0];
+    if (!acct) return false;
+    return (acct.posting?.account_auths || []).some(([who]) => who === creator);
+}
+
+/**
+ * POST /badges/created  { creator, account }
+ *
+ * Deliberately UNAUTHENTICATED but chain-verified: the row is only a pointer to
+ * something already true on Hive, and it is written only if the chain agrees
+ * that `creator` really does hold posting authority. So a forged call cannot
+ * plant a badge somebody does not control, and the record grants nothing by
+ * itself -- every consumer re-checks before offering to award.
+ */
+router.post('/created', async (req, res) => {
+    const creator = String(req.body?.creator || '').trim().toLowerCase();
+    const account = String(req.body?.account || '').trim().toLowerCase();
+    if (!ACCOUNT_RE.test(creator) || !BADGE_NAME_RE.test(account)) {
+        return res.status(400).json({ error: 'Invalid creator or badge account' });
+    }
     try {
-        const hit = cached(key, DIRECTORY_TTL_MS);
-        if (hit) return res.json({ registry: REGISTRY_ACCOUNT, cached: true, total: hit.length, badges: hit });
-
-        const accounts = await getRegistryAccounts();
-        if (!accounts.length) {
-            const last = stale(key);
-            if (last) return res.json({ registry: REGISTRY_ACCOUNT, cached: true, total: last.length, badges: last });
-            return res.json({ registry: REGISTRY_ACCOUNT, total: 0, badges: [] });
+        if (!await verifyBadgeAuthority(creator, account)) {
+            return res.status(403).json({ error: 'That account has not granted you posting authority' });
         }
+        await getDb().collection(CREATORS).updateOne(
+            { creator, account },
+            { $set: { creator, account }, $setOnInsert: { createdAt: new Date() } },
+            { upsert: true },
+        );
+        // Straight into the index, identity and all, so its creator finds it in
+        // the directory now rather than after the next hourly pass.
+        await indexOneBadge(account, '3speak');
+        res.json({ ok: true, creator, account });
+    } catch (error) {
+        console.error('Error recording badge creator:', error.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
 
-        const profiles = await getProfiles(accounts);
-        const badges = accounts
-            .map(a => shapeBadge(a, profiles.get(a)))
-            // A badge nobody holds is an empty page; the registry's own rules say
-            // a listed badge has recipients, so this only drops stragglers.
-            .filter(b => b.recipients > 0)
+/**
+ * GET /badges/by-creator/:creator — badges this account can award.
+ *
+ * Mounted ABOVE /:account, or Express matches this path as a badge name.
+ * Re-verified against the chain on every read, so authority that has since been
+ * removed is not offered and then refused at broadcast.
+ */
+router.get('/by-creator/:creator', async (req, res) => {
+    const creator = String(req.params.creator || '').toLowerCase();
+    if (!ACCOUNT_RE.test(creator)) return res.status(400).json({ error: 'Invalid account name' });
+    try {
+        const rows = await getDb().collection(CREATORS)
+            .find({ creator }, { projection: { account: 1 } }).limit(200).toArray();
+        const names = rows.map(r => r.account);
+        if (!names.length) return res.json({ creator, badges: [] });
+
+        // Two reads on purpose: the authority check needs the raw account object
+        // (get_accounts), while the card needs the badge's name, picture and
+        // recipient count, which only bridge.get_profile carries -- and that is
+        // exactly what getProfiles already assembles for the directory.
+        const results = await hiveRpcBatch([{
+            jsonrpc: '2.0', method: 'condenser_api.get_accounts', params: [names], id: 1,
+        }]);
+        const held = (results?.[0]?.result || [])
+            .filter(a => (a.posting?.account_auths || []).some(([who]) => who === creator))
+            .map(a => a.name);
+        if (!held.length) return res.json({ creator, badges: [] });
+
+        const profiles = await getProfiles(held);
+        res.json({ creator, badges: held.map(name => shapeBadge(name, profiles.get(name))) });
+    } catch (error) {
+        console.error('Error listing badges by creator:', error.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+/**
+ * GET /badges — the badge directory, biggest first.
+ *
+ * One database read. This used to fetch @peakd's follow list and then a profile
+ * for every badge on it, on every cache miss, and could only ever show what
+ * their team had curated. The index (utils/badgeIndex, refreshed hourly by
+ * services/badgeSync) holds our own list with each badge's identity alongside.
+ */
+router.get('/', async (req, res) => {
+    try {
+        const rows = await getDb().collection(REGISTRY)
+            .find({}, { projection: { _id: 0 } })
+            .toArray();
+
+        const badges = rows
+            // A badge nobody holds is an empty page, so imported stragglers are
+            // dropped — but never the ones made here: a badge minted a minute
+            // ago has no recipients BY DEFINITION, and hiding it means whoever
+            // just paid 3 HIVE cannot find their own badge.
+            .filter(b => (b.recipients || 0) > 0 || b.source === '3speak')
+            .map(b => ({
+                account: b.account,
+                title: b.title || b.account,
+                description: b.description || '',
+                image: b.image || `https://images.hive.blog/u/${b.account}/avatar`,
+                cover: b.cover || '',
+                website: b.website || '',
+                location: b.location || '',
+                recipients: b.recipients || 0,
+                subscribers: b.subscribers || 0,
+                madeHere: b.source === '3speak',
+            }))
             .sort((a, b) => b.recipients - a.recipients);
 
-        remember(key, badges);
         res.json({ registry: REGISTRY_ACCOUNT, total: badges.length, badges });
     } catch (error) {
-        console.error('Error building badge directory:', error.message);
-        const last = stale(key);
-        if (last) return res.json({ registry: REGISTRY_ACCOUNT, cached: true, total: last.length, badges: last });
+        console.error('Error serving the badge directory:', error.message);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -280,7 +384,9 @@ router.get('/:account/feed', slimFeed, videoStatsMiddleware, async (req, res) =>
     if (!ACCOUNT_RE.test(account)) return res.status(400).json({ error: 'Invalid account name' });
 
     try {
-        const feed = await buildFollowFeed(req, account, { allowFallback: false });
+        // Newest first: this page is a record of what the badge's holders have
+        // published, not a recommendation feed.
+        const feed = await buildFollowFeed(req, account, { allowFallback: false, chronological: true });
         res.json({ ...feed, account, recipients: feed.following });
     } catch (error) {
         console.error(`Error fetching badge feed for ${account}:`, error.message);

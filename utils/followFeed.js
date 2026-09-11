@@ -33,7 +33,7 @@ const { getCommentCounts, commentBoost, keyOf: commentKeyOf } = require('./comme
  *                                no recipients yet has no videos, and saying so is
  *                                the honest answer.
  */
-async function buildFollowFeed(req, username, { allowFallback = true } = {}) {
+async function buildFollowFeed(req, username, { allowFallback = true, chronological = false } = {}) {
     const db = getDb();
 
     // Extract pagination parameters
@@ -182,6 +182,17 @@ async function buildFollowFeed(req, username, { allowFallback = true } = {}) {
     // recency-decayed base score. Shared with the discovery feeds so the follow
     // feed re-ranks by the same signals when interests / hide-watched are on.
     const visibleVideos = await rankFeed(db, req, allVideos, { scoreField: '_rankScore' });
+
+    // Strict newest-first, for callers where the feed is a RECORD rather than a
+    // recommendation. A badge page answers "what have the holders published",
+    // and the engagement nudges above (comment boost, interest match, retention)
+    // shuffle that into an order nobody can explain from the dates on screen.
+    //
+    // Applied AFTER rankFeed, not instead of it: that pass also hides watched,
+    // NSFW and hidden-creator videos, none of which should change with sorting.
+    if (chronological) {
+        visibleVideos.sort((a, b) => (b._sortDate || 0) - (a._sortDate || 0));
+    }
 
     const total = visibleVideos.length;
     const totalPages = Math.ceil(total / limit);

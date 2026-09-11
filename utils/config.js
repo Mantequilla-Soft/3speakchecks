@@ -426,9 +426,14 @@ module.exports = {
     RELATED_JITTER: parseFloat(process.env.RELATED_JITTER ?? '0.15'),
 
     COMMUNITY_SYNC_DELAY_H: parseInt(process.env.COMMUNITY_SYNC_DELAY_H) || 4,
-    COMMUNITY_SYNC_INTERVAL_H: parseInt(process.env.COMMUNITY_SYNC_INTERVAL_H) || 4,
+    // Hourly, to match the badge index: a community's name, picture or
+    // description can be edited from any Hive frontend and nothing tells us.
+    COMMUNITY_SYNC_INTERVAL_H: parseInt(process.env.COMMUNITY_SYNC_INTERVAL_H) || 1,
     PROFILE_SYNC_DELAY_H: parseInt(process.env.PROFILE_SYNC_DELAY_H) || 3,
     PROFILE_SYNC_INTERVAL_H: parseInt(process.env.PROFILE_SYNC_INTERVAL_H) || 3,
+    // Badge accounts can be renamed or re-pictured from any Hive frontend,
+    // and nothing announces it. Hourly is cheap: a few hundred profile reads.
+    BADGE_SYNC_INTERVAL_H: parseInt(process.env.BADGE_SYNC_INTERVAL_H) || 1,
     // Pay-per-listen beneficiary account — must match the frontend's
     // VITE_PPL_BENEFICIARY. A track is "pay-per-listen" when its Hive post
     // routes (near) all beneficiaries here; only those get listen-tracked.

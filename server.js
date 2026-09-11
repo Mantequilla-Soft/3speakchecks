@@ -2,11 +2,12 @@ const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
 
-const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN, DURATION_SYNC_ENABLED, DURATION_SYNC_INTERVAL_MIN, AD_INVENTORY_ENABLED, AD_INVENTORY_INTERVAL_H } = require('./utils/config');
+const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, BADGE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN, DURATION_SYNC_ENABLED, DURATION_SYNC_INTERVAL_MIN, AD_INVENTORY_ENABLED, AD_INVENTORY_INTERVAL_H } = require('./utils/config');
 const { connectToMongo, getDb } = require('./utils/db');
 const { calculateAndFlagTrendingVideos } = require('./services/trending');
 const { syncHiveCommunities } = require('./services/communitySync');
 const { syncHiveProfiles } = require('./services/profileSync');
+const badgeSync = require('./services/badgeSync');
 const { denormalizeCommunityTitles } = require('./services/communityDenorm');
 const { startTagSyncWatcher } = require('./services/tagSync');
 const { syncAudioHiveLinks } = require('./services/audioHiveSync');
@@ -219,6 +220,24 @@ async function startServer() {
         setInterval(runProfileSync, profIntervalMs);
     }, profDelayMs);
     console.log(`Profile sync scheduled every ${PROFILE_SYNC_INTERVAL_H}h (first run in ${PROFILE_SYNC_DELAY_H}h)`);
+
+    // Badge index. Runs SOON after boot rather than on a long delay like the
+    // community sync: the directory is served straight from these rows, so an
+    // empty or stale index is a visibly empty page, not just slower data.
+    const badgeIntervalMs = BADGE_SYNC_INTERVAL_H * 60 * 60 * 1000;
+    let badgeRunning = false;
+    const runBadgeSync = async () => {
+        if (badgeRunning) return;          // an hourly pass must never overlap itself
+        badgeRunning = true;
+        try {
+            await badgeSync.runOnce();
+        } finally {
+            badgeRunning = false;
+        }
+    };
+    setTimeout(runBadgeSync, 60 * 1000);
+    setInterval(runBadgeSync, badgeIntervalMs);
+    console.log(`Badge index scheduled every ${BADGE_SYNC_INTERVAL_H}h (first run in 1m)`);
 
     // Sync audio → Hive post links (delayed 2min, then every 30min)
     setTimeout(() => {

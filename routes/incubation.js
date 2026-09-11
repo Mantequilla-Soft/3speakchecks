@@ -360,6 +360,87 @@ router.post('/replies/for', async (req, res) => {
     }
 });
 
+// POST /incubation/likes/for  { items: [{author, permlink}], viewer }
+//
+// Like counts for many posts in one round trip, for a comment thread or a feed.
+//
+// The single GET below answers for ONE post, which is all the watch page needed.
+// A thread of forty comments asking it per comment is forty round trips, so the
+// counts were simply never fetched anywhere but the video itself: an off-chain
+// like on a comment, a snap or a short existed in the database and was invisible
+// everywhere it was cast.
+//
+// Two queries, not one: counting with $group is cheap, but collecting every
+// voter into a set so the viewer can be found among them is not -- a popular
+// post would carry thousands of ids through memory to answer one boolean. The
+// viewer's own likes are a second, bounded lookup instead.
+router.post('/likes/for', async (req, res) => {
+    try {
+        const { items, viewer } = req.body || {};
+        if (!Array.isArray(items)) {
+            return res.status(400).json({ error: 'items must be an array' });
+        }
+        const clean = [];
+        const seen = new Set();
+        for (const it of items) {
+            const author = typeof it?.author === 'string' ? it.author : '';
+            const permlink = typeof it?.permlink === 'string' ? it.permlink : '';
+            if (!author || !permlink || author.length > 256 || permlink.length > 256) continue;
+            const key = `${author}/${permlink}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            clean.push({ author, permlink });
+            if (clean.length >= 500) break;
+        }
+        if (!clean.length) return res.json({ items: {} });
+
+        const db = getDb();
+        const col = db.collection(VOTES);
+
+        const counts = await col.aggregate([
+            { $match: { $or: clean } },
+            { $group: { _id: { author: '$author', permlink: '$permlink' }, count: { $sum: 1 } } },
+        ]).toArray();
+
+        // Same viewer matching as the single route: a Hive viewer is a voterKey,
+        // an incubating one is the handle on the row.
+        let mine = [];
+        if (typeof viewer === 'string' && viewer) {
+            mine = await col.find(
+                {
+                    $and: [
+                        { $or: clean },
+                        {
+                            $or: [
+                                { voterKey: `hive:${viewer.toLowerCase()}` },
+                                { handle: viewer },
+                            ],
+                        },
+                    ],
+                },
+                { projection: { author: 1, permlink: 1 } },
+            ).toArray();
+        }
+        const likedKeys = new Set(mine.map(r => `${r.author}/${r.permlink}`));
+
+        const out = {};
+        for (const r of counts) {
+            const key = `${r._id.author}/${r._id.permlink}`;
+            out[key] = { count: r.count, liked: likedKeys.has(key) };
+        }
+        // Posts with no likes at all are absent from the aggregate; say zero
+        // rather than leaving the caller to tell "none" from "not asked".
+        for (const { author, permlink } of clean) {
+            const key = `${author}/${permlink}`;
+            if (!out[key]) out[key] = { count: 0, liked: false };
+        }
+        res.json({ items: out });
+    } catch (err) {
+        console.error('[incubation] likes/for:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
 // GET /incubation/likes?author=&permlink= — how many people liked an off-chain
 // post, and whether the named viewer is one of them.
 //
