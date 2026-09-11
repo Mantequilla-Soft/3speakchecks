@@ -59,6 +59,7 @@ const {
   ADS_BETA_USERS,
   AD_CREATOR_POOL_PCT,
   AD_DEFAULT_COMMUNITY_PCT,
+  AD_VIEWER_POOL_PCT,
   AD_CREATIVES_COLLECTION,
   AD_CAMPAIGNS_COLLECTION,
   AD_PAYMENTS_COLLECTION,
@@ -147,6 +148,9 @@ const account = (v) => str(v, 32).toLowerCase();
 // yielded '' and produced a baffling "Signature required" for a correctly signed
 // request. Accept either form; the signature is over the string either way.
 const stamp = (v) => (typeof v === 'number' && Number.isFinite(v) ? String(v) : str(v, 20));
+// One decimal place. These are percentages people read, and 5.000000000000001 is
+// what you get from the pool arithmetic on perfectly ordinary settings.
+const round1 = (n) => Math.round(n * 10) / 10;
 
 // The split as everyone downstream should see it. Nullish-checked on purpose: a
 // stored 0 is a creator who chose to keep the whole pool, NOT an unset field, and
@@ -156,10 +160,22 @@ function splitOf(doc) {
   const communityPct = (stored === undefined || stored === null)
     ? AD_DEFAULT_COMMUNITY_PCT
     : stored;
+  // Points of the whole, same as poolPct — which is what AD_VIEWER_POOL_PCT now is,
+  // so this is a pass-through rather than a conversion.
+  //
+  // Note what the viewer share does NOT change: poolPct. Viewers are paid out of the
+  // platform's own cut, so the creator side is the same number whether or not anyone
+  // watching is opted in.
+  const viewerPct = round1(AD_VIEWER_POOL_PCT);
   return {
     poolPct: AD_CREATOR_POOL_PCT,
     communityPct,
     creatorPct: AD_CREATOR_POOL_PCT - communityPct,
+    viewerPct,
+    // What is actually left for 3Speak once the viewers are paid. Sent rather than
+    // left as `100 - poolPct` for the client to work out, because that subtraction
+    // is the one that was silently wrong the moment viewer rewards existed.
+    platformPct: round1(100 - AD_CREATOR_POOL_PCT - viewerPct),
     isDefault: stored === undefined || stored === null,
   };
 }
@@ -505,6 +521,27 @@ router.post('/apply', featureVisible, express.json({ limit: '64kb' }), async (re
     // no endpoint has to take an account name and confirm whether it applied.
     const reference = crypto.randomBytes(9).toString('base64url');
 
+    /* An advertiser's deal follows THEM, not each product they open.
+     *
+     * A rate card is captured at registration so that raising the platform default
+     * never reprices anyone who already signed up. Applied per product, that promise
+     * broke the moment somebody opened a second one: the new product snapshotted
+     * today's platform rates, so an early advertiser on a founding discount silently
+     * went back to list price for anything they launched afterwards. They had not
+     * changed; only the number of products had.
+     *
+     * So a returning account inherits the rates its existing record carries. Newest
+     * first, because that is their CURRENT deal — an admin who repriced them meant the
+     * new number to apply, not the one they first signed up on.
+     *
+     * Rejected records are skipped: a refused application is not a relationship, and
+     * inheriting a rate from one would carry a deal nobody agreed to.
+     */
+    const sibling = await db.collection(ADVERTISERS_COLLECTION).findOne(
+      { hiveAccount, status: { $ne: 'rejected' }, rates: { $type: 'object' } },
+      { sort: { ratesSetAt: -1, createdAt: -1 }, projection: { rates: 1, reference: 1, ratesSetAt: 1 } },
+    );
+
     const doc = {
       reference,
       hiveAccount,
@@ -530,8 +567,14 @@ router.post('/apply', featureVisible, express.json({ limit: '64kb' }), async (re
       // advertisers and leaves this one where they are — which is the whole point:
       // an early advertiser keeps the rate they were offered. Raising theirs is a
       // deliberate act through POST /admin/advertisers/:id/rates.
-      rates: snapshotRates(),
-      ratesSource: 'registration',   // vs 'admin' once somebody edits it
+      rates: sibling ? { ...sibling.rates } : snapshotRates(),
+      // Three values now, and the distinction is worth keeping: 'registration' is the
+      // platform card of the day, 'inherited' is a deal carried from another product of
+      // the same advertiser, and 'admin' is one somebody set by hand.
+      ratesSource: sibling ? 'inherited' : 'registration',
+      // Which record it came from, so "why is this advertiser on this price" has an
+      // answer that does not require guessing from timestamps.
+      ratesFrom: sibling ? sibling.reference : null,
       ratesSetAt: new Date(),        // "since when has this advertiser been on this price?"
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -1084,8 +1127,44 @@ router.get('/admin/creatives', requireAdmin, async (req, res) => {
       : { status: CREATIVE_STATES.REVIEW };   // the queue that needs a person
     const rows = await getDb().collection(AD_CREATIVES_COLLECTION)
       .find(query).sort({ createdAt: -1 }).limit(100).toArray();
+
+    /* WHICH FLIGHTS EACH CREATIVE IS ON.
+     *
+     * A reverse lookup, because the link points campaign → creative: the flight holds
+     * `creativeEmbedId`, and one creative can be on any number of flights. It used to
+     * be a single `campaignId` on the creative, which is why attaching a spot to a
+     * second flight silently pulled it off the first.
+     *
+     * The stale `campaignId` is stripped from the row rather than passed through. It
+     * is no longer written or read anywhere, so anything rendering it would be showing
+     * a flight the creative may well no longer be on. */
+    const embedIds = rows.map((r) => r.embedId).filter(Boolean);
+    const flights = embedIds.length
+      ? await getDb().collection(AD_CAMPAIGNS_COLLECTION).find(
+        { creativeEmbedId: { $in: embedIds } },
+        { projection: { name: 1, status: 1, format: 1, advertiserRef: 1, creativeEmbedId: 1, startAt: 1, endAt: 1 } },
+      ).toArray()
+      : [];
+    const byEmbed = new Map();
+    for (const f of flights) {
+      if (!byEmbed.has(f.creativeEmbedId)) byEmbed.set(f.creativeEmbedId, []);
+      byEmbed.get(f.creativeEmbedId).push({
+        id: String(f._id),
+        name: f.name || null,
+        status: f.status || null,
+        format: f.format || 'video_roll',
+        advertiserRef: f.advertiserRef || null,
+        startAt: f.startAt || null,
+        endAt: f.endAt || null,
+      });
+    }
+
     res.set('Cache-Control', 'no-store');
-    res.json({ success: true, count: rows.length, creatives: rows });
+    res.json({
+      success: true,
+      count: rows.length,
+      creatives: rows.map(({ campaignId, ...r }) => ({ ...r, campaigns: byEmbed.get(r.embedId) || [] })),
+    });
   } catch (err) {
     console.error('[advertise] creative queue failed:', err && err.message);
     res.status(500).json({ success: false, error: 'Internal server error' });

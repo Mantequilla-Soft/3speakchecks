@@ -18,12 +18,21 @@ const { Client, PrivateKey } = require('@hiveio/dhive');
 const { ObjectId } = require('mongodb');
 const { getDb } = require('../utils/db');
 const { HIVE_RPC_ENDPOINTS } = require('../utils/config');
+const { hiveRpcBatch } = require('../utils/hive');
 
 const THREESPEAK_USERNAME = process.env.THREESPEAK_USERNAME || 'threespeak';
 const THREESPEAK_POSTING_KEY = process.env.THREESPEAK_POSTING_KEY || '';
 const RUNNER_ENABLED = process.env.SCHEDULED_POSTS_RUNNER === 'true';
 const INTERVAL_MIN = Math.max(1, parseInt(process.env.SCHEDULED_POSTS_INTERVAL_MIN || '5', 10));
 const MAX_ATTEMPTS = 3;
+// A doc is only ever left in `status: "processing"` if the worker died between
+// claiming it and writing the terminal status — the 2026-09-08 `pkill -f "node
+// server.js"` outage was exactly that shape. Anything older than this is treated
+// as abandoned and reconciled against the chain. Keep it comfortably above a real
+// broadcast + embed-link round trip, or a merely-slow tick gets reaped out from
+// under itself.
+const STUCK_MIN = Math.max(INTERVAL_MIN * 2, parseInt(process.env.SCHEDULED_POSTS_STUCK_MIN || '15', 10));
+const REAP_PER_TICK = 25;
 const COLLECTION = 'scheduled-posts';
 
 // Embed service hook — after broadcasting the Hive post, link the embed video
@@ -232,11 +241,149 @@ function validateClaimedDoc(doc) {
     if (doc.title != null && typeof doc.title !== 'string') throw new Error('doc.title must be a string');
 }
 
+/**
+ * Is this post already on chain? Returns true / false, or **null when we could
+ * not tell** (every RPC endpoint down, or a malformed reply).
+ *
+ * Callers MUST treat null as "leave it alone". Requeueing a post that is in fact
+ * live re-broadcasts `comment_options`, which the chain rejects once the post has
+ * votes — so a perfectly recoverable doc would burn its attempts and land in
+ * `failed` while the post sits published. Failing closed costs one more sweep.
+ */
+async function isPostOnChain(author, permlink) {
+    const [res] = await hiveRpcBatch([{
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'condenser_api.get_content',
+        params: [author, permlink],
+    }]);
+    // hiveRpcBatch returns [] once every endpoint has failed -> genuinely unknown.
+    if (!res) return null;
+
+    if (res.error) {
+        // A post that was never broadcast comes back as an Assert Exception, NOT
+        // as an empty result: {"code":-32602,"data":{"extension":{
+        // "assertion_expression":"Post alice/foo does not exist"}}}. Requiring the
+        // permlink to appear in the error keeps a generic node complaint (which is
+        // NOT evidence of absence) from being read as "safe to rebroadcast".
+        const raw = JSON.stringify(res.error);
+        if (raw.includes(permlink) && /does not exist/i.test(raw)) return false;
+        return null;
+    }
+
+    if (!('result' in res)) return null;
+    const c = res.result;
+    if (c === null) return false;          // some nodes answer a missing post this way
+    if (typeof c !== 'object') return null;
+    if (typeof c.author !== 'string' || typeof c.permlink !== 'string') return null;
+    // Older nodes answer with a zeroed stub (author: ""), so compare identity
+    // rather than truthiness.
+    return c.author === author && c.permlink === permlink;
+}
+
+/**
+ * Reclaim posts stranded in `processing`.
+ *
+ * The happy path always writes a terminal status, so a doc can only sit in
+ * `processing` if the process died mid-flight. Nothing used to pick those up:
+ * they stayed invisible forever, never retried and never reported.
+ *
+ * Each stranded doc is reconciled against the chain rather than blindly retried:
+ *   on chain      -> the broadcast landed and only the bookkeeping was lost, so
+ *                    mark it posted and re-run the embed link (the step most
+ *                    likely to have died with the process).
+ *   not on chain  -> nothing was published, so requeue it, or fail it once the
+ *                    attempt cap is spent.
+ *   can't tell    -> leave it exactly as it is and try again next sweep.
+ */
+async function requeueStuckPosts(coll) {
+    const cutoff = Date.now() - STUCK_MIN * 60 * 1000;
+    const candidates = await coll.find({ status: 'processing' }).limit(REAP_PER_TICK).toArray();
+
+    for (const doc of candidates) {
+        // A real claim always stamps processingStartedAt; fall back to updatedAt,
+        // and if a doc somehow carries neither, treat it as stuck rather than
+        // leaving it invisible forever.
+        const startedAt = doc.processingStartedAt || doc.updatedAt;
+        if (startedAt && new Date(startedAt).getTime() > cutoff) continue;
+
+        const onChain = await isPostOnChain(doc.owner, doc.permlink);
+
+        if (onChain === null) {
+            console.warn(`[scheduledPosts] stuck ${doc.owner}/${doc.permlink} — could not reach Hive to confirm, leaving it in processing`);
+            continue;
+        }
+
+        // Every write is guarded on status still being 'processing', so a sweep can
+        // never clobber a tick that finished the doc while we were on the network.
+        if (onChain) {
+            const upd = await coll.updateOne(
+                { _id: doc._id, status: 'processing' },
+                {
+                    $set: {
+                        status: 'posted',
+                        postedAt: doc.postedAt || new Date(),
+                        recoveredAt: new Date(),
+                        lastError: null,
+                        updatedAt: new Date(),
+                    },
+                },
+            );
+            if (upd.modifiedCount) {
+                console.log(`[scheduledPosts] recovered ${doc.owner}/${doc.permlink} — already on chain, marked posted`);
+                await linkEmbedVideoToHivePost(doc);
+            }
+            continue;
+        }
+
+        // Not on chain, so retrying cannot double-post. `attempts` here is the
+        // CURRENT value — this doc came from a plain find(), not from the claim's
+        // `before` snapshot, so unlike the broadcast error path it needs no +1.
+        const attempts = doc.attempts || 0;
+        const exhausted = attempts >= MAX_ATTEMPTS;
+        const upd = await coll.updateOne(
+            { _id: doc._id, status: 'processing' },
+            {
+                $set: {
+                    status: exhausted ? 'failed' : 'scheduled',
+                    lastError: `abandoned in processing for >${STUCK_MIN}min (attempt ${attempts}/${MAX_ATTEMPTS})`,
+                    updatedAt: new Date(),
+                },
+            },
+        );
+        if (upd.modifiedCount) {
+            console.warn(`[scheduledPosts] stuck ${doc.owner}/${doc.permlink} not on chain — ${exhausted ? 'marked failed (attempts exhausted)' : 'requeued'}`);
+        }
+    }
+}
+
+// setInterval does not wait for the previous tick. Without this guard a tick that
+// outran INTERVAL_MIN could have its own in-flight doc swept and re-claimed by the
+// next one — a double broadcast.
+let ticking = false;
+
 async function runOnce() {
     if (!RUNNER_ENABLED || !THREESPEAK_POSTING_KEY) return;
+    if (ticking) return;
+    ticking = true;
+    try {
+        await runTick();
+    } finally {
+        ticking = false;
+    }
+}
 
+async function runTick() {
     const db = await getDb();
     const coll = db.collection(COLLECTION);
+
+    // Sweep abandoned claims before taking new ones, so a stranded post is retried
+    // on the very next tick instead of waiting for a human to notice it.
+    try {
+        await requeueStuckPosts(coll);
+    } catch (err) {
+        console.error('[scheduledPosts] stuck-post sweep error:', err.message || err);
+    }
 
     // Process up to N posts per tick so a flood doesn't stall the loop.
     const PER_TICK = 10;
@@ -343,4 +490,4 @@ function schedule() {
     }, 30 * 1000);
 }
 
-module.exports = { schedule, runOnce, COLLECTION, hasThreespeakPostingAuthority };
+module.exports = { schedule, runOnce, COLLECTION, hasThreespeakPostingAuthority, requeueStuckPosts, isPostOnChain };

@@ -35,8 +35,9 @@ const { getDb } = require('../utils/db');
 const {
   HIVE_RPC_ENDPOINTS, AD_CAMPAIGNS_COLLECTION, AD_IMPRESSIONS_COLLECTION,
   AD_PAYOUTS_COLLECTION, AD_PAYOUT_PERIODS_COLLECTION, AD_CREATOR_POOL_PCT,
+  AD_EXCLUDED_ACCOUNTS, AD_REWARD_FLAG_COLLECTION,
   AD_DEFAULT_COMMUNITY_PCT, AD_CREATOR_PREFS_COLLECTION, AD_PAYMENT_ACCOUNT,
-  AD_PAYOUTS_ENABLED, AD_PAYOUT_INTERVAL_H, AD_PAYOUT_MIN_HBD, AD_PAYOUT_PERIOD_DAYS, AD_PAYMENTS_COLLECTION, AD_BOOKING_EXPIRY_DAYS,
+  AD_PAYOUTS_ENABLED, AD_PAYOUT_INTERVAL_H, AD_PAYOUT_MIN_HBD, AD_CREDIT_MIN_HBD, AD_PAYOUT_PERIOD_DAYS, AD_PAYOUT_PERIOD_OFFSET_MIN, AD_PAYMENTS_COLLECTION, AD_BOOKING_EXPIRY_DAYS,
   AD_VIEWER_POOL_PCT, AD_VIEWER_WATCH_COLLECTION,
 } = require('../utils/config');
 const { STATES } = require('../utils/adModel');
@@ -52,6 +53,10 @@ const fmt3 = (n) => (Math.round(n * 1000) / 1000).toFixed(3);
 const dayKey = (d) => new Date(d).toISOString().slice(0, 10);
 
 let hiveClient = null;
+// Retry a transient RPC failure this many times, then stop and let a person check the
+// chain rather than keep firing transfers at it. Used by both broadcast paths.
+const PAYOUT_MAX_ATTEMPTS = 3;
+
 function getClient() {
   if (hiveClient) return hiveClient;
   const nodes = HIVE_RPC_ENDPOINTS.filter((u) => /^https?:\/\//.test(u) && !/testnet/.test(u));
@@ -59,10 +64,24 @@ function getClient() {
   return hiveClient;
 }
 
-/** Period boundaries are absolute, anchored to the epoch, so they never drift. */
+/**
+ * Period boundaries are absolute so they never drift, anchored to the epoch PLUS an
+ * offset. The offset is what moves them off 00:00 UTC — see AD_PAYOUT_PERIOD_OFFSET_MIN.
+ *
+ * Wrapped into one period's width, so an offset larger than the period (or a negative
+ * one) shifts the boundary rather than skipping periods entirely.
+ */
+function periodOffsetMs() {
+  const span = PERIOD_MS();
+  const raw = (Number(AD_PAYOUT_PERIOD_OFFSET_MIN) || 0) * 60 * 1000;
+  return ((raw % span) + span) % span;
+}
+
 function periodContaining(ts) {
-  const start = Math.floor(ts / PERIOD_MS()) * PERIOD_MS();
-  return { start: new Date(start), end: new Date(start + PERIOD_MS()), key: dayKey(start) };
+  const span = PERIOD_MS();
+  const off = periodOffsetMs();
+  const start = Math.floor((ts - off) / span) * span + off;
+  return { start: new Date(start), end: new Date(start + span), key: dayKey(start) };
 }
 
 /**
@@ -82,6 +101,116 @@ function accrualFor(campaign, start, end) {
   // Never accrue more than was actually paid, however the flight window was edited.
   const earned = Math.min(campaign.paidHbd || 0, campaign.priceHbd || campaign.paidHbd || 0);
   return earned * (overlap / (fe - fs));
+}
+
+/**
+ * The same accrual, but in the ASSETS the advertiser actually sent.
+ *
+ * 🚨 `paidHbd` is a valuation. An advertiser may pay in HIVE, and then an
+ * HBD-denominated payout is not merely awkward, it is impossible — the transfer
+ * fails for want of HBD. So a campaign's asset mix rides through settlement and
+ * everyone is paid IN KIND, proportionally.
+ *
+ * Scaled by the same time fraction as the HBD figure, so the two always agree about
+ * how much of a flight has been earned. Campaigns booked before `paidAssets`
+ * existed report nothing here; `assetSplitOf()` falls back to HBD for those.
+ */
+function accrualAssetsFor(campaign, start, end) {
+  const fs = new Date(campaign.startAt || 0).getTime();
+  const fe = new Date(campaign.endAt || 0).getTime();
+  if (!fs || !fe || fe <= fs) return {};
+  const overlap = Math.max(0, Math.min(fe, end.getTime()) - Math.max(fs, start.getTime()));
+  if (overlap <= 0) return {};
+  const fraction = overlap / (fe - fs);
+  const out = {};
+  for (const [symbol, amount] of Object.entries(campaign.paidAssets || {})) {
+    const n = Number(amount);
+    if (Number.isFinite(n) && n > 0) out[symbol] = n * fraction;
+  }
+  return out;
+}
+
+/**
+ * Turn a pool's asset totals into the fractions each asset represents.
+ *
+ * Falls back to all-HBD when a period's campaigns predate `paidAssets`, which keeps
+ * historical settlements behaving exactly as they did.
+ */
+function assetSplitOf(assetTotals) {
+  const total = Object.values(assetTotals).reduce((a, n) => a + n, 0);
+  if (!(total > 0)) return { HBD: 1 };
+  const out = {};
+  for (const [symbol, n] of Object.entries(assetTotals)) if (n > 0) out[symbol] = n / total;
+  return out;
+}
+
+/**
+ * A recipient's payout, in the NATIVE units of each asset the pool holds.
+ *
+ * 🚨 Takes a SHARE OF THE POOL, not an HBD figure, and multiplies it by each asset's
+ * own native pool. This is the whole point and it is easy to get wrong: "7 HBD worth
+ * of HIVE" is not "7 HIVE", so splitting an HBD number by a value ratio and labelling
+ * the pieces with symbols would silently overpay or underpay the HIVE leg by the
+ * exchange rate. Scaling native pools needs no rate at all, so the platform never
+ * takes a currency position and nothing depends on a price at payout time.
+ */
+function splitAmounts(shareOfPool, assetPool) {
+  return Object.entries(assetPool)
+    .map(([symbol, poolAmount]) => ({
+      symbol,
+      amount: Math.round(shareOfPool * poolAmount * 1000) / 1000,
+    }))
+    .filter((leg) => leg.amount > 0);
+}
+
+/**
+ * Each asset's share of a pool, in native units.
+ *
+ * `poolHbd` may exceed this period's own accruals because dust carried in from an
+ * earlier period rides along with it. That carry has no asset of its own — it is a
+ * remainder of an HBD figure — so it is paid in THIS period's mix, which is what the
+ * scale factor does. Without it the legs would not add up to what the recipient is
+ * owed.
+ */
+function assetPoolFor(assetTotals, sharePct, poolHbd, revenueHbd) {
+  const own = revenueHbd * (sharePct / 100);
+  const scale = own > 0 ? (poolHbd / own) : 1;
+  const out = {};
+  for (const [symbol, n] of Object.entries(assetTotals)) {
+    const v = n * (sharePct / 100) * scale;
+    if (v > 0) out[symbol] = v;
+  }
+  return Object.keys(out).length ? out : { HBD: poolHbd };
+}
+
+/**
+ * Add two native-asset pools together, dropping anything that has rounded away.
+ *
+ * Used to put a carry back alongside a period's own accruals. The carry keeps the
+ * assets it arrived as: money received in HIVE has to leave as HIVE, and folding it
+ * into whatever this period happened to be funded in would have us send HBD we never
+ * took in.
+ */
+function mergeAssets(...pools) {
+  const out = {};
+  for (const pool of pools) {
+    for (const [symbol, n] of Object.entries(pool || {})) {
+      const v = Number(n);
+      if (Number.isFinite(v) && v > 0) out[symbol] = (out[symbol] || 0) + v;
+    }
+  }
+  return out;
+}
+
+/** A fraction of a native-asset pool, as a pool. The object form of splitAmounts(). */
+function scaleAssets(pool, fraction) {
+  const f = Number.isFinite(fraction) && fraction > 0 ? fraction : 0;
+  const out = {};
+  for (const [symbol, n] of Object.entries(pool || {})) {
+    const v = (Number(n) || 0) * f;
+    if (v > 0) out[symbol] = v;
+  }
+  return out;
 }
 
 const isCommunity = (cat) => /^hive-\d+$/.test(String(cat || ''));
@@ -229,12 +358,69 @@ async function resolveCommunities(db, pairs) {
   return { map, unresolved };
 }
 
+/**
+ * Accounts that must not RECEIVE a payout this run.
+ *
+ * Two sources, one answer:
+ *   - AD_EXCLUDED_ACCOUNTS, the platform's own accounts (badadib), from config.
+ *   - `contentcreators.adRewardDisabled: true`, set per account by an admin.
+ *
+ * 🚨 BLOCKED IS NOT OPTED OUT. A blocked account's videos still carry ads and still
+ * earn the advertiser their impressions; we simply do not send the money on. Opting
+ * OUT of ads is a different switch entirely (ad_creator_prefs), it is the creator's to
+ * set, and it removes their videos from what we sell. Never collapse the two: one is
+ * our decision about a transfer, the other is theirs about their videos.
+ *
+ * Batched deliberately. A settlement can hold thousands of impressions over a few
+ * hundred accounts, and a per-row lookup would be a round trip each.
+ *
+ * The flag is read as `=== true`, so a malformed value cannot silently withhold
+ * somebody's money — this decides whether a real person gets paid.
+ */
+async function rewardBlockedSet(db, accounts) {
+  const blocked = new Set(AD_EXCLUDED_ACCOUNTS);
+  const names = [...new Set(
+    accounts.map((a) => String(a || '').trim().toLowerCase()).filter(Boolean),
+  )];
+  if (!names.length) return blocked;
+  try {
+    const rows = await db.collection(AD_REWARD_FLAG_COLLECTION)
+      .find({ username: { $in: names }, adRewardDisabled: true }, { projection: { username: 1 } })
+      .toArray();
+    for (const r of rows) blocked.add(String(r.username).trim().toLowerCase());
+  } catch (err) {
+    // Failing open would pay someone an admin has said not to pay. Failing closed
+    // would withhold from everyone. Neither is acceptable silently, so refuse the
+    // settlement and let the next run retry — the money is not going anywhere.
+    console.error(`[adPayout] could not read reward flags: ${err && err.message}`);
+    throw err;
+  }
+  return blocked;
+}
+
 async function communitySharePctOf(db, owner) {
   const doc = await db.collection(AD_CREATOR_PREFS_COLLECTION)
     .findOne({ _id: owner }, { projection: { communitySharePct: 1 } });
   const stored = doc && doc.communitySharePct;
   // Nullish, not falsy: a stored 0 is a creator who chose to keep the whole pool.
-  return (stored === undefined || stored === null) ? AD_DEFAULT_COMMUNITY_PCT : stored;
+  const pct = (stored === undefined || stored === null) ? AD_DEFAULT_COMMUNITY_PCT : stored;
+
+  /* 🚨 CLAMPED, because the arithmetic downstream cannot survive a bad value.
+   *
+   * settlePeriod computes `communityCut = rate * (pct / AD_CREATOR_POOL_PCT)`. Above
+   * AD_CREATOR_POOL_PCT that exceeds `rate`: the creator's own credit goes negative and
+   * is silently dropped by add(), while the community is credited MORE than the
+   * impression earned. The period then allocates more than its pool holds, and the
+   * platform pays out money it never took in.
+   *
+   * The write endpoint validates the range (routes/advertise.js), but this is the only
+   * place the number is READ, and it can arrive from two paths that endpoint never saw:
+   * AD_DEFAULT_COMMUNITY_PCT, which config.js bounds only at zero, and a value written
+   * straight into Mongo. Clamping here covers all three at once.
+   */
+  const n = Number(pct);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(n, AD_CREATOR_POOL_PCT);
 }
 
 /** Settle one closed period. Idempotent — a settled period is skipped. */
@@ -252,16 +438,47 @@ async function settlePeriod(db, period) {
   }).toArray();
 
   const revenue = campaigns.reduce((sum, c) => sum + accrualFor(c, period.start, period.end), 0);
-  // Anything a previous period could not distribute (no impressions) rolls in here.
-  const carriedIn = (await periods.findOne({ carryTo: period.key }))?.carriedOut || 0;
-  const pool = revenue * (AD_CREATOR_POOL_PCT / 100) + carriedIn;
+  // The same accrual expressed in the assets advertisers actually sent, so everyone
+  // is paid in kind rather than in an HBD figure we may not hold.
+  const assetTotals = {};
+  for (const c of campaigns) {
+    for (const [sym, n] of Object.entries(accrualAssetsFor(c, period.start, period.end))) {
+      assetTotals[sym] = (assetTotals[sym] || 0) + n;
+    }
+  }
+  const assetSplit = assetSplitOf(assetTotals);
+  // Anything a previous period could not distribute rolls in here — both the HBD
+  // figure and the assets it is actually made of.
+  const prior = await periods.findOne({ carryTo: period.key });
+  const carriedIn = prior?.carriedOut || 0;
+  const carriedInAssets = prior?.carriedOutAssets || null;
+  const viewerCarriedIn = prior?.viewerCarriedOut || 0;
+  const viewerCarriedInAssets = prior?.viewerCarriedOutAssets || null;
+
+  const ownPool = revenue * (AD_CREATOR_POOL_PCT / 100);
+  const pool = ownPool + carriedIn;
+  // Native-unit pool per asset, so payouts need no exchange rate at all.
+  //
+  // 🚨 The carry is MERGED, not scaled in. Passing `pool` here instead of `ownPool`
+  // would spread the carried amount across THIS period's asset mix — so a HIVE-funded
+  // period carrying into an HBD-funded one would pay out HBD that nobody ever sent us.
+  const creatorAssetPool = mergeAssets(
+    assetPoolFor(assetTotals, AD_CREATOR_POOL_PCT, ownPool, revenue),
+    carriedInAssets,
+  );
 
   /* ─── viewer share ──────────────────────────────────────────────────────
-   * A slice of the PLATFORM's own cut, set aside for the people who watched.
+   * AD_VIEWER_POOL_PCT of the revenue, set aside for the people who watched.
    *
-   * 🚨 Taken from what we keep, never from `pool`. The creator side must not
-   * notice this exists — funding viewer rewards out of the creator pool would be
-   * paying viewers with creators' money.
+   * 🚨 Taken from what WE keep, never from `pool`. The creator side must not notice
+   * this exists — funding viewer rewards out of the creator pool would be paying
+   * viewers with creators' money. The platform's own share is the remainder,
+   * 100 - AD_CREATOR_POOL_PCT - AD_VIEWER_POOL_PCT, and config.js will not let those
+   * two add up past 100.
+   *
+   * ⚠️ This was `platformPool * (AD_VIEWER_POOL_PCT / 100)` until 2026-09-04, which
+   * made the 10 mean 5 points of the whole. Periods settled before that date hold a
+   * viewerPoolHbd computed at half the current rate.
    *
    * ⚠️ EARMARKED, NOT DISTRIBUTED. The metric we pay on is still an open question
    * (completed ad views? verified seconds? distinct days?), so this records what is
@@ -270,8 +487,14 @@ async function settlePeriod(db, period) {
    * rather than a number reconstructed after the fact from periods nobody measured.
    * Nothing is lost by waiting: it stays in the platform's own share until claimed.
    */
-  const platformPool = revenue * (1 - AD_CREATOR_POOL_PCT / 100);
-  const viewerPoolHbd = Math.round(platformPool * (AD_VIEWER_POOL_PCT / 100) * 1000) / 1000;
+  const ownViewerPool = Math.round(revenue * (AD_VIEWER_POOL_PCT / 100) * 1000) / 1000;
+  // Viewers carry too. A period where nobody cleared the minimum sendable amount has
+  // not stopped owing them; the money waits with the seconds that earned it.
+  const viewerPoolHbd = Math.round((ownViewerPool + viewerCarriedIn) * 1000) / 1000;
+  const viewerAssetPool = mergeAssets(
+    assetPoolFor(assetTotals, AD_VIEWER_POOL_PCT, ownViewerPool, revenue),
+    viewerCarriedInAssets,
+  );
 
   const impressions = await db.collection(AD_IMPRESSIONS_COLLECTION).find({
     completed: true,
@@ -282,16 +505,23 @@ async function settlePeriod(db, period) {
   if (!impressions.length) {
     // No creator impressions does not mean no viewers: someone may still have
     // watched a video to 75% while a flight was running.
-    const viewerPaidNoImp = await payViewers(db, period, viewerPoolHbd);
-    // Nothing delivered. The money is not ours to keep — carry it forward.
+    const viewerPaidNoImp = await payViewers(db, period, viewerPoolHbd, viewerAssetPool);
+    // Nothing delivered. The money is not ours to keep — carry it forward, in the
+    // assets it arrived as so the next period can actually send it.
     await periods.updateOne({ _id: period.key }, {
       $set: {
         startAt: period.start, endAt: period.end, revenueHbd: revenue, poolHbd: pool,
+        assetTotals,
+        assetSplit,
         viewerPoolHbd,
         viewerPoolStatus: viewerPaidNoImp.recipients ? 'paid' : 'earmarked',
         viewerRecipients: viewerPaidNoImp.recipients,
         viewerPaidHbd: viewerPaidNoImp.paidHbd,
+        viewerCarriedIn,
+        viewerCarriedOut: viewerPaidNoImp.carriedOut,
+        viewerCarriedOutAssets: scaleAssets(viewerAssetPool, viewerPoolHbd > 0 ? viewerPaidNoImp.carriedOut / viewerPoolHbd : 0),
         impressions: 0, ratePerImpression: 0, carriedIn, carriedOut: pool,
+        carriedOutAssets: creatorAssetPool,
         carryTo: periodContaining(period.end.getTime()).key,
         status: 'settled', settledAt: new Date(),
       },
@@ -301,14 +531,6 @@ async function settlePeriod(db, period) {
   }
 
   const rate = pool / impressions.length;
-
-  const owed = new Map();
-  const add = (account, hbd, kind) => {
-    if (!account || hbd <= 0) return;
-    const cur = owed.get(account) || { hbd: 0, kind };
-    cur.hbd += hbd;
-    owed.set(account, cur);
-  };
 
   // A period can hold thousands of impressions across a handful of creators; each
   // lookup is a round trip, so cache by the key that actually varies.
@@ -332,6 +554,30 @@ async function settlePeriod(db, period) {
     return null;
   }
 
+  /* Who must not be paid. Resolved BEFORE anything is credited, and applied at the one
+   * funnel every credit goes through, so a creator, a community or anything added here
+   * later cannot bypass it.
+   *
+   * 🚨 The impression still counts in `rate` above. A blocked account's videos really
+   * did carry the ad and the advertiser really did pay for it, so withholding must not
+   * change what every OTHER creator earns per impression. Only the credit is dropped;
+   * that money stays with the platform. */
+  const blocked = await rewardBlockedSet(
+    db,
+    impressions.map((i) => i.owner).concat([...communityCache.values()]),
+  );
+
+  const owed = new Map();
+  const withheld = [];
+  let withheldHbd = 0;
+  const add = (account, hbd, kind) => {
+    if (!account || hbd <= 0) return;
+    if (blocked.has(String(account).trim().toLowerCase())) { withheld.push(account); withheldHbd += hbd; return; }
+    const cur = owed.get(account) || { hbd: 0, kind };
+    cur.hbd += hbd;
+    owed.set(account, cur);
+  };
+
   for (const imp of impressions) {
     const owner = imp.owner;
     if (!owner) continue;
@@ -342,6 +588,9 @@ async function settlePeriod(db, period) {
 
     const communityCut = rate * (communityPct / AD_CREATOR_POOL_PCT);
     if (community) {
+      // The community is a different party, blocked or paid on its own terms: a blocked
+      // creator's videos still earn their community whatever that creator configured,
+      // and a blocked community does not cost the creator their own share.
       add(owner, rate - communityCut, 'creator');
       add(community, communityCut, 'community');
     } else {
@@ -364,7 +613,9 @@ async function settlePeriod(db, period) {
     await db.collection(AD_PAYOUTS_COLLECTION).updateOne(
       { periodKey: period.key, account: r.account },
       {
-        $set: { hbd: r.hbd, kind: r.kind, updatedAt: new Date() },
+        // `hbd` stays the HBD-equivalent total — it is what every report, test and
+        // dust threshold is expressed in. `amounts` is what actually gets sent.
+        $set: { hbd: r.hbd, amounts: splitAmounts(pool > 0 ? r.hbd / pool : 0, creatorAssetPool), kind: r.kind, updatedAt: new Date() },
         $setOnInsert: { status: 'pending', createdAt: new Date() },
       },
       { upsert: true },
@@ -378,22 +629,39 @@ async function settlePeriod(db, period) {
 
   // Viewers settle from the platform's slice, independently of the creator pool
   // above: a period can owe viewers even when it owed creators nothing.
-  const viewerPaid = await payViewers(db, period, viewerPoolHbd);
+  const viewerPaid = await payViewers(db, period, viewerPoolHbd, viewerAssetPool);
 
   await periods.updateOne({ _id: period.key }, {
     $set: {
       startAt: period.start, endAt: period.end, revenueHbd: revenue, poolHbd: pool,
+      assetTotals,
+      assetSplit,
       viewerPoolHbd,
       viewerPoolStatus: viewerPaid.recipients ? 'paid' : 'earmarked',
       viewerRecipients: viewerPaid.recipients,
       viewerPaidHbd: viewerPaid.paidHbd,
+      viewerCarriedIn,
+      viewerCarriedOut: viewerPaid.carriedOut,
+      viewerCarriedOutAssets: scaleAssets(viewerAssetPool, viewerPoolHbd > 0 ? viewerPaid.carriedOut / viewerPoolHbd : 0),
       impressions: impressions.length, ratePerImpression: rate, carriedIn,
-      carriedOut: dust, carryTo: periodContaining(period.end.getTime()).key,
+      /* What blocked accounts would have been paid, and were not. Neither sent nor
+       * carried — it stays with the platform — so without this the money simply
+       * disappears from the period's own arithmetic and only a log line explains the
+       * gap between the pool and what was allocated. */
+      withheldHbd: Math.round(withheldHbd * 1000) / 1000,
+      withheldFrom: [...new Set(withheld)],
+      carriedOut: dust,
+      // Dust keeps the assets it is a remainder of, so it can be sent when it grows.
+      carriedOutAssets: scaleAssets(creatorAssetPool, pool > 0 ? dust / pool : 0),
+      carryTo: periodContaining(period.end.getTime()).key,
       recipients: payable.length, status: 'settled', settledAt: new Date(),
     },
   }, { upsert: true });
 
   const total = payable.reduce((a, r) => a + r.hbd, 0);
+  if (withheld.length) {
+    console.log(`[adPayout] period ${period.key}: withheld from ${[...new Set(withheld)].map((a) => `@${a}`).join(', ')} (reward disabled)`);
+  }
   console.log(
     `[adPayout] period ${period.key}: ${fmt3(pool)} HBD pool / ${impressions.length} impressions `
     + `= ${rate.toFixed(5)} HBD each → ${payable.length} recipient(s), ${fmt3(total)} HBD`
@@ -440,7 +708,8 @@ async function closeFinishedCampaigns(db) {
     // what was promised, so we do not invent a shortfall. Flag it for a human.
     const shortfall = forecast > 0 ? Math.max(0, 1 - delivered / forecast) : null;
     const owedHbd = shortfall === null ? null : Math.round((c.paidHbd || 0) * shortfall * 1000) / 1000;
-    const bankable = owedHbd !== null && owedHbd >= AD_PAYOUT_MIN_HBD;
+    // Its own floor, not the chain's — see AD_CREDIT_MIN_HBD in config.
+    const bankable = owedHbd !== null && owedHbd >= AD_CREDIT_MIN_HBD;
 
     const res = await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
       // The guard: whoever flips it out of scheduled/running owns the close.
@@ -479,34 +748,94 @@ async function closeFinishedCampaigns(db) {
   return closed;
 }
 
-async function payPending(db) {
-  const pending = await db.collection(AD_PAYOUTS_COLLECTION).find({ status: 'pending' }).toArray();
+async function payPending(db, deps = {}) {
+  // `deps.client` exists so a test can drive a failing leg without broadcasting real
+  // money. Production never passes it.
+  const client = deps.client || getClient();
+  const payouts = db.collection(AD_PAYOUTS_COLLECTION);
+  const pending = await payouts.find({ status: 'pending' }).toArray();
   if (!pending.length) return { sent: 0, dryRun: !ACTIVE_KEY };
 
-  if (!ACTIVE_KEY) {
+  if (!ACTIVE_KEY && !deps.client) {
     console.log(`[adPayout] DRY RUN — ${pending.length} payout(s) totalling ${fmt3(pending.reduce((a, p) => a + p.hbd, 0))} HBD would be sent from @${SOURCE_ACCOUNT}`);
     return { sent: 0, dryRun: true };
   }
 
-  const key = PrivateKey.fromString(ACTIVE_KEY);
+  const key = deps.key || PrivateKey.fromString(ACTIVE_KEY);
   let sent = 0;
   for (const p of pending) {
-    // One transfer per recipient, marked individually: a batch that fails halfway
-    // must never leave us unable to say who was paid.
-    try {
-      await getClient().broadcast.sendOperations([['transfer', {
-        from: SOURCE_ACCOUNT,
-        to: p.account,
-        amount: `${fmt3(p.hbd)} HBD`,
-        memo: `3Speak ad revenue share (${p.kind}) — ${p.periodKey}`,
-      }]], key);
-      await db.collection(AD_PAYOUTS_COLLECTION).updateOne({ _id: p._id }, { $set: { status: 'paid', paidAt: new Date() } });
-      sent += 1;
-    } catch (err) {
-      const msg = err && err.message;
-      console.error(`[adPayout] transfer to @${p.account} failed: ${msg}`);
-      await db.collection(AD_PAYOUTS_COLLECTION).updateOne({ _id: p._id }, { $set: { lastError: String(msg).slice(0, 300), lastTriedAt: new Date() } });
+    /* Pay in the assets the advertisers actually sent. `amounts` is written by
+     * settlePeriod; a row from before this existed has none, and falls back to the
+     * HBD figure so old pending rows still settle correctly. */
+    const legs = (Array.isArray(p.amounts) && p.amounts.length)
+      ? p.amounts
+      : [{ symbol: 'HBD', amount: p.hbd }];
+
+    // Nothing sendable: every leg rounds below Hive's precision. Marking this paid
+    // would record a transfer that never happened, so it waits to be carried instead.
+    const sendable = legs.filter((l) => Math.round((Number(l.amount) || 0) * 1000) / 1000 >= AD_PAYOUT_MIN_HBD);
+    if (!sendable.length) {
+      await payouts.updateOne({ _id: p._id }, {
+        $set: { status: 'review', lastError: `no leg reaches the ${AD_PAYOUT_MIN_HBD} minimum`, lastTriedAt: new Date() },
+      });
+      continue;
     }
+
+    /* 🚨 CLAIM-THEN-SEND, and mark each leg as it lands.
+     *
+     * This used to broadcast every leg and then mark the row paid. A two-leg payout —
+     * which is what a campaign funded in both HBD and HIVE produces — whose second leg
+     * threw left the row `pending` with no record that the first had gone out, so the
+     * next run sent BOTH again. `sentLegs` is what makes a retry safe. */
+    const claim = await payouts.findOneAndUpdate(
+      { _id: p._id, status: 'pending' },
+      { $set: { status: 'sending', sendStartedAt: new Date() }, $inc: { attempts: 1 } },
+      { returnDocument: 'after' },
+    );
+    const claimed = claim && (claim.value || claim);
+    if (!claimed || claimed.status !== 'sending') continue; // another run has it
+
+    const already = new Set(claimed.sentLegs || []);
+    let failure = null;
+    for (const leg of sendable) {
+      const symbol = String(leg.symbol || '').toUpperCase();
+      if (already.has(symbol)) continue; // landed on an earlier attempt
+      const amt = Math.round((Number(leg.amount) || 0) * 1000) / 1000;
+      try {
+        await client.broadcast.sendOperations([['transfer', {
+          from: SOURCE_ACCOUNT,
+          to: p.account,
+          amount: `${fmt3(amt)} ${symbol}`,
+          memo: `3Speak ad revenue share (${p.kind}) — ${p.periodKey}`,
+        }]], key);
+        // Recorded immediately, before the next leg can fail. A crash between the
+        // broadcast and this write is the one irreducible risk — Hive transfers carry
+        // no idempotency key — and it is bounded to a single leg.
+        await payouts.updateOne({ _id: p._id }, { $addToSet: { sentLegs: symbol }, $set: { updatedAt: new Date() } });
+        already.add(symbol);
+      } catch (err) {
+        failure = String(err && err.message).slice(0, 300);
+        break;
+      }
+    }
+
+    if (!failure) {
+      await payouts.updateOne({ _id: p._id }, { $set: { status: 'paid', paidAt: new Date() }, $unset: { lastError: '' } });
+      sent += 1;
+      continue;
+    }
+
+    // Back to pending so the legs that did NOT land are retried, or parked for a human
+    // once it has failed enough times. Either way `sentLegs` stops the retry re-sending
+    // what already went out.
+    const park = (claimed.attempts || 1) >= PAYOUT_MAX_ATTEMPTS;
+    await payouts.updateOne({ _id: p._id }, {
+      $set: { status: park ? 'review' : 'pending', lastError: failure, lastTriedAt: new Date() },
+    });
+    console.error(
+      `[adPayout] transfer to @${p.account} failed (attempt ${claimed.attempts}, legs sent: ${[...already].join(',') || 'none'}): ${failure}`
+      + (park ? ' — parked for review, CHECK THE CHAIN before resending' : ''),
+    );
   }
   return { sent, dryRun: false };
 }
@@ -547,18 +876,50 @@ async function payPending(db) {
  * what stops a viewer being paid twice for the same watch if a settlement is retried
  * — the same job `payoutId` does for impressions on the creator side.
  */
-async function payViewers(db, period, viewerPoolHbd) {
-  if (!(viewerPoolHbd > 0)) return { recipients: 0, paidHbd: 0 };
+async function payViewers(db, period, viewerPoolHbd, viewerAssetPool = null) {
+  // Nothing earmarked this period, so there is nothing to pay OR to carry.
+  if (!(viewerPoolHbd > 0)) return { recipients: 0, paidHbd: 0, carriedOut: 0 };
   const watch = db.collection(AD_VIEWER_WATCH_COLLECTION);
 
   // Everything banked and not yet settled. No date filter: a watch recorded in an
   // earlier period that was never paid is still owed, and dropping it would quietly
   // keep money we said belonged to viewers.
-  const rows = await watch.find({ payoutId: null }).toArray();
-  if (!rows.length) return { recipients: 0, paidHbd: 0 };
+  const claimable = await watch.find({ payoutId: null }).toArray();
+  // Nobody has banked a qualifying watch yet. The pool still belongs to viewers, so
+  // it waits for them rather than quietly becoming ours.
+  if (!claimable.length) return { recipients: 0, paidHbd: 0, carriedOut: viewerPoolHbd };
+
+  // Excluded accounts are dropped from the pool ENTIRELY, not just from the payout.
+  // Leaving their seconds in the denominator would hand part of a pool we earmarked
+  // for viewers back to ourselves. Their rows are still claimed below, so they settle
+  // once and are not re-read every period.
+  /* Viewers we must not pay: the platform's own accounts, plus anyone an admin has
+   * flagged with `adRewardDisabled`. Their watching still counts as watching — nothing
+   * about their experience changes — we just do not send the money on.
+   *
+   * Unlike the creator side, their seconds come OUT of the denominator entirely. There
+   * the impression is inventory an advertiser paid for and the rate must not move; here
+   * the pool is a fixed sum earmarked for viewers, and leaving a blocked viewer's
+   * seconds in would quietly shrink everyone else's share to nobody's benefit. */
+  const blocked = await rewardBlockedSet(db, claimable.map((r) => r.viewer));
+  const isExcluded = (v) => blocked.has(String(v || '').trim().toLowerCase());
+  // Blocked rows are claimed on sight: they can never become payable, and an
+  // unclaimed row is re-read on every settlement forever.
+  const excludedIds = claimable.filter((r) => isExcluded(r.viewer)).map((r) => r._id);
+  const claimExcluded = async () => {
+    if (excludedIds.length) {
+      await watch.updateMany({ _id: { $in: excludedIds } }, { $set: { payoutId: period.key, settledAt: new Date() } });
+    }
+  };
+
+  const rows = claimable.filter((r) => !isExcluded(r.viewer));
+  if (!rows.length) {
+    await claimExcluded();
+    return { recipients: 0, paidHbd: 0, carriedOut: viewerPoolHbd };
+  }
 
   const totalSeconds = rows.reduce((a, r) => a + (Number(r.contentSeconds) || 0), 0);
-  if (totalSeconds <= 0) return { recipients: 0, paidHbd: 0 };
+  if (totalSeconds <= 0) return { recipients: 0, paidHbd: 0, carriedOut: viewerPoolHbd };
   const perSecond = viewerPoolHbd / totalSeconds;
 
   const owed = new Map();
@@ -568,19 +929,35 @@ async function payViewers(db, period, viewerPoolHbd) {
     owed.set(r.viewer, (owed.get(r.viewer) || 0) + secs * perSecond);
   }
 
-  const payable = [...owed.entries()]
-    .map(([account, hbd]) => ({ account, hbd: Math.round(hbd * 1000) / 1000 }))
-    .filter((r) => r.hbd >= AD_PAYOUT_MIN_HBD);
+  const scored = [...owed.entries()].map(([account, hbd]) => ({ account, hbd: Math.round(hbd * 1000) / 1000 }));
+  const payable = scored.filter((r) => r.hbd >= AD_PAYOUT_MIN_HBD);
+
+  /* 🚨 ONLY the rows we are actually paying for are claimed.
+   *
+   * Claiming everything and paying only those above the minimum silently erased the
+   * entitlement of every viewer under it: their rows were stamped settled, they were
+   * never paid, and because a claimed row can never be re-read they could not build up
+   * to the minimum in a later period either. At launch revenue that is most casual
+   * viewers — the people the whole feature exists to bring back.
+   *
+   * Their seconds stay unclaimed and keep earning, and the money that would have been
+   * theirs carries to the next period alongside them (see carriedOut below), so the
+   * pool and the seconds waiting on it move together. */
+  const paidAccounts = new Set(payable.map((r) => r.account));
+  const claimIds = rows.filter((r) => paidAccounts.has(r.viewer)).map((r) => r._id);
 
   // Claim first, pay second. A crash between the two leaves rows marked settled and
   // a payout row already written, which `payPending` will retry — the safe order.
-  await watch.updateMany({ payoutId: null }, { $set: { payoutId: period.key, settledAt: new Date() } });
+  await claimExcluded();
+  if (claimIds.length) {
+    await watch.updateMany({ _id: { $in: claimIds } }, { $set: { payoutId: period.key, settledAt: new Date() } });
+  }
 
   for (const r of payable) {
     await db.collection(AD_PAYOUTS_COLLECTION).updateOne(
       { periodKey: period.key, account: r.account },
       {
-        $set: { hbd: r.hbd, kind: 'viewer', updatedAt: new Date() },
+        $set: { hbd: r.hbd, amounts: splitAmounts(viewerPoolHbd > 0 ? r.hbd / viewerPoolHbd : 0, viewerAssetPool || { HBD: viewerPoolHbd }), kind: 'viewer', updatedAt: new Date() },
         $setOnInsert: { status: 'pending', createdAt: new Date() },
       },
       { upsert: true },
@@ -588,12 +965,15 @@ async function payViewers(db, period, viewerPoolHbd) {
   }
 
   const total = payable.reduce((a, r) => a + r.hbd, 0);
+  const carriedOut = Math.max(0, Math.round((viewerPoolHbd - total) * 1000) / 1000);
+  const waiting = scored.length - payable.length;
   console.log(
     `[adPayout] period ${period.key}: viewer pool ${fmt3(viewerPoolHbd)} HBD / `
     + `${(totalSeconds / 3600).toFixed(1)}h qualifying = ${(perSecond * 3600).toFixed(4)} HBD/hour `
-    + `→ ${payable.length} viewer(s), ${fmt3(total)} HBD`,
+    + `→ ${payable.length} viewer(s), ${fmt3(total)} HBD`
+    + (waiting > 0 ? ` (${waiting} under ${AD_PAYOUT_MIN_HBD} still building, ${fmt3(carriedOut)} HBD carried)` : ''),
   );
-  return { recipients: payable.length, paidHbd: total };
+  return { recipients: payable.length, paidHbd: total, carriedOut };
 }
 
 /**
@@ -728,11 +1108,41 @@ async function runOnce() {
     // fortnight catches up instead of silently skipping a period.
     const current = periodContaining(Date.now());
     const settled = [];
-    const oldest = await db.collection(AD_IMPRESSIONS_COLLECTION)
-      .find({ payoutId: null, completed: true }).sort({ completedAt: 1 }).limit(1).toArray();
-    let cursor = oldest.length
-      ? periodContaining(new Date(oldest[0].completedAt || oldest[0].at).getTime())
-      : current;
+
+    /* Where to resume from.
+     *
+     * 🚨 This used to anchor on the oldest UNPAID IMPRESSION, which meant that with no
+     * impressions outstanding the cursor started at the current period and the loop
+     * below — `cursor.start < current.start` — never ran at all. A period that took
+     * revenue but served nothing (serving broken, allowlist empty, a flight paid for
+     * and never delivered) was then never settled, so its pool was never computed and
+     * never carried, and that money reached nobody.
+     *
+     * The last settled period is the honest anchor: settlement is a chain, and the next
+     * link is the period after the last one we closed. Only on a first-ever run do we
+     * fall back to looking for the oldest thing that could owe anybody. */
+    const periodsCol = db.collection(AD_PAYOUT_PERIODS_COLLECTION);
+    const lastSettled = await periodsCol.find({ status: 'settled' }).sort({ endAt: -1 }).limit(1).toArray();
+
+    let anchorTs;
+    if (lastSettled.length && lastSettled[0].endAt) {
+      // `endAt` is exclusive, so the period containing it is the next unsettled one.
+      anchorTs = new Date(lastSettled[0].endAt).getTime();
+    } else {
+      const [oldestImp] = await db.collection(AD_IMPRESSIONS_COLLECTION)
+        .find({ payoutId: null, completed: true }).sort({ completedAt: 1 }).limit(1).toArray();
+      const [oldestCampaign] = await db.collection(AD_CAMPAIGNS_COLLECTION)
+        .find({ paidHbd: { $gt: 0 } }).sort({ startAt: 1 }).limit(1).toArray();
+      const [oldestWatch] = await db.collection(AD_VIEWER_WATCH_COLLECTION)
+        .find({ payoutId: null }).sort({ _id: 1 }).limit(1).toArray();
+      const candidates = [
+        oldestImp && new Date(oldestImp.completedAt || oldestImp.at).getTime(),
+        oldestCampaign && new Date(oldestCampaign.startAt).getTime(),
+        oldestWatch && (oldestWatch.updatedAt ? new Date(oldestWatch.updatedAt).getTime() : null),
+      ].filter((t) => Number.isFinite(t) && t > 0);
+      anchorTs = candidates.length ? Math.min(...candidates) : Date.now();
+    }
+    let cursor = periodContaining(anchorTs);
 
     let guard = 0;
     while (cursor.start < current.start && guard < 200) {
@@ -782,4 +1192,4 @@ function schedule() {
   );
 }
 
-module.exports = { schedule, runOnce, settlePeriod, periodContaining, accrualFor, closeFinishedCampaigns, refundRefusedPayments, releaseStaleCredit, payViewers };
+module.exports = { schedule, runOnce, settlePeriod, periodContaining, accrualFor, closeFinishedCampaigns, refundRefusedPayments, releaseStaleCredit, payViewers, payPending };

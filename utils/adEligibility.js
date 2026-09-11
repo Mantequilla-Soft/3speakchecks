@@ -29,7 +29,7 @@
  * answers "no ads" rather than risking an ad in front of a paying subscriber.
  */
 const { getDb } = require('./db');
-const { PREMIUM_USERS_COLLECTION, AD_CREATOR_PREFS_COLLECTION, ADS_ALLOWED_OWNERS } = require('./config');
+const { PREMIUM_USERS_COLLECTION, AD_CREATOR_PREFS_COLLECTION, ADS_ALLOWED_OWNERS, AD_PREMIUM_OVERRIDE_ACCOUNTS , AD_SELF_VIEW_ALLOWED_ACCOUNTS } = require('./config');
 
 const TTL_MS = parseInt(process.env.AD_ELIGIBILITY_TTL_MS, 10) || 60 * 1000;
 
@@ -70,6 +70,10 @@ function warm(db) {
 async function isPremiumViewer(username) {
   const u = norm(username);
   if (!u) return false;                    // anonymous viewers are not subscribers
+  // Testing override: treat these accounts as non-subscribers so the ad surfaces can be
+  // exercised from a subscribed account. See AD_PREMIUM_OVERRIDE_ACCOUNTS — it must be
+  // empty in production, because every name in it is somebody who paid not to see ads.
+  if (AD_PREMIUM_OVERRIDE_ACCOUNTS.includes(u)) return false;
   const db = getDb();
 
   if (!cache) {
@@ -112,6 +116,25 @@ async function adDecision({ viewer, owner }) {
     if (!o || !ADS_ALLOWED_OWNERS.includes(o)) {
       return { ads: false, reason: 'owner_not_in_trial' };
     }
+  }
+
+  /* A creator never sees an ad on their own video.
+   *
+   * They are the one person guaranteed to watch it over and over — checking the
+   * thumbnail, re-reading the title, making sure the encode came out right — and every
+   * one of those replays was an impression an advertiser paid for and the creator
+   * earned from. Effortless self-farming, billed to the advertiser, and it showed up
+   * the first day the gate ran live: @badadib opening their own video booked a roll and
+   * a banner off one playback.
+   *
+   * Free to check and it can never need a database, so it goes before the premium read.
+   *
+   * ⚠️ NOT the pre-upload gate, where the uploader IS the intended audience. That
+   * surface returns in routes/adServe.js long before it reaches this.
+   */
+  if (viewer && norm(viewer) === norm(owner)
+    && !AD_SELF_VIEW_ALLOWED_ACCOUNTS.includes(norm(viewer))) {
+    return { ads: false, reason: 'own_video' };
   }
 
   const premium = await isPremiumViewer(viewer);

@@ -1,6 +1,49 @@
 const { getDb } = require('../utils/db');
 const { HIVE_RPC_ENDPOINTS } = require('../utils/config');
 
+
+/**
+ * Community avatars, which bridge.get_community does NOT return.
+ *
+ * A community is an account, so its picture lives in the account's
+ * posting_json_metadata like anyone else's. Without indexing it the grid falls
+ * back to images.hive.blog, and that proxy cannot read images.3speak.tv — so a
+ * community created here showed a grey placeholder while its avatar sat on our
+ * own CDN.
+ */
+async function fetchCommunityAvatars(names) {
+    const out = new Map();
+    if (!names.length) return out;
+    for (const endpoint of HIVE_RPC_ENDPOINTS) {
+        try {
+            const resp = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ jsonrpc: '2.0', method: 'condenser_api.get_accounts', params: [names], id: 1 }),
+                signal: AbortSignal.timeout(15000)
+            });
+            const data = await resp.json();
+            for (const acct of data?.result || []) {
+                let profile = {};
+                for (const field of ['posting_json_metadata', 'json_metadata']) {
+                    try {
+                        const parsed = JSON.parse(acct[field] || '{}');
+                        if (parsed?.profile && Object.keys(parsed.profile).length) { profile = parsed.profile; break; }
+                    } catch { /* hand-edited metadata; try the other field */ }
+                }
+                out.set(acct.name, {
+                    image: String(profile.profile_image || '').trim(),
+                    cover: String(profile.cover_image || '').trim(),
+                });
+            }
+            return out;
+        } catch (err) {
+            console.error(`Community avatar fetch failed for ${endpoint}:`, err.message);
+        }
+    }
+    return out;
+}
+
 async function syncHiveCommunities() {
     console.log('Starting Hive community sync...');
     const db = getDb();
@@ -55,6 +98,7 @@ async function syncHiveCommunities() {
                     return null;
                 }));
 
+                const avatars = await fetchCommunityAvatars(details.filter(Boolean).map(d => d.name));
                 const ops = details.filter(Boolean).map(d => ({
                     updateOne: {
                         filter: { name: d.name },
@@ -68,6 +112,8 @@ async function syncHiveCommunities() {
                                 subscribers: d.subscribers || 0,
                                 num_authors: d.num_authors || 0,
                                 sum_pending: d.sum_pending || 0,
+                                image: avatars.get(d.name)?.image || '',
+                                cover: avatars.get(d.name)?.cover || '',
                                 used: true
                             }
                         },
@@ -91,4 +137,59 @@ async function syncHiveCommunities() {
     }
 }
 
-module.exports = { syncHiveCommunities };
+
+/**
+ * Index ONE community immediately.
+ *
+ * The full sync paginates every community on Hive on a schedule, which is the
+ * right shape for catching edits made on other frontends but the wrong one for
+ * a community somebody just created here: they would not see it in 3Speak's own
+ * list until the next pass. Same reasoning as the badge index.
+ *
+ * Reads the community from the chain rather than trusting the caller, so this
+ * cannot be used to plant a row for something that does not exist.
+ */
+async function indexOneCommunity(name) {
+    const clean = String(name || '').trim().toLowerCase();
+    if (!/^hive-\d{5,8}$/.test(clean)) return false;
+
+    for (const endpoint of HIVE_RPC_ENDPOINTS) {
+        try {
+            const resp = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ jsonrpc: '2.0', method: 'bridge.get_community', params: { name: clean }, id: 1 }),
+                signal: AbortSignal.timeout(15000)
+            });
+            const data = await resp.json();
+            const d = data?.result;
+            if (!d || !d.name) return false;
+            const art = (await fetchCommunityAvatars([d.name])).get(d.name) || {};
+            await getDb().collection('hivecommunities').updateOne(
+                { name: d.name },
+                {
+                    $set: {
+                        title: d.title,
+                        about: d.about || '',
+                        description: d.description || '',
+                        lang: d.lang || 'en',
+                        is_nsfw: d.is_nsfw || false,
+                        subscribers: d.subscribers || 0,
+                        num_authors: d.num_authors || 0,
+                        sum_pending: d.sum_pending || 0,
+                        image: art.image || '',
+                        cover: art.cover || '',
+                        used: true
+                    }
+                },
+                { upsert: true }
+            );
+            return true;
+        } catch (err) {
+            console.error(`Indexing ${clean} failed for ${endpoint}:`, err.message);
+        }
+    }
+    return false;
+}
+
+module.exports = { syncHiveCommunities, indexOneCommunity };

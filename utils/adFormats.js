@@ -145,6 +145,16 @@ const FORMATS = Object.freeze({
     label: 'Player banner',
     blurb: 'A banner across the bottom of the video, from the point you choose. It is part of the picture, not a layer over it.',
     creativeKind: CREATIVE_KINDS.IMAGE,
+    /* A banner takes a still OR a video, and the video LOOPS for the seconds the
+     * banner runs. Both end up in the same place: composited into the frame's own
+     * pixels, so a moving banner is not an overlay any more than a still one is.
+     *
+     * `creativeKind` stays IMAGE as the DEFAULT the forms and copy lead with, because
+     * a still is what most advertisers bring and what the size guidance below is
+     * written for. `creativeKinds` is what actually decides whether an upload is
+     * allowed, so anything asking "may this file serve here" must read the list, not
+     * the singular. A format without the list accepts exactly its `creativeKind`. */
+    creativeKinds: Object.freeze([CREATIVE_KINDS.IMAGE, CREATIVE_KINDS.VIDEO]),
     surface: 'watch',
     creatorCredit: CREATOR_CREDIT.VIDEO_OWNER,
     payoutPool: PAYOUT_POOLS.WATCH,
@@ -235,6 +245,26 @@ const FORMATS = Object.freeze({
 const DEFAULT_FORMAT = 'video_roll';
 
 const FORMAT_KEYS = Object.freeze(Object.keys(FORMATS));
+
+/**
+ * Which creative kinds a format will serve.
+ *
+ * Most formats take exactly one, and say so with `creativeKind`. The banner takes two,
+ * and says so with `creativeKinds`. Reading through this helper means a caller cannot
+ * accidentally check the singular on a format that has both and reject a legitimate
+ * upload, which is the failure this shape invites.
+ */
+function acceptedKinds(fmt) {
+  if (!fmt) return [];
+  return Array.isArray(fmt.creativeKinds) && fmt.creativeKinds.length
+    ? fmt.creativeKinds
+    : [fmt.creativeKind];
+}
+
+/** Does this format accept a creative of that kind? */
+function formatAccepts(fmt, kind) {
+  return acceptedKinds(fmt).includes(kind);
+}
 
 /**
  * The format record for a campaign — the single place a missing `format` is read as
@@ -344,6 +374,13 @@ function rateCard(advertiser) {
       label: f.label,
       blurb: f.blurb,
       creativeKind: f.creativeKind,
+      // Everything this format will actually take. The page offers a file picker
+      // from this, so a banner can accept a video without the page hardcoding which
+      // format that is.
+      creativeKinds: acceptedKinds(f),
+      // A banner is composited into the frame, which is why it loops rather than
+      // playing once, and why its "length" means seconds on screen.
+      burnsIn: !!f.burnsIn,
       surface: f.surface,
       positioned: f.positioned,
       maxSeconds: f.maxSeconds,
@@ -416,5 +453,5 @@ function creativeSpecError(formatKey, { width, height }) {
 module.exports = {
   FORMATS, FORMAT_KEYS, DEFAULT_FORMAT, CREATOR_CREDIT, PAYOUT_POOLS,
   formatOf, payoutPoolOf, activePools, isBookableFormat, rateFor, defaultRateFor, snapshotRates,
-  rateCard, creativeSpecError,
+  rateCard, creativeSpecError, acceptedKinds, formatAccepts,
 };

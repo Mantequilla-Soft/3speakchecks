@@ -20,6 +20,7 @@ require('dotenv').config();
 const { ObjectId } = require('mongodb');
 const db = require('../utils/db');
 const cfg = require('../utils/config');
+const { parkRealRows } = require('./_realMoneyGuard.cjs');
 const { settlePeriod, periodContaining, accrualFor } = require('../services/adPayouts');
 
 const TAG = 'PAYOUT-TEST';
@@ -36,19 +37,32 @@ const near = (l, g, w, tol = 0.002) => { const ok = Math.abs(g - w) <= tol; if (
   const periods = d.collection(cfg.AD_PAYOUT_PERIODS_COLLECTION);
 
   // Work in the period BEFORE the current one, so it is closed and settleable.
-  const current = periodContaining(Date.now());
-  const period = periodContaining(current.start.getTime() - 1);
+  /* Far in the past, deliberately.
+   *
+   * 🚨 This used yesterday's period, which is fine at seven-day periods and disastrous
+   * at one: the previous period is one the live settler has ALREADY settled, holding
+   * real payout rows to real accounts. The synthetic pool then included real campaign
+   * accrual (the pool came out 0.033 HBD over), and "nothing was sent" failed because
+   * it was reading two genuine paid rows. Sixty days back can collide with nothing. */
+  const period = periodContaining(Date.now() - 60 * 864e5);
   const mid = new Date(period.start.getTime() + period.end.getTime() >> 1);
   const at = new Date((period.start.getTime() + period.end.getTime()) / 2);
 
   const idA = new ObjectId();
   const idB = new ObjectId();
+  // Settlement has no date filter on viewer rows by design, so a synthetic pool here
+  // would reach real accounts. See scripts/_realMoneyGuard.cjs — this has bitten twice.
+  const restoreRealRows = await parkRealRows(d, cfg);
   try {
     // Both advertisers pay 50 HBD. A runs a short flight, B a long one — the exact
     // asymmetry that broke the old model.
     await camps.insertMany([
-      { _id: idA, name: `${TAG} A`, status: 'running', paidHbd: 50, priceHbd: 50, days: 7,
-        startAt: period.start, endAt: new Date(period.start.getTime() + 7 * 864e5),
+      /* A is the "fits entirely inside one period" case, so its flight is derived from
+       * the configured period rather than hardcoded. It was 7 days, which stopped
+       * fitting the moment the period became 3 and made this read as an accrual bug
+       * when accrual was doing exactly the right thing with a straddling flight. */
+      { _id: idA, name: `${TAG} A`, status: 'running', paidHbd: 50, priceHbd: 50, days: cfg.AD_PAYOUT_PERIOD_DAYS,
+        startAt: period.start, endAt: new Date(period.start.getTime() + cfg.AD_PAYOUT_PERIOD_DAYS * 864e5),
         slotPercent: 25, deliveredImpressions: 10, createdAt: new Date() },
       { _id: idB, name: `${TAG} B`, status: 'running', paidHbd: 50, priceHbd: 50, days: 90,
         startAt: period.start, endAt: new Date(period.start.getTime() + 90 * 864e5),
@@ -102,6 +116,7 @@ const near = (l, g, w, tol = 0.002) => { const ok = Math.abs(g - w) <= tol; if (
     console.log('\n── nothing was sent ──');
     check('all payouts still pending', after.every((p) => p.status === 'pending'), true);
   } finally {
+    await restoreRealRows();
     await camps.deleteMany({ _id: { $in: [idA, idB] } });
     await imps.deleteMany({ sid: { $regex: `^${TAG}-` } });
     await outs.deleteMany({ account: { $regex: '^payout-test-' } });

@@ -1,0 +1,518 @@
+// Read side for INCUBATING users — people using 3Speak who have no Hive account
+// yet. Their content is off-chain, in the incubation_* collections written by
+// the separate incubation service (prodops/services/incubation).
+//
+// Reads live HERE and writes live THERE, deliberately. Feeds, profiles and
+// thread merges are this service's job and it already has the indexes, the
+// caching and the frontend pointed at it; accepting user comments into 3Speak's
+// database is not, and the incubation service owns that lifecycle (including
+// the graduation replay, which has to stay next to the code that knows which
+// operation types can be replayed at all).
+//
+// TWO RULES that every handler here follows:
+//
+//  1. Resolve the handle to a userId FIRST, then query by userId. The `handle`
+//     field denormalised onto each content row is a RENDER CACHE: a user can
+//     change their handle while incubating, and again at graduation if the name
+//     got taken on Hive meanwhile. Querying by it returns a stale slice.
+//
+//  2. Never return rows that have already been published to Hive. Once a
+//     graduating user's post is replayed on chain, the Hive-backed feed is its
+//     home; returning it here too would double it in every list.
+
+const express = require('express');
+const router = express.Router();
+const { getDb } = require('../utils/db');
+
+const ACCOUNTS = 'incubation_accounts';
+const COMMENTS = 'incubation_comments';
+const PROFILES = 'incubation_profiles';
+const FOLLOWS = 'incubation_follows';
+const VOTES = 'incubation_votes';
+
+const clampLimit = (v, def, max) => Math.min(Math.max(parseInt(v, 10) || def, 1), max);
+
+/**
+ * handle -> { userId, handle, status, hiveUsername } for a batch of handles.
+ *
+ * Reads incubation_accounts, the mirror the incubation service maintains, NOT
+ * butrauth's own users collection. Both live in this database, so reading
+ * butrauth directly would work and would be a mistake: that schema is another
+ * service's private business and nothing here would notice it changing.
+ */
+async function resolveHandles(db, handles) {
+    const wanted = [...new Set(handles.filter(h => typeof h === 'string' && h).map(h => h.toLowerCase()))];
+    if (!wanted.length) return {};
+    const rows = await db.collection(ACCOUNTS)
+        .find({ handle: { $in: wanted } })
+        .project({ butrauthUserId: 1, handle: 1, status: 1, hiveUsername: 1 })
+        .toArray();
+    const out = {};
+    for (const r of rows) {
+        out[r.handle] = {
+            userId: r.butrauthUserId,
+            handle: r.handle,
+            status: r.status || 'incubating',
+            hiveUsername: r.hiveUsername || null,
+        };
+    }
+    return out;
+}
+
+/**
+ * Pull the bits a video card needs out of the post's own metadata.
+ *
+ * The upload writes a legacy `video.info` block so other Hive frontends can
+ * render the player, and it is already stored verbatim on the incubation row —
+ * so the thumbnail and duration are here, in the same shape a published post
+ * would carry them. No second source to keep in step.
+ */
+function videoBitsOf(meta) {
+    const info = meta?.video?.info || {};
+    let thumbnail = null;
+    if (Array.isArray(info.sourceMap)) {
+        const t = info.sourceMap.find((x) => x && x.type === 'thumbnail');
+        if (t) thumbnail = t.url || null;
+    }
+    if (!thumbnail && Array.isArray(meta?.image) && meta.image[0]) thumbnail = meta.image[0];
+    return {
+        thumbnail,
+        duration: Number(info.duration) || 0,
+        // The embed asset this post is about, so a player can be pointed at it.
+        assetAuthor: info.author || null,
+        assetPermlink: info.permlink || null,
+    };
+}
+
+function shapePost(r) {
+    const bits = videoBitsOf(r.jsonMetadata);
+    return {
+        ...bits,
+        permlink: r.permlink,
+        title: r.title || '',
+        body: r.body || '',
+        handle: r.handle,
+        // A reply written by someone who ALREADY has a Hive account. Rendered
+        // under their real account so the thread shows who actually spoke —
+        // and so their avatar and reputation resolve normally.
+        hiveAuthor: r.hiveAuthor || null,
+        authorKind: r.authorKind || 'incubating',
+        videoId: r.videoId || null,
+        // 'video' | 'short' | 'comment'. Derived at write time from the post's
+        // OpenAttribute envelope; absent on rows older than that field.
+        contentType: r.contentType || null,
+        parentAuthor: r.parentAuthor || '',
+        parentPermlink: r.parentPermlink || '',
+        jsonMetadata: r.jsonMetadata || {},
+        created: r.createdAt,
+        // No Hive author exists yet. Saying so explicitly stops a frontend from
+        // building an @author link that would 404 on every other Hive site.
+        onChain: false,
+    };
+}
+
+// POST /incubation/authors  { handles: [...] }
+// Batch handle -> identity, so a feed can render author names in one call
+// instead of one per card.
+router.post('/authors', async (req, res) => {
+    try {
+        const { handles } = req.body || {};
+        if (!Array.isArray(handles)) return res.status(400).json({ error: 'handles must be an array' });
+        if (handles.length > 100) return res.status(400).json({ error: 'At most 100 handles per request' });
+        const db = getDb();
+        res.set('Cache-Control', 'public, max-age=30');
+        res.json({ authors: await resolveHandles(db, handles) });
+    } catch (err) {
+        console.error('[incubation] authors:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// GET /incubation/profile/:handle — profile, interests and counts.
+router.get('/profile/:handle', async (req, res) => {
+    try {
+        const db = getDb();
+        const handle = String(req.params.handle || '').toLowerCase();
+        const who = (await resolveHandles(db, [handle]))[handle];
+        if (!who) return res.status(404).json({ error: 'No such user' });
+
+        const [profileRow, postCount, followingCount, followerCount, viewerFollows] = await Promise.all([
+            db.collection(PROFILES).findOne({ butrauthUserId: who.userId }),
+            // Same rule as the posts list below: counted by contentType, so
+            // shorts are included. Counting kind:'post' said "1 post" on a
+            // profile showing three.
+            db.collection(COMMENTS).countDocuments({
+                butrauthUserId: who.userId,
+                $or: [
+                    { contentType: { $in: ['video', 'short'] } },
+                    { contentType: { $exists: false }, kind: 'post' },
+                ],
+            }),
+            db.collection(FOLLOWS).countDocuments({ butrauthUserId: who.userId, state: 'following' }),
+            // People who follow THEM. Real now: a Hive user following an
+            // incubating creator is stored here, because the account does not
+            // exist on chain to be followed.
+            db.collection(FOLLOWS).countDocuments({ following: handle, state: 'following' }),
+            // Whether the person asking already follows them, so the button
+            // does not come back saying Follow to someone who does.
+            (typeof req.query.viewer === 'string' && req.query.viewer)
+                ? db.collection(FOLLOWS).findOne({
+                    following: handle,
+                    state: 'following',
+                    $or: [
+                        { hiveFollower: req.query.viewer.toLowerCase() },
+                        { handle: req.query.viewer },
+                    ],
+                }, { projection: { _id: 1 } })
+                : null,
+        ]);
+
+        const profile = profileRow?.profile || {};
+        res.json({
+            handle: who.handle,
+            status: who.status,
+            hiveUsername: who.hiveUsername,
+            profile: {
+                name: profile.name || null,
+                about: profile.about || null,
+                location: profile.location || null,
+                website: profile.website || null,
+                profile_image: profile.profile_image || null,
+                cover_image: profile.cover_image || null,
+            },
+            interests: Array.isArray(profile.interests) ? profile.interests : [],
+            counts: {
+                posts: postCount,
+                following: followingCount,
+                // Real now. This used to be null because nobody COULD follow an
+                // incubating user: there was no account to follow. Those follows
+                // are stored off-chain instead, so the number means something.
+                followers: followerCount,
+            },
+            viewerFollows: !!viewerFollows,
+        });
+    } catch (err) {
+        console.error('[incubation] profile:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+/**
+ * Attach the off-chain like and reply counts to a page of posts.
+ *
+ * TWO aggregations for the whole page rather than two per card: the card footer
+ * asks for both on every post, and doing it per row is how a profile becomes
+ * 2N queries.
+ *
+ * Without these the cards render the same empty placeholders a Hive post shows
+ * while its stats load, except here they would never arrive: an off-chain post
+ * has no Hive stats to fetch.
+ */
+async function withCounts(db, handle, rows) {
+    const shaped = rows.map(shapePost);
+    if (!shaped.length) return shaped;
+    const permlinks = shaped.map((r) => r.permlink);
+
+    const [votes, replies] = await Promise.all([
+        db.collection(VOTES).aggregate([
+            { $match: { author: handle, permlink: { $in: permlinks } } },
+            { $group: { _id: '$permlink', n: { $sum: 1 } } },
+        ]).toArray(),
+        db.collection(COMMENTS).aggregate([
+            { $match: { parentAuthor: handle, parentPermlink: { $in: permlinks } } },
+            { $group: { _id: '$parentPermlink', n: { $sum: 1 } } },
+        ]).toArray(),
+    ]);
+
+    const voteBy = new Map(votes.map((v) => [v._id, v.n]));
+    const replyBy = new Map(replies.map((r) => [r._id, r.n]));
+    return shaped.map((r) => ({
+        ...r,
+        likeCount: voteBy.get(r.permlink) || 0,
+        replyCount: replyBy.get(r.permlink) || 0,
+    }));
+}
+
+// GET /incubation/user/:handle/posts — one user's posts, newest first.
+router.get('/user/:handle/posts', async (req, res) => {
+    try {
+        const db = getDb();
+        const handle = String(req.params.handle || '').toLowerCase();
+        const who = (await resolveHandles(db, [handle]))[handle];
+        if (!who) return res.status(404).json({ error: 'No such user' });
+
+        const limit = clampLimit(req.query.limit, 30, 100);
+        // By contentType, NOT by kind. A short is published as a reply to the
+        // snaps container, so its `kind` is 'comment' and filtering on
+        // kind:'post' hid every short the user had uploaded from their own
+        // profile. The $or keeps rows written before contentType existed
+        // working off the old field.
+        const rows = await db.collection(COMMENTS)
+            .find({
+                butrauthUserId: who.userId,
+                publishedAt: null,
+                $or: [
+                    { contentType: { $in: ['video', 'short'] } },
+                    { contentType: { $exists: false }, kind: 'post' },
+                ],
+            })
+            .sort({ createdAt: -1 }).limit(limit).toArray();
+        res.json({ author: who, items: await withCounts(db, handle, rows) });
+    } catch (err) {
+        console.error('[incubation] user posts:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// GET /incubation/feed — recent off-chain posts, for interleaving into the home
+// and discover feeds next to the Hive-backed ones.
+//
+// Authors are resolved and attached in ONE batch rather than per row: this is
+// the hot path and a lookup per card is what turns a feed into N+1 queries.
+router.get('/feed', async (req, res) => {
+    try {
+        const db = getDb();
+        const limit = clampLimit(req.query.limit, 20, 50);
+        const maxAgeDays = Math.min(parseFloat(req.query.maxAgeDays) || 30, 90);
+        const since = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000);
+
+        const rows = await db.collection(COMMENTS)
+            .find({ kind: 'post', publishedAt: null, createdAt: { $gte: since } })
+            .sort({ createdAt: -1 }).limit(limit).toArray();
+
+        const authors = await resolveHandles(db, rows.map(r => r.handle));
+        res.set('Cache-Control', 'public, max-age=30');
+        res.json({
+            items: rows.map(r => ({
+                ...shapePost(r),
+                // Re-resolved rather than trusting the denormalised handle, so a
+                // renamed author renders correctly. A row whose author has since
+                // been erased resolves to null and the frontend can skip it.
+                author: authors[r.handle] || null,
+            })),
+        });
+    } catch (err) {
+        console.error('[incubation] feed:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// GET /incubation/replies?parentAuthor=&parentPermlink=
+//
+// The off-chain replies under a piece of content, so a watch page can merge
+// them into the Hive comment thread it already fetches. Incubating users are
+// commenting on REAL Hive posts, so without this their comments are invisible
+// on the very page they were written for.
+router.get('/replies', async (req, res) => {
+    try {
+        const { parentAuthor, parentPermlink } = req.query;
+        if (typeof parentAuthor !== 'string' || typeof parentPermlink !== 'string') {
+            return res.status(400).json({ error: 'parentAuthor and parentPermlink are required' });
+        }
+        const db = getDb();
+        const limit = clampLimit(req.query.limit, 100, 200);
+        const rows = await db.collection(COMMENTS)
+            .find({ parentAuthor, parentPermlink, publishedAt: null })
+            .sort({ createdAt: -1 }).limit(limit).toArray();
+
+        const authors = await resolveHandles(db, rows.map(r => r.handle));
+        res.json({
+            items: rows.map(r => ({ ...shapePost(r), author: authors[r.handle] || null })),
+        });
+    } catch (err) {
+        console.error('[incubation] replies:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// POST /incubation/replies/for  { permlinks: [...] }
+//
+// Every off-chain reply hanging under ANY of these parents, in one round trip.
+//
+// The single-parent GET above answers "replies to this post", which is only the
+// first level of a thread. An off-chain reply to a COMMENT -- someone with no
+// Hive account answering a Hive user under their own video -- hung off that
+// comment's permlink, so nothing ever asked for it and the author could not see
+// their own reply. Asking per comment would be one request per node.
+router.post('/replies/for', async (req, res) => {
+    try {
+        const { permlinks } = req.body || {};
+        if (!Array.isArray(permlinks)) {
+            return res.status(400).json({ error: 'permlinks must be an array' });
+        }
+        const clean = [...new Set(
+            permlinks.filter(p => typeof p === 'string' && p && p.length <= 256)
+        )].slice(0, 500);
+        if (!clean.length) return res.json({ items: [] });
+
+        const db = getDb();
+        const rows = await db.collection(COMMENTS)
+            .find({ parentPermlink: { $in: clean }, publishedAt: null })
+            .sort({ createdAt: -1 }).limit(500).toArray();
+
+        const authors = await resolveHandles(db, rows.map(r => r.handle));
+        res.json({
+            items: rows.map(r => ({ ...shapePost(r), author: authors[r.handle] || null })),
+        });
+    } catch (err) {
+        console.error('[incubation] replies/for:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// POST /incubation/likes/for  { items: [{author, permlink}], viewer }
+//
+// Like counts for many posts in one round trip, for a comment thread or a feed.
+//
+// The single GET below answers for ONE post, which is all the watch page needed.
+// A thread of forty comments asking it per comment is forty round trips, so the
+// counts were simply never fetched anywhere but the video itself: an off-chain
+// like on a comment, a snap or a short existed in the database and was invisible
+// everywhere it was cast.
+//
+// Two queries, not one: counting with $group is cheap, but collecting every
+// voter into a set so the viewer can be found among them is not -- a popular
+// post would carry thousands of ids through memory to answer one boolean. The
+// viewer's own likes are a second, bounded lookup instead.
+router.post('/likes/for', async (req, res) => {
+    try {
+        const { items, viewer } = req.body || {};
+        if (!Array.isArray(items)) {
+            return res.status(400).json({ error: 'items must be an array' });
+        }
+        const clean = [];
+        const seen = new Set();
+        for (const it of items) {
+            const author = typeof it?.author === 'string' ? it.author : '';
+            const permlink = typeof it?.permlink === 'string' ? it.permlink : '';
+            if (!author || !permlink || author.length > 256 || permlink.length > 256) continue;
+            const key = `${author}/${permlink}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            clean.push({ author, permlink });
+            if (clean.length >= 500) break;
+        }
+        if (!clean.length) return res.json({ items: {} });
+
+        const db = getDb();
+        const col = db.collection(VOTES);
+
+        const counts = await col.aggregate([
+            { $match: { $or: clean } },
+            { $group: { _id: { author: '$author', permlink: '$permlink' }, count: { $sum: 1 } } },
+        ]).toArray();
+
+        // Same viewer matching as the single route: a Hive viewer is a voterKey,
+        // an incubating one is the handle on the row.
+        let mine = [];
+        if (typeof viewer === 'string' && viewer) {
+            mine = await col.find(
+                {
+                    $and: [
+                        { $or: clean },
+                        {
+                            $or: [
+                                { voterKey: `hive:${viewer.toLowerCase()}` },
+                                { handle: viewer },
+                            ],
+                        },
+                    ],
+                },
+                { projection: { author: 1, permlink: 1 } },
+            ).toArray();
+        }
+        const likedKeys = new Set(mine.map(r => `${r.author}/${r.permlink}`));
+
+        const out = {};
+        for (const r of counts) {
+            const key = `${r._id.author}/${r._id.permlink}`;
+            out[key] = { count: r.count, liked: likedKeys.has(key) };
+        }
+        // Posts with no likes at all are absent from the aggregate; say zero
+        // rather than leaving the caller to tell "none" from "not asked".
+        for (const { author, permlink } of clean) {
+            const key = `${author}/${permlink}`;
+            if (!out[key]) out[key] = { count: 0, liked: false };
+        }
+        res.json({ items: out });
+    } catch (err) {
+        console.error('[incubation] likes/for:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// GET /incubation/likes?author=&permlink= — how many people liked an off-chain
+// post, and whether the named viewer is one of them.
+//
+// These are 3Speak likes, not Hive votes: they move no rewards and are never
+// replayed to the chain. The route is named accordingly so nothing downstream
+// mistakes the number for a vote count with a payout behind it.
+router.get('/likes', async (req, res) => {
+    try {
+        const { author, permlink, viewer } = req.query;
+        if (typeof author !== 'string' || typeof permlink !== 'string') {
+            return res.status(400).json({ error: 'author and permlink are required' });
+        }
+        const db = getDb();
+        const col = db.collection(VOTES);
+        const count = await col.countDocuments({ author, permlink });
+        let liked = false;
+        if (typeof viewer === 'string' && viewer) {
+            // A Hive viewer is matched by voterKey; an incubating one by the
+            // handle stored on the row. `inc:<handle>` was never a voterKey --
+            // those are `inc:<butrauthUserId>` -- so an incubating user's own
+            // vote came back unliked and the heart reset on every reload.
+            liked = !!(await col.findOne(
+                {
+                    author,
+                    permlink,
+                    $or: [
+                        { voterKey: `hive:${viewer.toLowerCase()}` },
+                        { handle: viewer },
+                    ],
+                },
+                { projection: { _id: 1 } },
+            ));
+        }
+        res.json({ count, liked });
+    } catch (err) {
+        console.error('[incubation] likes:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// GET /incubation/post/:handle/:permlink — one off-chain post.
+//
+// The watch page falls back to this when Hive has no such post, which is what
+// lets an incubating user's video open on a real watch page instead of a dead
+// link from its own card.
+router.get('/post/:handle/:permlink', async (req, res) => {
+    try {
+        const db = getDb();
+        const handle = String(req.params.handle || '').toLowerCase();
+        const who = (await resolveHandles(db, [handle]))[handle];
+        if (!who) return res.status(404).json({ error: 'No such user' });
+
+        const row = await db.collection(COMMENTS).findOne({
+            butrauthUserId: who.userId,
+            permlink: String(req.params.permlink || ''),
+        });
+        if (!row) return res.status(404).json({ error: 'Not found' });
+
+        // A published row is served from Hive, not here: returning it too would
+        // give the watch page two sources for one post and no rule for which wins.
+        if (row.publishedAt) {
+            return res.status(409).json({
+                error: 'Published to Hive',
+                reason: 'published',
+                publishedAs: row.publishedAs || null,
+            });
+        }
+        res.json({ author: who, post: shapePost(row) });
+    } catch (err) {
+        console.error('[incubation] post:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+module.exports = router;

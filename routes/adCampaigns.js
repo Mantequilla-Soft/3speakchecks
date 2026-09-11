@@ -31,17 +31,17 @@ const {
   ADVERTISERS_COLLECTION, AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION,
   AD_PAYMENTS_COLLECTION, AD_PAYMENT_ACCOUNT,
   AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_SLOT_PERCENTS, AD_LENGTH_SECONDS,
-  AD_PRODUCTION_FEE_HBD, ADS_STAGE, AD_SLOT_MAX_SHARES,
+  AD_PRODUCTION_FEE_HBD, ADS_STAGE, AD_SLOT_MAX_SHARES, AD_SLOT_HOLD_HOURS, AD_DAY_CURVE_K,
 } = require('../utils/config');
 const {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, DAY_MS, ensureAdIndexes, priceForDays, ratePerDayFor,
-  validDayCount, windowFrom, servableReason,
+  validDayCount, windowFrom, servableReason, creativesByCampaign,
 } = require('../utils/adModel');
 const { getSnapshot, forecastPerDay } = require('../services/adInventory');
 const { videoShapeFromManifest } = require('../utils/videoDuration');
 const {
-  DEFAULT_FORMAT, FORMAT_KEYS, formatOf, isBookableFormat, rateFor, defaultRateFor, rateCard,
-  creativeSpecError,
+  DEFAULT_FORMAT, FORMAT_KEYS, formatOf, isBookableFormat, rateFor, defaultRateFor, rateCard, formatAccepts,
+  creativeSpecError, acceptedKinds,
 } = require('../utils/adFormats');
 const { findSlotConflict, slotAvailability, slotHolders } = require('../utils/adSlots');
 const { balanceOf, ledgerOf } = require('../utils/adBalance');
@@ -150,7 +150,10 @@ function publicCreative(cr) {
     durationSeconds: cr.durationSeconds,
     encoded: !!cr.manifestUrl,
     note: cr.reviewNote || null,
-    campaignId: cr.campaignId ? String(cr.campaignId) : null,
+    // Deliberately absent: a creative is no longer owned by one flight, so a single
+    // `campaignId` here could only ever be wrong. Which flights use it is a property
+    // of the flights, and the campaign list already says so.
+
     createdAt: cr.createdAt,
     // Playable straight away so the advertiser (and we) can watch it back before
     // it ever runs — the whole point of reviewing a spot beforehand.
@@ -169,6 +172,11 @@ function publicCampaign(c, creative) {
     format: formatOf(c).key,
     formatLabel: formatOf(c).label,
     creativeKind: formatOf(c).creativeKind,
+    // EVERY kind this flight can run, not just the one its copy leads with. The
+    // banner takes a still or a video; publishing only the singular is what made the
+    // bookings list tell an advertiser with a finished video banner that the flight
+    // "needs an approved banner image" and then refuse to offer it.
+    creativeKinds: acceptedKinds(formatOf(c)),
     creativeSpec: formatOf(c).creativeSpec || null,
     status: c.status,
     // Percent for anything booked since slots became relative; `slotPosition` is
@@ -195,6 +203,12 @@ function publicCampaign(c, creative) {
     markets: c.markets || [],
     memo: c.memo,
     payTo: AD_PAYMENT_ACCOUNT,
+    /* The account this flight is booked under, and therefore the ONLY one whose
+     * transfer buys it. A payment from anywhere else is refused at claim and returned,
+     * because an unsigned registration is proved by paying from the account you claimed.
+     * Sent so the page can check the wallet it is about to sign with, rather than
+     * letting somebody discover the rule by having their money sent back. */
+    payFrom: c.hiveAccount || null,
     delivered: c.deliveredImpressions || 0,
     forecast: c.forecastImpressions ?? null,
     deliveryRate: c.deliveryRate ?? null,
@@ -266,6 +280,15 @@ router.get('/pricing', featureVisible, async (req, res) => {
       slotPercents: AD_SLOT_PERCENTS,
       maxCreativeSeconds: AD_LENGTH_SECONDS,
       productionFeeHbd: AD_PRODUCTION_FEE_HBD,
+      // How long a booking holds its position before payment. Sent rather than
+      // written into the page's copy, because a number in prose goes stale
+      // silently: the note there used to say slots were settled at approval,
+      // which stopped being true when booking started holding them.
+      slotHoldHours: AD_SLOT_HOLD_HOURS,
+      // How steeply a longer flight gets cheaper: price is rate x seconds x days^K.
+      // Sent so the page computes the same number the server will write, rather than
+      // carrying its own copy of the formula — the quote and the charge must agree.
+      dayCurveK: AD_DAY_CURVE_K,
       hbdPerHive,
       // Flat tenancy, stated plainly so nobody arrives expecting a CPM.
       model: 'flat',
@@ -400,7 +423,7 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
       if (requestedStart.getTime() < Date.now() - DAY_MS) {
         return res.status(400).json({
           success: false,
-          error: 'The earliest start is tomorrow — a flight has to be approved and paid before it can run.',
+          error: 'That start date has passed. Pick today or later; a flight begins when it is approved and paid.',
         });
       }
     }
@@ -660,9 +683,8 @@ router.get('/campaigns', featureVisible, async (req, res) => {
     const db = getDb();
     const camps = await db.collection(AD_CAMPAIGNS_COLLECTION)
       .find({ advertiserRef: advertiser.reference }).sort({ createdAt: -1 }).limit(100).toArray();
-    const creatives = await db.collection(AD_CREATIVES_COLLECTION)
-      .find({ campaignId: { $in: camps.map((c) => c._id) } }).toArray();
-    const byCampaign = new Map(creatives.map((cr) => [String(cr.campaignId), cr]));
+    // Not readyOnly: a spot still in review is the thing this list exists to report.
+    const byCampaign = await creativesByCampaign(db, camps, { readyOnly: false });
 
     res.set('Cache-Control', 'no-store');
     res.json({
@@ -703,18 +725,32 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
 
     const fmt = formatOf(campaign);
 
-    // A banner is made of a still, so attaching one is attaching an IMAGE — there is
-    // no upload and no encode in that path at all. Refuse the mismatch here with an
-    // answer, rather than accepting it and letting servableReason quietly report
-    // `creative_is_a_video` days later when the flight fails to run.
-    if (fmt.creativeKind === CREATIVE_KINDS.IMAGE) {
+    /* Which path this attach takes is decided by WHAT WAS SENT, not by the format.
+     *
+     * A banner accepts a still or a video, and they arrive by completely different
+     * routes: an image is a URL, a video is an uploaded embed that has to encode. So
+     * `imageUrl` in the body means the image path, and its absence means the upload
+     * path, with the format only deciding whether the result is allowed to serve.
+     *
+     * Refuse a mismatch here with an answer, rather than accepting it and letting
+     * servableReason report `creative_is_a_video` days later when the flight quietly
+     * fails to run. */
+    const sentImage = !!str(b.imageUrl, 1024);
+    if (sentImage && !formatAccepts(fmt, CREATIVE_KINDS.IMAGE)) {
+      return res.status(400).json({
+        success: false,
+        error: `A ${fmt.label.toLowerCase()} is a video. Upload the spot and send embedId, not imageUrl.`,
+      });
+    }
+    if (!sentImage && !formatAccepts(fmt, CREATIVE_KINDS.VIDEO)) {
+      return res.status(400).json({
+        success: false,
+        error: `A ${fmt.label.toLowerCase()} is an image. Send imageUrl, not embedId.`,
+      });
+    }
+
+    if (sentImage) {
       const imageUrl = str(b.imageUrl, 1024);
-      if (!imageUrl) {
-        return res.status(400).json({
-          success: false,
-          error: `A ${fmt.label.toLowerCase()} is an image. Send imageUrl, not embedId.`,
-        });
-      }
       if (!/^https:\/\//i.test(imageUrl)) {
         return res.status(400).json({ success: false, error: 'imageUrl must be an https URL' });
       }
@@ -736,7 +772,6 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
         { embedId: key },
         {
           $set: {
-            campaignId: id,
             advertiserRef: advertiser.reference,
             kind: CREATIVE_KINDS.IMAGE,
             imageUrl,
@@ -754,6 +789,12 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
           $setOnInsert: { embedId: key, reviewNote: null, createdAt: new Date() },
         },
         { upsert: true },
+      );
+      // The flight points at the creative, never the reverse: one banner can be on
+      // as many flights as the advertiser books.
+      await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
+        { _id: id },
+        { $set: { creativeEmbedId: key, updatedAt: new Date() } },
       );
       const saved = await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: key });
       return res.json({ success: true, creative: publicCreative(saved) });
@@ -784,7 +825,34 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
       ? Number(campaign.spotSeconds)
       : fmt.maxSeconds;
     const durationSeconds = Math.round(Number(embed.duration) || 0);
-    if (durationSeconds > 0 && durationSeconds > bookedSeconds) {
+    /* ⚠️ A BANNER is not capped by its own length, because it LOOPS.
+     *
+     * For a roll the two numbers mean the same thing: the slot is how long the spot
+     * plays, so a spot longer than the slot is a spot that does not fit. A banner's
+     * booked seconds are seconds ON SCREEN, and the video repeats to fill them. A
+     * 5-second banner under a 20-second booking is seen four times, and a 30-second
+     * one under the same booking shows its first 20. Neither is an error, and
+     * rejecting them would make short loops, the obvious thing to make, impossible
+     * to book. */
+    /* A BANNER video has to COVER the booking, because it is played once.
+     *
+     * Looping a short clip to fill the window was tried and removed: the seam lands
+     * wherever the loop happens to fall, and a clip a fraction under the booked length
+     * restarts and stops immediately, which looks broken rather than looking like an
+     * ad. Requiring the length up front is the version an advertiser can reason about,
+     * and the automatic-length box on the booking form sets the booking FROM the video
+     * so the two match by construction.
+     *
+     * Longer than the booking is fine: the burn stops at the booked second. */
+    if (fmt.burnsIn && durationSeconds > 0 && durationSeconds < bookedSeconds) {
+      return res.status(400).json({
+        success: false,
+        error: `This banner runs for ${bookedSeconds}s and that video is ${durationSeconds}s. `
+          + 'A banner video is played once, not looped, so it has to be at least as long '
+          + 'as the banner runs. Use a longer video, or book a shorter banner.',
+      });
+    }
+    if (!fmt.burnsIn && durationSeconds > 0 && durationSeconds > bookedSeconds) {
       return res.status(400).json({
         success: false,
         error: `The spot is ${durationSeconds}s and this flight booked a ${bookedSeconds}s slot.`
@@ -846,7 +914,6 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
       { embedId: creativeKey },
       {
         $set: {
-          campaignId: id,
           advertiserRef: advertiser.reference,
           kind: CREATIVE_KINDS.VIDEO,
           // Measured once from the media; null until an encode exists to measure.
@@ -864,13 +931,13 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
       { upsert: true },
     );
 
-    // One spot per flight. Serving maps creatives by campaignId, so a second row
-    // pointing at the same campaign would leave which one runs down to document
-    // order. Release the previous spot rather than leaving two attached — it stays
-    // in the advertiser's library, just no longer on this flight.
-    await db.collection(AD_CREATIVES_COLLECTION).updateMany(
-      { campaignId: id, embedId: { $ne: creativeKey } },
-      { $set: { campaignId: null, updatedAt: new Date() } },
+    // One spot per flight, and it is structural now: the flight holds a single
+    // pointer, so naming a new creative replaces the old one by definition. This
+    // used to be a sweep that nulled `campaignId` on every other creative attached
+    // to this flight, which also meant a creative could only ever be on ONE flight.
+    await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
+      { _id: id },
+      { $set: { creativeEmbedId: creativeKey, updatedAt: new Date() } },
     );
 
     const creative = await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: creativeKey });
@@ -1094,7 +1161,9 @@ router.post('/campaigns/:id/claim', featureVisible, express.json({ limit: '8kb' 
 
     if (!reserved.length) {
       const current = await db.collection(AD_CAMPAIGNS_COLLECTION).findOne({ _id: id });
-      const creative = await db.collection(AD_CREATIVES_COLLECTION).findOne({ campaignId: id });
+      const creative = current?.creativeEmbedId
+        ? await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: current.creativeEmbedId })
+        : null;
       // Nothing creditable. Say WHICH of the two it is — "already credited" in
       // front of somebody whose payment was just refused would be actively
       // misleading about where their money went.
@@ -1115,10 +1184,25 @@ router.post('/campaigns/:id/claim', featureVisible, express.json({ limit: '8kb' 
 
     const hbdPerHive = await getHbdPerHive();
     let credited = 0;
+    /* What actually ARRIVED, in native units, alongside the HBD valuation.
+     *
+     * 🚨 `paidHbd` is a VALUATION, not a balance. It is what the flight is worth in
+     * HBD, and pricing, servability and under-delivery credit are all measured
+     * against it — but the tokens in the payout account are whatever the advertiser
+     * actually sent. Paying an HBD-denominated obligation out of a HIVE-funded
+     * campaign is not a treasury inconvenience, it is impossible: the transfer fails.
+     *
+     * So the mix is carried through to settlement and paid out IN KIND. No
+     * conversion, no exchange exposure, and creators receive exactly the asset that
+     * was paid for their inventory.
+     */
+    const assets = { ...(campaign.paidAssets || {}) };
     for (const m of reserved) {
       const { amount, symbol } = parseAsset(m.amount);
       if (symbol === 'HBD') credited += amount;
       else if (symbol === 'HIVE') credited += amount * hbdPerHive;
+      else continue;   // not valued above, so not banked here either
+      assets[symbol] = Math.round(((assets[symbol] || 0) + amount) * 1000) / 1000;
     }
 
     let paidHbd = Math.round(((campaign.paidHbd || 0) + credited) * 1000) / 1000;
@@ -1159,7 +1243,7 @@ router.post('/campaigns/:id/claim', featureVisible, express.json({ limit: '8kb' 
     const fullyPaid = paidHbd + 1e-6 >= campaign.priceHbd;
     const window = fullyPaid ? windowFrom(campaign.requestedStartAt, campaign.days) : {};
 
-    const update = { paidHbd, updatedAt: new Date() };
+    const update = { paidHbd, paidAssets: assets, updatedAt: new Date() };
     if (fullyPaid) {
       // The flight clock starts now (or at the requested start), never at booking —
       // a campaign paid a week late should get its full run, not what is left of it.
@@ -1178,7 +1262,9 @@ router.post('/campaigns/:id/claim', featureVisible, express.json({ limit: '8kb' 
     }
 
     const fresh = await db.collection(AD_CAMPAIGNS_COLLECTION).findOne({ _id: id });
-    const creative = await db.collection(AD_CREATIVES_COLLECTION).findOne({ campaignId: id });
+    const creative = fresh?.creativeEmbedId
+      ? await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: fresh.creativeEmbedId })
+      : null;
     console.log(`[ad-campaigns] ${id} credited ${credited.toFixed(3)} HBD (total ${paidHbd}/${campaign.priceHbd})`);
     res.json({
       success: true,

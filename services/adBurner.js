@@ -56,11 +56,18 @@ const execFileP = promisify(execFile);
 
 const {
   AD_BURN_CACHE_DIR, AD_BURN_CACHE_MAX_MB, AD_BURN_TIMEOUT_MS,
-  AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT, AD_BANNER_LABEL,
+  AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MAX_HEIGHT_PX,
+  AD_BANNER_MARGIN_PCT, AD_BANNER_LABEL,
 } = require('../utils/config');
 
-/** Bumped when the composite changes shape. Old cache entries then simply miss. */
-const RECIPE_VERSION = 'v1';
+/* Bumped when the composite changes shape. Old cache entries then simply miss.
+ *
+ * 🚨 BUMP IT, and remember that a cached burn is served BEFORE any of the decisions
+ * below are reached. Removing the loop without bumping this left the previous burns in
+ * place and they kept being handed out, so the fix looked like it had not worked at
+ * all. The cache lives at AD_BURN_CACHE_DIR (/var/cache/3speak-ad-burn), not in /tmp.
+ */
+const RECIPE_VERSION = 'v8';
 
 const CACHE_DIR = AD_BURN_CACHE_DIR || path.join(os.tmpdir(), '3speak-ad-burn');
 
@@ -77,9 +84,21 @@ async function ensureDir() {
  * Deliberately NOT keyed on session — that would make the cache useless and the
  * bandwidth argument above false.
  */
-function keyFor({ segmentUrl, imageUrl, position }) {
+function keyFor({ segmentUrl, imageUrl, videoUrl, offsetSeconds, visibleSeconds, position }) {
+  /* 🚨 `offsetSeconds` is part of the key for a VIDEO banner and must be.
+   *
+   * A still looks the same wherever in its run it lands, so one burn serves every
+   * segment. A moving banner does not: segment 2 has to show the banner two segments
+   * further in, or every segment restarts it and the viewer sees the first second of
+   * the ad on repeat. The phase is therefore an input to the bytes, so it is an input
+   * to the key. Quantised to the segment grid it comes from, so it stays a small
+   * finite set per (video, creative) rather than a new file per request. */
+  const phase = videoUrl ? String(Math.round((Number(offsetSeconds) || 0) * 1000)) : '';
+  // How much of this segment carries the banner is also an input to the bytes: the
+  // final segment of a run shows it for part of its length and the rest plain.
+  const visible = Number.isFinite(visibleSeconds) ? String(Math.round(visibleSeconds * 1000)) : 'all';
   return crypto.createHash('sha256')
-    .update([RECIPE_VERSION, segmentUrl, imageUrl, position || 'bottom'].join('\n'))
+    .update([RECIPE_VERSION, segmentUrl, imageUrl || videoUrl || '', phase, visible, position || 'bottom'].join('\n'))
     .digest('hex');
 }
 
@@ -91,10 +110,15 @@ async function probe(file) {
   const { stdout } = await execFileP('ffprobe', [
     '-v', 'error',
     '-select_streams', 'v:0',
-    '-show_entries', 'stream=width,height,r_frame_rate,profile,level,pix_fmt',
+    '-show_entries', 'stream=width,height,r_frame_rate,profile,level,pix_fmt,duration,start_time',
+    '-show_entries', 'format=duration',
     '-of', 'json', file,
   ], { timeout: 15000 });
-  const s = (JSON.parse(stdout).streams || [])[0] || {};
+  const parsed = JSON.parse(stdout);
+  const s = (parsed.streams || [])[0] || {};
+  // Stream duration first, container second: a stream-copied MPEG-TS often carries
+  // one and not the other, and a banner with no known length cannot be looped.
+  const dur = Number(s.duration) || Number((parsed.format || {}).duration) || 0;
   const [num, den] = String(s.r_frame_rate || '').split('/');
   const fps = Number(den) > 0 ? Number(num) / Number(den) : Number(num) || 0;
   return {
@@ -103,6 +127,10 @@ async function probe(file) {
     fps: Number.isFinite(fps) && fps > 0 ? fps : 0,
     pixFmt: s.pix_fmt || 'yuv420p',
     profile: String(s.profile || '').toLowerCase(),
+    duration: Number.isFinite(dur) && dur > 0 ? dur : 0,
+    // Where this segment sits on the video's own clock. The burn preserves timestamps,
+    // so a filter expression in `t` is measured from here, not from zero.
+    startTime: Number(s.start_time) || 0,
   };
 }
 
@@ -119,6 +147,86 @@ async function download(url, dest, timeoutMs) {
 }
 
 /**
+ * A local, loopable copy of a banner VIDEO, produced once and reused.
+ *
+ * The creative is an HLS manifest, because a video creative goes through the normal
+ * encoder. ffmpeg can read a manifest directly, but not usefully here: `-stream_loop`
+ * over the HLS demuxer is unreliable, and every segment burn would re-fetch the whole
+ * playlist. So the banner is flattened once into a single local file and every burn
+ * loops THAT.
+ *
+ * Audio is dropped on the way in. A banner shares the frame with a video the viewer
+ * chose to watch, and taking over their sound is not something an advertiser gets to
+ * buy at this price. Nothing downstream maps it either, so this only saves work.
+ *
+ * Returns null on failure, and the caller then serves the segment unburned: a banner
+ * that cannot be fetched must never cost somebody their playback.
+ */
+async function ensureBannerSource(videoUrl) {
+  await ensureDir();
+  const key = crypto.createHash('sha256').update(`${RECIPE_VERSION}\nsrc\n${videoUrl}`).digest('hex');
+  const out = path.join(CACHE_DIR, `src-${key}.mp4`);
+
+  try {
+    const st = await fsp.stat(out);
+    if (st.size > 0) {
+      const now = new Date();
+      fsp.utimes(out, now, now).catch(() => {});
+      const p = await probe(out);
+      if (p.duration > 0) return { file: out, duration: p.duration };
+    }
+  } catch { /* not cached yet */ }
+
+  const inflightKey = `src:${key}`;
+  if (inflight.has(inflightKey)) return inflight.get(inflightKey);
+
+  const work = (async () => {
+    const tmp = path.join(CACHE_DIR, `.src-${key}.mp4`);
+    try {
+      await execFileP('ffmpeg', [
+        '-v', 'error', '-y',
+        '-i', videoUrl,
+        '-an',                          // silent, deliberately: see above
+        /* Scaled down to the banner height on the way in, never up.
+         *
+         * A banner is fitted into a box when it is composited, so an oversized upload
+         * would be scaled down there anyway and this changes nothing about how it
+         * looks. What it changes is the work: every segment burn overlays this file,
+         * and scaling a 4K strip down to a few hundred pixels once beats doing it on
+         * every burn. `-2` keeps the aspect ratio and forces an even width, which
+         * libx264 requires on yuv420p; `min` is what stops a small banner being
+         * blown up into a blurry one. */
+        '-vf', `scale=-2:'min(${AD_BANNER_MAX_HEIGHT_PX},ih)'`,
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+        '-pix_fmt', 'yuv420p',
+        // faststart is pointless for a local file, but movflags is where a
+        // non-seekable input would otherwise produce an unseekable output, and the
+        // loop below seeks into this on every burn.
+        '-movflags', '+faststart',
+        tmp,
+      ], { timeout: AD_BURN_TIMEOUT_MS, maxBuffer: 1 << 20 });
+
+      const st = await fsp.stat(tmp);
+      if (!st.size) throw new Error('ffmpeg produced no banner source');
+      const p = await probe(tmp);
+      if (!(p.duration > 0)) throw new Error('banner source has no duration');
+      await fsp.rename(tmp, out);
+      sweep().catch(() => {});
+      return { file: out, duration: p.duration };
+    } catch (err) {
+      console.error('[ad-burn] banner source failed:', err && err.message);
+      await fsp.unlink(tmp).catch(() => {});
+      return null;
+    } finally {
+      inflight.delete(inflightKey);
+    }
+  })();
+
+  inflight.set(inflightKey, work);
+  return work;
+}
+
+/**
  * The composite.
  *
  * Geometry is computed from the probed frame rather than expressed as filter-graph
@@ -131,7 +239,7 @@ async function download(url, dest, timeoutMs) {
  * banner itself survives; a label in the DOM would be the one removable part of an
  * otherwise unremovable ad, which is precisely the wrong way round.
  */
-function filterGraph(frame, image) {
+function filterGraph(frame, image, visibleSeconds = null) {
   const { width, height } = frame;
 
   // The banner BOX: bounded on both axes. Width alone is not enough — an advertiser
@@ -141,7 +249,21 @@ function filterGraph(frame, image) {
   // along the bottom of it. Fitting inside a box makes every aspect ratio behave:
   // a 728x90 strip fills it, a square lands small and centred.
   const boxW = Math.max(2, Math.round((width * AD_BANNER_WIDTH_PCT) / 100));
-  const boxH = Math.max(2, Math.round((height * AD_BANNER_MAX_HEIGHT_PCT) / 100));
+  /* Bounded as a share of the frame AND in absolute pixels.
+   *
+   * The percentage alone scales with the variant, which is what keeps a banner
+   * legible on a 480p rendition. But it also means a tall creative on a 1080p frame
+   * is allowed to be genuinely large: 20% of 1080 is 216px of banner, and a squarer
+   * upload takes all of it. AD_BANNER_MAX_HEIGHT_PX is the ceiling that stops a
+   * banner growing with the screen past the point of being a banner.
+   *
+   * The smaller of the two wins, so small frames stay governed by the percentage and
+   * big ones by the pixel cap. Aspect is preserved either way: this is the BOX, and
+   * the scale below fits the creative inside it without distorting it. */
+  const boxH = Math.max(2, Math.min(
+    Math.round((height * AD_BANNER_MAX_HEIGHT_PCT) / 100),
+    AD_BANNER_MAX_HEIGHT_PX,
+  ));
 
   // Fitted here rather than with force_original_aspect_ratio, because the label has
   // to be pinned to the banner's REAL left edge and that is not knowable inside the
@@ -164,14 +286,66 @@ function filterGraph(frame, image) {
   const label = String(AD_BANNER_LABEL || 'Ad').replace(/[\\':%]/g, '');
 
   return [
-    `[1:v]scale=${bw}:${bh}[bn]`,
-    `[0:v][bn]overlay=${x}:${y}:format=auto[ov]`,
+    /* 🚨 The banner's clock has to be moved onto the segment's clock.
+     *
+     * overlay pairs frames by TIMESTAMP, and the burn keeps the segment's own
+     * timestamps (`-copyts`), so a segment 31.8s into a video carries frames stamped
+     * 31.8 and up while the banner's start at 0. Every banner frame then looks
+     * overdue: overlay consumes the whole 10-second banner inside the first few
+     * seconds of the segment and holds the last frame for the rest, which on screen
+     * is a banner that flickers past and then freezes.
+     *
+     * `setpts=PTS-STARTPTS+start/TB` normalises the banner to zero and then moves it
+     * to where this segment begins, so one banner second maps to one segment second.
+     * The `-ss` above chooses WHERE in the banner to start; this decides WHEN it
+     * plays. Both are needed and they are not the same thing. */
+    /* 🚨 The banner is TRIMMED to the segment's length before it is placed.
+     *
+     * Without this the output runs until the LONGEST input ends, and a 10-second
+     * banner on a 6-second segment produced a 10-second segment: the viewer's video
+     * froze at 6s while the banner played on, and then the NEXT segment showed the
+     * banner from 6s again. On screen that is the ad, then the tail of the ad a second
+     * time, which is what it looked like.
+     *
+     * `shortest=1` on the overlay is the other way to bound it and is the wrong one:
+     * it ends the output when the SHORTEST input ends, so a banner shorter than the
+     * segment would cut the viewer's video off instead.
+     *
+     * Order matters. Rebase the banner to zero, cut it to the segment's length, then
+     * move it onto the segment's clock: trimming after the shift would measure the cut
+     * from the wrong origin. */
+    `[1:v]scale=${bw}:${bh},setpts=PTS-STARTPTS,`
+      + `trim=end=${(frame.duration > 0 ? frame.duration : 60).toFixed(3)},`
+      + `setpts=PTS+${frame.startTime.toFixed(3)}/TB[bn]`,
+    /* No `shortest`, for either kind.
+     *
+     * It was needed while the banner looped: an endless input gives the overlay no
+     * reason to finish and ffmpeg would encode until the timeout. The banner is finite
+     * now and usually SHORTER than the segment it decorates, so `shortest=1` would end
+     * the output when the banner ran out and truncate the viewer's video. The overlay's
+     * own default holds the last frame instead, and that frame never shows because
+     * `enable` has switched it off by then. */
+    /* `enable` is what makes a booking mean what it says.
+     *
+     * A burn paints whole segments, so a 20-second banner whose run covers four
+     * 6-second segments was on screen for 24. Tolerable for a still, obvious for a
+     * looping video: the viewer watches it start a third time and stop halfway.
+     *
+     * ⚠️ Measured against the segment's OWN start time, not zero. The burn keeps
+     * timestamps (`-copyts`), so `t` here is the position in the whole video: a naive
+     * `lt(t,20)` is false for every frame of a segment that begins at 30s, and the
+     * banner would never appear at all. */
+    `[0:v][bn]overlay=${x}:${y}:format=auto`
+      + `${visibleSeconds != null ? `:enable='lt(t-${frame.startTime.toFixed(3)},${visibleSeconds.toFixed(3)})'` : ''}[ov]`,
     // Bottom-left corner of the banner itself, so the disclosure travels with the
     // ad whatever shape the creative turned out to be.
     `[ov]drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf`
       + `:text='${label}':fontcolor=white@0.92:fontsize=${fontSize}`
       + `:box=1:boxcolor=black@0.55:boxborderw=${pad}`
-      + `:x=${x + pad}:y=${y + bh - fontSize - pad * 2}[v]`,
+      + `:x=${x + pad}:y=${y + bh - fontSize - pad * 2}`
+      // The disclosure travels with the ad. Left running past the banner it labels, it
+      // would sit on plain video announcing an ad that is no longer there.
+      + `${visibleSeconds != null ? `:enable='lt(t-${frame.startTime.toFixed(3)},${visibleSeconds.toFixed(3)})'` : ''}[v]`,
   ].join(';');
 }
 
@@ -181,9 +355,15 @@ function filterGraph(frame, image) {
  * caller then serves the ORIGINAL segment, so a burn failure costs an impression
  * and never a playback.
  */
-async function burnSegment({ segmentUrl, imageUrl, position = 'bottom' }) {
+async function burnSegment({
+  segmentUrl, imageUrl, videoUrl, offsetSeconds = 0, visibleSeconds = null, position = 'bottom',
+}) {
   await ensureDir();
-  const key = keyFor({ segmentUrl, imageUrl, position });
+  if (!imageUrl && !videoUrl) return null;
+  // Nothing of this segment is inside the booked window. The caller serves the
+  // original, which is cheaper than burning an unchanged picture.
+  if (visibleSeconds != null && !(visibleSeconds > 0)) return null;
+  const key = keyFor({ segmentUrl, imageUrl, videoUrl, offsetSeconds, visibleSeconds, position });
   const out = path.join(CACHE_DIR, `${key}.ts`);
 
   try {
@@ -204,14 +384,66 @@ async function burnSegment({ segmentUrl, imageUrl, position = 'bottom' }) {
     const tmpImg = path.join(CACHE_DIR, `.${key}.img`);
     const tmpOut = path.join(CACHE_DIR, `.${key}.out.ts`);
     try {
-      await Promise.all([
-        download(segmentUrl, tmpSeg, AD_BURN_TIMEOUT_MS),
-        download(imageUrl, tmpImg, AD_BURN_TIMEOUT_MS),
-      ]);
+      /* A moving banner is flattened once and reused; a still is downloaded per burn
+       * as it always was. Both end up as "a local file to overlay", so everything
+       * below this point is the same either way apart from the two input flags. */
+      let bannerFile = null;
+      let bannerDuration = 0;
+      if (videoUrl) {
+        const src = await ensureBannerSource(videoUrl);
+        if (!src) throw new Error('banner video unavailable');
+        bannerFile = src.file;
+        bannerDuration = src.duration;
+        await download(segmentUrl, tmpSeg, AD_BURN_TIMEOUT_MS);
+      } else {
+        await Promise.all([
+          download(segmentUrl, tmpSeg, AD_BURN_TIMEOUT_MS),
+          download(imageUrl, tmpImg, AD_BURN_TIMEOUT_MS),
+        ]);
+        bannerFile = tmpImg;
+      }
 
-      const [p, img] = await Promise.all([probe(tmpSeg), probe(tmpImg)]);
+      const [p, img] = await Promise.all([probe(tmpSeg), probe(bannerFile)]);
       if (!p.width || !p.height) throw new Error('could not probe segment');
-      if (!img.width || !img.height) throw new Error('could not probe banner image');
+      if (!img.width || !img.height) throw new Error('could not probe the banner');
+
+      /* Where in the banner this segment picks it up. NOT taken modulo anything.
+       *
+       * 🚨 A modulo here IS a loop, whatever the ffmpeg flags say. It was left behind
+       * as a "guard" when -stream_loop went, and it quietly kept doing the same job: a
+       * 10-second banner under a 20-second booking seeks to 0.0, then 6.1, then 2.1 and
+       * 8.2, so the third segment restarts the video. That is exactly the loop removing
+       * the flag was supposed to have removed.
+       *
+       * Past the end of the banner there is nothing left to paint, and the segment is
+       * served untouched. */
+      const phase = Number(offsetSeconds) || 0;
+      /* PLAYED ONCE, never looped.
+       *
+       * Looping was the obvious way to fill a booking with a short clip and a worse
+       * deal than it looks: the seam lands wherever the loop happens to fall, and a
+       * clip a fraction under the booked length restarts and stops immediately. The
+       * length is the advertiser's to get right, enforced when the creative is
+       * attached, and this just seeks to the right point and plays.
+       *
+       * `-ss` is still per segment: each one picks the banner up where the last left
+       * it, which is what stops it restarting at every segment boundary. */
+      /* How much banner is LEFT from here, and the window is the smaller of that and
+       * what is still booked.
+       *
+       * A creative that covers its booking never reaches this: the footage remaining
+       * always outlasts the booking remaining. It matters for the ones attached before
+       * that became a requirement, where the alternative is the overlay holding a
+       * frozen last frame for the rest of the window. Stopping is the honest version
+       * of running out. */
+      const remaining = (videoUrl && bannerDuration > 0) ? bannerDuration - phase : Infinity;
+      if (!(remaining > 0)) return null;
+      const window = Math.min(visibleSeconds != null ? visibleSeconds : Infinity, remaining);
+      const paintFor = Number.isFinite(window) ? window : null;
+
+      const bannerInput = videoUrl
+        ? ['-ss', phase.toFixed(3), '-i', bannerFile]
+        : ['-i', bannerFile];
 
       // Mirror the source's parameters. A segment whose codec parameters differ from
       // its neighbours can stall hls.js at the join, and unlike the roll there is no
@@ -221,8 +453,8 @@ async function burnSegment({ segmentUrl, imageUrl, position = 'bottom' }) {
       const args = [
         '-v', 'error', '-y', '-copyts',
         '-i', tmpSeg,
-        '-i', tmpImg,
-        '-filter_complex', filterGraph(p, img),
+        ...bannerInput,
+        '-filter_complex', filterGraph(p, img, paintFor),
         '-map', '[v]', '-map', '0:a?',
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21',
         '-pix_fmt', p.pixFmt,
@@ -235,6 +467,18 @@ async function burnSegment({ segmentUrl, imageUrl, position = 'bottom' }) {
         // segment — measured at 9MB against the 431KB original, a 20x regression
         // that plays correctly and would only ever have shown up as a bandwidth bill.
         '-c:a', 'copy',
+        /* A hard ceiling on the output's length, on top of trimming the banner input.
+         *
+         * The trim alone left a segment 83ms long: the banner's frames are 30fps and
+         * the content's are 24, so cutting the banner at the segment's duration lands
+         * mid-frame and the last one extends past it. A segment that does not have the
+         * length the playlist promises drifts the timeline against every other
+         * rendition, so it is bounded here as well as there. */
+        /* ⚠️ `-to`, an ABSOLUTE end, not `-t`. With `-copyts` the timestamps are the
+         * video's own, so a segment beginning at 31.8s is already "past" any relative
+         * duration and `-t 6.042` ends the output before it starts: every segment came
+         * back unburned. `-to` is measured on the same clock the segment carries. */
+        '-to', (p.startTime + (p.duration > 0 ? p.duration : 60)).toFixed(3),
         '-muxdelay', '0', '-muxpreload', '0',
         '-f', 'mpegts', tmpOut,
       ];

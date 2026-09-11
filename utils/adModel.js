@@ -12,10 +12,9 @@
 const {
   AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_PAYMENTS_COLLECTION,
   AD_IMPRESSIONS_COLLECTION, AD_PAYOUTS_COLLECTION,
-  AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_LENGTH_SECONDS,
-} = require('./config');
+  AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_LENGTH_SECONDS, AD_DAY_CURVE_K } = require('./config');
 const { getDb } = require('./db');
-const { formatOf, defaultRateFor, DEFAULT_FORMAT } = require('./adFormats');
+const { formatOf, defaultRateFor, DEFAULT_FORMAT, formatAccepts } = require('./adFormats');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -66,7 +65,12 @@ async function ensureAdIndexes() {
     await db.collection(AD_PAYMENTS_COLLECTION).createIndex({ trx_id: 1 }, { unique: true });
     await db.collection(AD_PAYMENTS_COLLECTION).createIndex({ campaignId: 1 });
 
+    // Legacy. Nothing reads `campaignId` on a creative any more; the link lives on the
+    // campaign as `creativeEmbedId`. Kept so an old row is still reachable by hand.
     await db.collection(AD_CREATIVES_COLLECTION).createIndex({ campaignId: 1 });
+    // The reverse lookup "which flights run this creative", which the review queue
+    // needs and which is now the only way to answer that question.
+    await db.collection(AD_CAMPAIGNS_COLLECTION).createIndex({ creativeEmbedId: 1 });
     await db.collection(AD_CREATIVES_COLLECTION).createIndex({ embedId: 1 }, { unique: true, sparse: true });
 
     const imps = db.collection(AD_IMPRESSIONS_COLLECTION);
@@ -132,7 +136,15 @@ function priceForDays(days, ratePerSecondDay, spotSeconds) {
   // zero: a bad number must never hand somebody a free flight.
   const seconds = Number(spotSeconds);
   const secs = Number.isFinite(seconds) && seconds > 0 ? seconds : AD_LENGTH_SECONDS;
-  return Math.round(days * perSecondDay * secs * 1000) / 1000;
+  /* days^K, not days. Each extra day costs slightly less than the one before it, so a
+   * longer booking is worth making — see AD_DAY_CURVE_K. At K = 1 this is the straight
+   * line it replaced, and a one-day flight is unaffected at any K because 1^K is 1.
+   *
+   * Guarded against a nonsensical day count for the same reason the rate and length are:
+   * a bad number must never produce a free flight. */
+  const d = Number(days);
+  const chargeableDays = Number.isFinite(d) && d > 0 ? d ** AD_DAY_CURVE_K : 0;
+  return Math.round(chargeableDays * perSecondDay * secs * 1000) / 1000;
 }
 
 function validDayCount(days) {
@@ -192,6 +204,22 @@ function missingAssetFor(creative) {
 }
 
 /**
+ * Is this creative a MOVING banner: a video booked on a format that composites into
+ * the frame rather than splicing into the playlist?
+ *
+ * Asked in several places and worth one name, because the combination behaves like
+ * neither of the things it is made of. It is not a roll — nothing is spliced, the
+ * viewer's video keeps playing underneath. And it is not a still — it has a duration
+ * of its own that has nothing to do with how long it is on screen, because it loops
+ * to fill the booked window.
+ */
+function isMotionBanner(campaign, creative) {
+  if (!creative || !campaign) return false;
+  const fmt = formatOf(campaign);
+  return !!fmt.burnsIn && (creative.kind || CREATIVE_KINDS.VIDEO) === CREATIVE_KINDS.VIDEO;
+}
+
+/**
  * Is this campaign servable right now? Returns a reason when not, because "why is
  * my campaign not running" is the question an advertiser asks, and deriving the
  * answer twice in two places is how the console ends up disagreeing with reality.
@@ -214,7 +242,9 @@ function servableReason(campaign, creative, now = Date.now()) {
   // it the two disagree: the advertiser's console calls a legacy row a video while
   // serving refuses it as the wrong kind, and nothing on either screen says why.
   const creativeKind = creative.kind || CREATIVE_KINDS.VIDEO;
-  if (creativeKind !== fmt.creativeKind) {
+  // Membership, not equality: a banner takes a still OR a video, and asking the
+  // format rather than comparing to its single `creativeKind` is what lets it.
+  if (!formatAccepts(fmt, creativeKind)) {
     return creativeKind === CREATIVE_KINDS.IMAGE ? 'creative_is_an_image' : 'creative_is_a_video';
   }
   if (creative.status !== CREATIVE_STATES.READY) return `creative_${creative.status}`;
@@ -226,9 +256,42 @@ function servableReason(campaign, creative, now = Date.now()) {
   return null;
 }
 
+/**
+ * The creative each of these campaigns will run, keyed by campaign id.
+ *
+ * 🚨 THE LINK POINTS CAMPAIGN → CREATIVE, not the other way round.
+ *
+ * It used to live on the creative, as a single `campaignId`. That made a creative
+ * the property of one flight: attaching the same spot to a second flight moved the
+ * pointer and silently pulled it off the first, and an advertiser running one ad
+ * across three bookings had no way to say so. Pointing from the campaign instead
+ * lets one creative serve any number of flights, and makes "one spot per flight"
+ * structural rather than something an updateMany has to keep tidying up.
+ *
+ * `readyOnly` is the serving path's rule — nothing runs before a human approved it.
+ * The advertiser's own listing passes false, because a spot still in review is
+ * exactly what they are waiting to be told about.
+ */
+async function creativesByCampaign(db, campaigns, { readyOnly = true } = {}) {
+  const wanted = [...new Set((campaigns || []).map((c) => c.creativeEmbedId).filter(Boolean))];
+  if (!wanted.length) return new Map();
+  const query = { embedId: { $in: wanted } };
+  if (readyOnly) query.status = CREATIVE_STATES.READY;
+  const rows = await db.collection(AD_CREATIVES_COLLECTION).find(query).toArray();
+  const byEmbed = new Map(rows.map((cr) => [cr.embedId, cr]));
+  const out = new Map();
+  for (const c of campaigns) {
+    const cr = c.creativeEmbedId ? byEmbed.get(c.creativeEmbedId) : null;
+    if (cr) out.set(String(c._id), cr);
+  }
+  return out;
+}
+
 module.exports = {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, DAY_MS,
   ensureAdIndexes, priceForDays, ratePerDayFor, validDayCount, windowFrom, servableReason,
+  isMotionBanner,
   missingAssetFor,
   slotSecondsFor,
+  creativesByCampaign,
 };

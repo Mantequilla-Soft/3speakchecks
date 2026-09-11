@@ -21,6 +21,8 @@ const {
   AD_CREATOR_POOL_PCT, AD_DEFAULT_COMMUNITY_PCT,
 } = require('../utils/config');
 const { STATES } = require('../utils/adModel');
+const cfg = require('../utils/config');
+const { parkRealRows } = require('./_realMoneyGuard.cjs');
 
 const MARK = 'test-community-split';
 let failed = 0;
@@ -74,8 +76,13 @@ const LEGACY = { author: 'hiveredcarpet', permlink: 'ozmstwre', community: 'hive
     await prefs.updateOne({ _id: o }, { $set: { adsEnabled: true, communitySharePct: SHARE } }, { upsert: true });
   }
 
+  // Settlement has no date filter on viewer rows by design, so a synthetic pool here
+  // would reach real accounts. See scripts/_realMoneyGuard.cjs — this has bitten twice.
+  const restoreRealRows = await parkRealRows(db, cfg);
   try {
-    const mid = new Date(period.start.getTime() + 864e5);
+    // Mid-period, derived from the period: a fixed +1 day lands ON end when the
+    // period is a single day, and `$lt: end` then excludes every impression.
+    const mid = new Date(period.start.getTime() + (period.end.getTime() - period.start.getTime()) / 2);
     const campaign = await camps.insertOne({
       name: MARK, advertiserRef: MARK, hiveAccount: 'testadv', status: STATES.COMPLETE,
       paidHbd: 100, priceHbd: 100,
@@ -169,6 +176,7 @@ const LEGACY = { author: 'hiveredcarpet', permlink: 'ozmstwre', community: 'hive
       Math.abs(reRun.reduce((a, p) => a + p.hbd, 0) - pool) < 0.02, true);
     check('  which is the platform default', AD_DEFAULT_COMMUNITY_PCT, 0);
   } finally {
+    await restoreRealRows();
     await cleanup();
     console.log('\ncleaned up its own rows.');
   }

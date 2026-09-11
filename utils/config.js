@@ -6,6 +6,34 @@ const parseBool = (v, fallback) => {
     return String(v).toLowerCase() === 'true';
 };
 
+/* ─── the ad revenue split ────────────────────────────────────────────────
+ * Resolved out here rather than inline in the object below, because the two
+ * numbers are not independent: together they must leave the platform a share it
+ * can actually pay them out of. Both are PERCENTAGE POINTS OF THE WHOLE, which is
+ * the way everybody says them out loud — "50 / 40 / 10".
+ */
+const CREATOR_POOL_PCT = (() => {
+    const n = parseFloat(process.env.AD_CREATOR_POOL_PCT);
+    return Number.isFinite(n) && n >= 0 && n <= 100 ? n : 50;
+})();
+
+const VIEWER_POOL_PCT = (() => {
+    const n = parseFloat(process.env.AD_VIEWER_POOL_PCT);
+    const wanted = Number.isFinite(n) && n >= 0 && n <= 100 ? n : 10;
+    // Clamped, not thrown. What is left after the creator side is what the platform
+    // has to give, and a config that asks for more than that must not be able to
+    // schedule a payout run that sends money we never took in. Clamping caps the
+    // damage at "the platform keeps nothing"; refusing to boot would take the whole
+    // checker down over one number, and it is loud either way.
+    const room = 100 - CREATOR_POOL_PCT;
+    if (wanted > room) {
+        console.warn(`[ads] AD_VIEWER_POOL_PCT=${wanted} leaves the platform nothing to `
+            + `pay it from (creator side is ${CREATOR_POOL_PCT}%). Clamped to ${room}%.`);
+        return room;
+    }
+    return wanted;
+})();
+
 module.exports = {
     // ─── Social-link verifier (merged from mantequilla-social-verifier) ───
     SOCIAL_LINKS_COLLECTION: process.env.SOCIAL_LINKS_COLLECTION || 'social_links',
@@ -343,6 +371,34 @@ module.exports = {
     LEADERBOARD_EXCLUDED_USERS: (process.env.LEADERBOARD_EXCLUDED_USERS || 'badadib')
         .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
 
+    // Accounts that never RECEIVE an ad payout, as creator or as viewer. badadib is
+    // the platform's own ad account: crediting it is the platform paying itself, and
+    // on the viewer side it would take a slice of a pool we told viewers was theirs.
+    //
+    // 🚨 The two sides treat the excluded account's activity DIFFERENTLY, on purpose:
+    //   creator — its impressions STILL count in `impressions.length`, so the per
+    //     impression rate every other creator is paid at does not move, and the
+    //     forecast keeps matching what was actually served. Its own share is simply
+    //     never credited and stays with the platform.
+    //   viewer  — its watch seconds are dropped from the denominator entirely, so the
+    //     remaining viewers split the WHOLE viewer pool. Leaving them in would quietly
+    //     return part of an earmarked pool to us, which is the thing payViewers'
+    //     no-date-filter comment exists to prevent.
+    // Comma-separated, lowercased.
+    // ⚠️ `??`, not `||`. An operator clearing this deliberately writes an EMPTY value,
+    // and `||` treats that as unset and hands back the default — so switching the
+    // exclusion off would silently leave it on, which is the worst way for a money
+    // setting to fail. Unset still defaults; explicitly empty means empty.
+    AD_EXCLUDED_ACCOUNTS: (process.env.AD_EXCLUDED_ACCOUNTS ?? 'badadib')
+        .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+
+    // Where the per-account `adRewardDisabled` flag lives. NOT the `users` collection:
+    // that one is keyed by email/user_id and holds no Hive username, so an account
+    // cannot be found in it. `contentcreators` is the per-Hive-account table and is
+    // where every other per-account flag already sits (canUpload, livestreamEnabled,
+    // hidden, banned), keyed by a lowercase `username`.
+    AD_REWARD_FLAG_COLLECTION: process.env.AD_REWARD_FLAG_COLLECTION || 'contentcreators',
+
     // ─── "Follow these" creator suggestions (/feeds/suggested-creators) ───────
     // A who-to-follow rail for the discover / interests feeds: creators who posted
     // interest-matching videos in the last SUGGEST_WINDOW_DAYS, ranked by the
@@ -370,9 +426,14 @@ module.exports = {
     RELATED_JITTER: parseFloat(process.env.RELATED_JITTER ?? '0.15'),
 
     COMMUNITY_SYNC_DELAY_H: parseInt(process.env.COMMUNITY_SYNC_DELAY_H) || 4,
-    COMMUNITY_SYNC_INTERVAL_H: parseInt(process.env.COMMUNITY_SYNC_INTERVAL_H) || 4,
+    // Hourly, to match the badge index: a community's name, picture or
+    // description can be edited from any Hive frontend and nothing tells us.
+    COMMUNITY_SYNC_INTERVAL_H: parseInt(process.env.COMMUNITY_SYNC_INTERVAL_H) || 1,
     PROFILE_SYNC_DELAY_H: parseInt(process.env.PROFILE_SYNC_DELAY_H) || 3,
     PROFILE_SYNC_INTERVAL_H: parseInt(process.env.PROFILE_SYNC_INTERVAL_H) || 3,
+    // Badge accounts can be renamed or re-pictured from any Hive frontend,
+    // and nothing announces it. Hourly is cheap: a few hundred profile reads.
+    BADGE_SYNC_INTERVAL_H: parseInt(process.env.BADGE_SYNC_INTERVAL_H) || 1,
     // Pay-per-listen beneficiary account — must match the frontend's
     // VITE_PPL_BENEFICIARY. A track is "pay-per-listen" when its Hive post
     // routes (near) all beneficiaries here; only those get listen-tracked.
@@ -469,7 +530,11 @@ module.exports = {
     // One-time fee for us producing the spot, on top of the flight price. Charged
     // once per campaign, not per day, and folded into the same on-chain payment so
     // an advertiser sends one transfer rather than two.
-    AD_PRODUCTION_FEE_HBD: parseFloat(process.env.AD_PRODUCTION_FEE_HBD) || 25,
+    //
+    // Not part of snapshotRates(), which covers per-format rates only, so this is
+    // always the current figure — an advertiser holding an early-adopter rate card
+    // still pays today's production fee.
+    AD_PRODUCTION_FEE_HBD: parseFloat(process.env.AD_PRODUCTION_FEE_HBD) || 100,
     // Accounts allowed to sign a creator's ad preference ON THEIR BEHALF, via the
     // posting authority the creator granted them. HiveSigner and Butter Auth
     // sessions hold no client-side key, so without this the users least able to
@@ -498,10 +563,7 @@ module.exports = {
     // keep the rest. Both halves are optional — a creator who sets 0 keeps the lot.
     // Named rather than hardcoded because 50 otherwise ends up written into the
     // route, the signing endpoint, the UI and the message format independently.
-    AD_CREATOR_POOL_PCT: (() => {
-        const n = parseFloat(process.env.AD_CREATOR_POOL_PCT);
-        return Number.isFinite(n) && n >= 0 && n <= 100 ? n : 50;
-    })(),
+    AD_CREATOR_POOL_PCT: CREATOR_POOL_PCT,
     // What the community gets when a creator has never touched the setting: NOTHING.
     //
     // 🚨 This was an even split of the pool, and that was wrong. The argument for it
@@ -535,20 +597,20 @@ module.exports = {
     // collection rather than a surgical edit of the log we keep on all viewers.
     AD_VIEWER_WATCH_COLLECTION: process.env.AD_VIEWER_WATCH_COLLECTION || 'ad_viewer_watch',
 
-    // Share of the PLATFORM's own cut that is paid out to viewers.
+    // Share of AD REVENUE that is paid out to viewers, in points of the whole.
+    // At the defaults: creators+communities 50, viewers 10, platform 40.
     //
-    // 🚨 Taken from the platform pool, NOT from the creator pool. On 100 HBD of ad
-    // revenue the creator side still receives its full AD_CREATOR_POOL_PCT; the
-    // viewer share comes out of what we would otherwise keep. Funding it from the
-    // creator side would mean paying viewers with creators' money, which is not the
-    // deal creators agreed to.
+    // 🚨 This used to be a share of the PLATFORM's cut, so the 10 here paid viewers
+    // 5 of every 100 and the 50/40/10 split everyone had agreed on was quietly a
+    // 50/45/5. Changed 2026-09-04. If you are reading an older note, a period
+    // settled before that date earmarked half of what this number now means.
     //
-    // At the defaults (creator pool 50, viewer 10): creators+communities 50,
-    // viewers 5, platform 45.
-    AD_VIEWER_POOL_PCT: (() => {
-        const n = parseFloat(process.env.AD_VIEWER_POOL_PCT);
-        return Number.isFinite(n) && n >= 0 && n <= 100 ? n : 10;
-    })(),
+    // 🚨 Still funded from OUR side, which is the part that must not change: the
+    // creator side receives its full AD_CREATOR_POOL_PCT either way, and what the
+    // platform keeps is the remainder (100 - creator - viewer). Funding viewers out
+    // of the creator pool would be paying them with creators' money, which is not
+    // the deal creators agreed to.
+    AD_VIEWER_POOL_PCT: VIEWER_POOL_PCT,
 
     // --- Booking, payment, serving, payout ---
     AD_CAMPAIGNS_COLLECTION: process.env.AD_CAMPAIGNS_COLLECTION || 'ad_campaigns',
@@ -578,7 +640,12 @@ module.exports = {
     // Launch rate card, set 2026-08-26. Dearest of the four on purpose: a mid-roll is
     // the most disruptive thing we do to a regular viewer, so it should cost the most.
     // 5s over 7 days = 52.5 HBD.
-    AD_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_PRICE_PER_SECOND_DAY_HBD) || 1.5,
+    /* 🚨 THESE MUST TRACK ad_settings. They are the fallback used when the settings
+       document is missing, so a wipe of the ad_* collections falls back to whatever is
+       written here. They were left at double the live rates, which meant clearing
+       ad_settings would have silently doubled every price with nothing to show for it.
+       Change one, change the other, and `advertisers.cjs rates` prints both side by side. */
+    AD_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_PRICE_PER_SECOND_DAY_HBD) || 0.25,
     // --- Per-format rates. See utils/adFormats.js, which is the registry these feed.
     // Each format is a different product and prices on its own rate, on the SAME
     // per-second-per-day formula, so adding a format later is a rate plus a registry
@@ -588,7 +655,7 @@ module.exports = {
     // interrupts nothing, so it is priced well under a roll. 0.15 * 15s * 7d = 15.75.
     // Cheapest: barely intrusive for viewers, and priced to pull in community ads.
     // 5s over 7 days = 8.75 HBD.
-    AD_BANNER_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_BANNER_PRICE_PER_SECOND_DAY_HBD) || 0.25,
+    AD_BANNER_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_BANNER_PRICE_PER_SECOND_DAY_HBD) || 0.12,
     // How long a banner may stay on screen. Longer than a roll's cap on purpose —
     // fifteen seconds of banner is a fraction of the imposition of fifteen seconds
     // of spot, and the price already scales with it.
@@ -599,12 +666,20 @@ module.exports = {
     // Every uploader sees this one, and we have more uploaders than viewers — so it
     // carries a premium even though viewers on other frontends never meet it.
     // 5s over 7 days = 35 HBD.
-    AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD) || 1,
+    AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_UPLOAD_GATE_PRICE_PER_SECOND_DAY_HBD) || 0.35,
     // --- Banner burn-in (services/adBurner.js) ---
     // Burned segments are the ONE thing under /m whose bytes leave this box rather
     // than 302-ing to the CDN, so the cache is what keeps that affordable: a burned
     // segment is identical for every viewer of the same video and campaign.
     AD_BURN_CACHE_DIR: process.env.AD_BURN_CACHE_DIR || '/var/cache/3speak-ad-burn',
+
+    /* Re-encode a spot's audio to match the video it is spliced into.
+     *
+     * Chrome refuses an audio sample-rate change inside one MSE SourceBuffer, and the
+     * library is mixed — some videos are 44100, some 48000, every ad creative is
+     * 44100 — so without this a spot silently fails to render on Chrome whenever the
+     * two disagree. Off means the old behaviour: serve the creative untouched. */
+    AD_AUDIO_NORMALISE: process.env.AD_AUDIO_NORMALISE !== 'false',
     AD_BURN_CACHE_MAX_MB: parseInt(process.env.AD_BURN_CACHE_MAX_MB) || 2048,
     AD_BURN_TIMEOUT_MS: parseInt(process.env.AD_BURN_TIMEOUT_MS) || 30000,
     // Banner geometry, as a percentage of the frame it is composited into — the same
@@ -614,6 +689,59 @@ module.exports = {
     // Bounded on the other axis too, so a square creative lands as a small centred
     // mark along the bottom instead of a 60%-of-the-frame takeover.
     AD_BANNER_MAX_HEIGHT_PCT: parseFloat(process.env.AD_BANNER_MAX_HEIGHT_PCT) || 15,
+    /* Hard ceiling on how tall a burned banner may be, in pixels of the rendition it
+     * is burned into. Paired with AD_BANNER_MAX_HEIGHT_PCT, and the smaller wins.
+     *
+     * The percentage keeps a banner legible on a small rendition; this stops it
+     * growing with the screen on a large one. 240 is the height the recommended
+     * creative (1456x240) already is, so a well-made banner is unaffected and only an
+     * oversized or squarer upload is scaled down to fit. */
+    /* Skippable rolls: how long a viewer must watch before a Skip button appears, and
+     * the shortest spot that gets one at all.
+     *
+     * A short spot is over before a skip would help, and offering one on a 6-second ad
+     * mostly teaches people to look for the button instead of the ad. Below the
+     * threshold the spot simply plays.
+     *
+     * ⚠️ Sent to the player rather than hardcoded there, so these can move without a
+     * frontend deploy — and so what the page offers can never disagree with what the
+     * server believes it sold.
+     *
+     * This does NOT change what an advertiser is billed. An impression still completes
+     * only once enough of the spot has actually played, so a spot skipped at five
+     * seconds was never billed for; skipping just stops us holding somebody hostage to
+     * an ad nobody is being charged for anyway.
+     */
+    /* Accounts exempt from the never-an-ad-on-your-own-video rule.
+     *
+     * ⚠️ TESTING ONLY, and empty by default so the rule holds for everybody unless
+     * somebody deliberately opts an account out. It exists because the trial has one
+     * allowlisted owner and that owner is also the tester: every ad is on their own
+     * content, so the self-view rule blocks every test they try to run.
+     *
+     * 🚨 REMOVE BEFORE LAUNCH. An account left in here earns from replaying its own
+     * uploads, which is the exact behaviour the rule was added to stop.
+     */
+    AD_SELF_VIEW_ALLOWED_ACCOUNTS: (process.env.AD_SELF_VIEW_ALLOWED_ACCOUNTS || '')
+      .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
+
+    /* How long a banner runs before its close button appears.
+     *
+     * Not from the first frame: an ad that can be dismissed instantly is an ad nobody
+     * reads, and the advertiser bought seconds on screen rather than a button. Five is
+     * long enough to see whose it is and short enough not to feel trapped, which is
+     * the same bargain the skippable roll makes.
+     *
+     * Sent to every player, so the burned banner, the mobile overlay and the watch
+     * page cannot drift apart on a number that is really one decision.
+     */
+    AD_BANNER_CLOSE_AFTER_SECONDS: parseFloat(process.env.AD_BANNER_CLOSE_AFTER_SECONDS) || 5,
+
+    AD_SKIP_AFTER_SECONDS: parseFloat(process.env.AD_SKIP_AFTER_SECONDS) || 5,
+    AD_SKIP_MIN_SPOT_SECONDS: parseFloat(process.env.AD_SKIP_MIN_SPOT_SECONDS) || 7,
+
+    AD_BANNER_MAX_HEIGHT_PX: parseInt(process.env.AD_BANNER_MAX_HEIGHT_PX, 10) || 240,
+
     AD_BANNER_MARGIN_PCT: parseFloat(process.env.AD_BANNER_MARGIN_PCT) || 6,
     // Burned into the picture with the banner, never drawn in the page: disclosure
     // has to survive everything the ad itself survives.
@@ -650,13 +778,72 @@ module.exports = {
     // Backstop the hold cannot provide: it stops publish-and-delete, not someone
     // posting thirty real-but-worthless videos a day. Deliberately far above what any
     // genuine creator will hit in one payout period.
+    /* Who sees the PRE-UPLOAD spot, by the account doing the uploading.
+     *
+     * 🚨 OPPOSITE DEFAULT TO ADS_ALLOWED_OWNERS, deliberately. There, an explicit empty
+     * value DISABLES the allowlist and opens ads to every creator. Here an empty value
+     * means NOBODY sees the gate. This one stands between a creator and their own
+     * upload, so the failure that costs least is showing it to too few people, not too
+     * many — and a brand-new surface should not be able to open itself to everyone by
+     * someone clearing a variable.
+     */
+    /* Accounts treated as NOT premium for ad purposes, whatever their subscription says.
+     *
+     * Testing only. A Pro subscriber never sees an ad, which makes the ad surfaces
+     * impossible to exercise from a subscribed account — and the people testing them are
+     * exactly the people who subscribed. This overrides the check for those accounts
+     * without touching anybody's real subscription, so nothing has to be cancelled and
+     * restored to run a test.
+     *
+     * 🚨 EMPTY THIS BEFORE LAUNCH. Every name in here is a paying subscriber who will be
+     * shown advertising they have paid not to see.
+     */
+    AD_PREMIUM_OVERRIDE_ACCOUNTS: (process.env.AD_PREMIUM_OVERRIDE_ACCOUNTS || '')
+      .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
+
+    AD_GATE_ALLOWED_UPLOADERS: (process.env.AD_GATE_ALLOWED_UPLOADERS === undefined
+      ? 'ashenadib'
+      : process.env.AD_GATE_ALLOWED_UPLOADERS)
+      .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
+
     AD_GATE_MAX_CREDITS_PER_PERIOD: parseInt(process.env.AD_GATE_MAX_CREDITS_PER_PERIOD) || 10,
     // A booked-but-unpaid campaign holds its slot this long. Without a hold, two
     // advertisers can book the same position and both then pay for it, and one of
     // them has to be refunded a flight they had every reason to think they owned.
     // With one, an abandoned booking cannot take a position off the market forever.
     AD_SLOT_HOLD_HOURS: parseInt(process.env.AD_SLOT_HOLD_HOURS) || 24,
-    AD_MIN_CAMPAIGN_DAYS: parseInt(process.env.AD_MIN_CAMPAIGN_DAYS) || 7,
+    // Shortest flight an advertiser can book. Independent of AD_PAYOUT_PERIOD_DAYS:
+    // revenue accrues by time overlap, so a one-day flight simply earns its whole
+    // price inside whichever settlement period contains it. What it does change is
+    // that a creator can now wait most of a week to be paid for a flight that ran for
+    // a day, which is a property of the settlement cadence, not of this number.
+    /* How steeply a longer flight gets cheaper per day.
+     *
+     * Price is rate x seconds x days^K. At K = 1 that is the old straight line, where
+     * thirty days costs thirty times one day. Below 1 the curve bends: each extra day
+     * costs a little less than the one before it, so a long booking is worth making.
+     *
+     * 0.85 leaves the ONE-DAY price untouched (1^K is 1, whatever K is) and discounts
+     * from there — about 17% off three days, 26% off a week, 39% off a month. The entry
+     * price is the one an advertiser judges us on, so the discount is funded by longer
+     * flights rather than by the cheapest thing on the card.
+     *
+     * ⚠️ Delivery stays LINEAR. A thirty-day flight still gets thirty days of plays and
+     * its forecast still says so; only the price bends. That is the whole trade: unsold
+     * slot time earns nothing and cannot be stockpiled, so discounting duration to fill
+     * it is worth more than holding the line.
+     *
+     * 🚨 Sent to the page as `dayCurveK` and used from there, never re-declared in the
+     * frontend. The quote shown and the price written have to be the same arithmetic.
+     */
+    AD_DAY_CURVE_K: (() => {
+      const k = parseFloat(process.env.AD_DAY_CURVE_K);
+      // Outside (0, 1] this stops being a volume discount: above 1 it PENALISES long
+      // flights, at or below 0 it inverts or divides by nothing.
+      return Number.isFinite(k) && k > 0 && k <= 1 ? k : 0.85;
+    })(),
+
+    AD_MIN_CAMPAIGN_DAYS: parseInt(process.env.AD_MIN_CAMPAIGN_DAYS) || 1,
     AD_MAX_CAMPAIGN_DAYS: parseInt(process.env.AD_MAX_CAMPAIGN_DAYS) || 90,
     // A viewer sees at most one ad per this window, per campaign. Without it a
     // binge session would carry the same spot a dozen times and burn the audience.
@@ -666,7 +853,7 @@ module.exports = {
     // type, not the mid-roll rules borrowed" — putting a 15s roll in front of a 12s
     // short delivers an impression to someone who never wanted the content.
     // Kept low while the shorts audience is small. 5s over 7 days = 17.5 HBD.
-    AD_SHORTS_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_SHORTS_PRICE_PER_SECOND_DAY_HBD) || 0.5,
+    AD_SHORTS_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_SHORTS_PRICE_PER_SECOND_DAY_HBD) || 0.2,
     // Shorter than a watch-page roll on purpose: the whole surface is built on quick
     // swipes and the tolerance for a spot is correspondingly lower.
     AD_SHORTS_MAX_SECONDS: parseInt(process.env.AD_SHORTS_MAX_SECONDS) || 10,
@@ -752,6 +939,12 @@ module.exports = {
     AD_SLOT_MAX_SHARES: parseInt(process.env.AD_SLOT_MAX_SHARES) || 3,
 
     AD_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_FREQUENCY_CAP_MINUTES) || 30,
+    // The same cap for BANNERS, which are cheaper to sit through than a roll: a banner
+    // shares the picture for a few seconds and never takes the viewer's time away, so
+    // the window that stops a roll burning an audience is longer than a banner needs.
+    // Kept separate rather than derived, because the right number for one says nothing
+    // about the right number for the other.
+    AD_BANNER_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_BANNER_FREQUENCY_CAP_MINUTES) || 10,
     // An impression counts once the viewer has actually watched this much of the
     // spot. Measured server-side from segment fetches, never a client pixel.
     AD_IMPRESSION_MIN_SECONDS: parseFloat(process.env.AD_IMPRESSION_MIN_SECONDS) || 2,
@@ -761,14 +954,67 @@ module.exports = {
     AD_PAYOUTS_ENABLED: parseBool(process.env.AD_PAYOUTS_ENABLED, false),
     AD_PAYOUTS_LIVE: parseBool(process.env.AD_PAYOUTS_LIVE, false),
     AD_PAYOUT_INTERVAL_H: parseInt(process.env.AD_PAYOUT_INTERVAL_H) || 24,
-    AD_PAYOUT_MIN_HBD: parseFloat(process.env.AD_PAYOUT_MIN_HBD) || 0.01,
+    // The smallest payout worth sending, as an HBD-equivalent. 0.001 is Hive's own
+    // precision for both HBD and HIVE, so this is the smallest amount that can exist
+    // on chain rather than a policy choice. Anything under it cannot be transferred at
+    // all; it is carried to the next period, never dropped.
+    // ⚠️ parseFloat||default means 0 falls back to the default. That is deliberate —
+    // a zero floor would queue transfers of 0.000 that every node rejects.
+    AD_PAYOUT_MIN_HBD: parseFloat(process.env.AD_PAYOUT_MIN_HBD) || 0.001,
+
+    // The smallest UNDER-DELIVERY SHORTFALL worth banking as advertiser credit. This is
+    // deliberately NOT the send minimum above: that one is a chain constraint (0.001 is
+    // the smallest amount Hive can represent), while this is a judgement about whether a
+    // credit line is worth existing. A credit of a tenth of a cent clutters an
+    // advertiser's ledger to no purpose, and it is never transferred, so precision does
+    // not bind it. Dropping the send floor must not quietly start banking dust.
+    AD_CREDIT_MIN_HBD: parseFloat(process.env.AD_CREDIT_MIN_HBD) || 0.01,
     // Payouts settle by PERIOD, not per campaign. Dividing a single campaign's fee
     // by its own impressions made a creator's rate depend on which campaign the
     // rotation happened to give them: 10 plays of a short expensive flight paid 20x
     // the same 10 plays of a long cheap one. Pooling every campaign's accrued
     // revenue over a fixed window gives one rate per period for everyone, and pays
     // on a predictable cadence instead of whenever some advertiser's flight ends.
-    AD_PAYOUT_PERIOD_DAYS: parseInt(process.env.AD_PAYOUT_PERIOD_DAYS) || 7,
+    // How much time one settlement covers. Shorter pays people sooner, which matters
+    // now that a flight can be a single day.
+    //
+    // NOT one day, deliberately. Three reasons, and they all point the same way:
+    //   - the payout job runs every AD_PAYOUT_INTERVAL_H (24h), so a one-day period has
+    //     no headroom at all: one deferred run, and settlement is a whole period behind.
+    //     Deferral is normal, not exceptional — settlePeriod refuses to guess a
+    //     community when Hive RPC is unreachable, and waits.
+    //   - shorter windows mean smaller per-recipient amounts, so MORE people fall under
+    //     the minimum sendable amount and carry. Past a point, shortening the period
+    //     pays people less often rather than more.
+    //   - every period is an on-chain transfer per recipient. Seven days is ~4 a month
+    //     in someone's wallet, three is ~10, one is 30 of them too small to read.
+    //
+    // 🚨 Periods are epoch-anchored (floor(ts / PERIOD_MS)), so changing this re-derives
+    // every boundary AND every key. Safe to change while no period has settled; after
+    // that it orphans the carry chain, because a carryTo key written under the old
+    // length matches no period under the new one.
+    AD_PAYOUT_PERIOD_DAYS: parseInt(process.env.AD_PAYOUT_PERIOD_DAYS) || 3,
+
+    /* Where a period BOUNDARY falls, as minutes past midnight UTC.
+     *
+     * Without this the anchor is the Unix epoch, so every boundary lands at 00:00 UTC —
+     * 02:00 in Berlin. A settlement that fails then is noticed the next morning at the
+     * earliest, and the run that moves real money is the one you least want to find out
+     * about late. 420 is 07:00 UTC: 09:00 Berlin in summer, 08:00 in winter, a working
+     * hour either way.
+     *
+     * 🚨 Changing this re-derives every boundary AND every key, exactly like changing the
+     * period length, and it does more than orphan the carry chain: it BLOCKS SETTLEMENT.
+     * A key is the start date, so moving a boundary within the same day gives the new
+     * window a key an already-settled period is holding — settlePeriod finds a settled
+     * doc under that key, returns immediately, and nothing after it ever settles. Seen
+     * for real: shifting 00:00 to 14:07 left fourteen impressions unpaid with no error
+     * anywhere, because a silent early return is what "already settled" looks like.
+     *
+     * So when this changes, the period documents have to go with it. Re-key them rather
+     * than delete: they record settlements that really moved money.
+     */
+    AD_PAYOUT_PERIOD_OFFSET_MIN: parseInt(process.env.AD_PAYOUT_PERIOD_OFFSET_MIN, 10) || 420,
     AD_PAYOUT_PERIODS_COLLECTION: process.env.AD_PAYOUT_PERIODS_COLLECTION || 'ad_payout_periods',
     // How long an unpaid booking may hold credit before it is released back to the
     // advertiser's balance. Without this a booking that is created and abandoned
