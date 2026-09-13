@@ -267,6 +267,15 @@ router.get('/user/:handle/posts', async (req, res) => {
 // GET /incubation/feed — recent off-chain posts, for interleaving into the home
 // and discover feeds next to the Hive-backed ones.
 //
+// ?contentType=short|video narrows it to one kind, for a surface that only
+// accepts one: the shorts feed cannot show a landscape post, and filtering a
+// mixed page client-side would return however many shorts happened to be in the
+// most recent `limit` rows, which on a quiet week is none.
+//
+// Filter on contentType, never on `kind`. A short is stored kind:'comment'
+// because it is published as a reply to the @peak.snaps container, so a kind
+// filter both drops every short and lets replies through.
+//
 // Authors are resolved and attached in ONE batch rather than per row: this is
 // the hot path and a lookup per card is what turns a feed into N+1 queries.
 router.get('/feed', async (req, res) => {
@@ -276,8 +285,22 @@ router.get('/feed', async (req, res) => {
         const maxAgeDays = Math.min(parseFloat(req.query.maxAgeDays) || 30, 90);
         const since = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000);
 
+        const wanted = String(req.query.contentType || '').trim();
+        // Unknown values are ignored rather than 400: this is a feed, and a
+        // caller that mistypes should see the mixed feed, not an error page.
+        const typeFilter = (wanted === 'short' || wanted === 'video')
+            ? { contentType: wanted }
+            : {};
+
         const rows = await db.collection(COMMENTS)
-            .find({ kind: 'post', publishedAt: null, createdAt: { $gte: since } })
+            .find({
+                // A short is kind:'comment', so the kind gate has to widen when
+                // shorts are being asked for -- contentType is what decides.
+                ...(wanted === 'short' ? {} : { kind: 'post' }),
+                ...typeFilter,
+                publishedAt: null,
+                createdAt: { $gte: since },
+            })
             .sort({ createdAt: -1 }).limit(limit).toArray();
 
         const authors = await resolveHandles(db, rows.map(r => r.handle));
