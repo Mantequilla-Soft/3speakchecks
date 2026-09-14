@@ -34,6 +34,30 @@ const VIEWER_POOL_PCT = (() => {
     return wanted;
 })();
 
+/* The referrer's cut, in the same percentage points of the whole.
+ *
+ * Paid when the ADVERTISER who booked the campaign was themselves referred to the
+ * platform by somebody else. It comes out of what we keep, never out of the creator
+ * or viewer pools -- they must not be able to notice this exists. With the defaults
+ * that makes the split 50 creator / 10 viewer / 2 referrer / 38 platform.
+ *
+ * Clamped against what is actually left, for the same reason the viewer share is:
+ * a config that asks for more than the platform holds must not be able to schedule
+ * a payout run that sends money we never took in.
+ */
+const REFERRAL_POOL_PCT = (() => {
+    const n = parseFloat(process.env.AD_REFERRAL_POOL_PCT);
+    const wanted = Number.isFinite(n) && n >= 0 && n <= 100 ? n : 2;
+    const room = 100 - CREATOR_POOL_PCT - VIEWER_POOL_PCT;
+    if (wanted > room) {
+        console.warn(`[ads] AD_REFERRAL_POOL_PCT=${wanted} is more than the platform's `
+            + `remaining ${room}% (creator ${CREATOR_POOL_PCT}%, viewer ${VIEWER_POOL_PCT}%). `
+            + `Clamped to ${room}%.`);
+        return Math.max(0, room);
+    }
+    return wanted;
+})();
+
 module.exports = {
     // ─── Social-link verifier (merged from mantequilla-social-verifier) ───
     SOCIAL_LINKS_COLLECTION: process.env.SOCIAL_LINKS_COLLECTION || 'social_links',
@@ -564,6 +588,14 @@ module.exports = {
     // Named rather than hardcoded because 50 otherwise ends up written into the
     // route, the signing endpoint, the UI and the message format independently.
     AD_CREATOR_POOL_PCT: CREATOR_POOL_PCT,
+    AD_REFERRAL_POOL_PCT: REFERRAL_POOL_PCT,
+    /* Butter Auth, for asking who referred an advertiser. Credentials are a
+     * confidential client's, so they belong on the server and nowhere else.
+     * Unset means the lookup is skipped and the platform keeps the referral
+     * share -- never a reason to fail a settlement. */
+    BUTRAUTH_URL: process.env.BUTRAUTH_URL || 'https://butrauth.com',
+    BUTRAUTH_CLIENT_ID: process.env.BUTRAUTH_CLIENT_ID || '',
+    BUTRAUTH_CLIENT_SECRET: process.env.BUTRAUTH_CLIENT_SECRET || '',
     // What the community gets when a creator has never touched the setting: NOTHING.
     //
     // 🚨 This was an even split of the pool, and that was wrong. The argument for it

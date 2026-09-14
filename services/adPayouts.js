@@ -38,7 +38,7 @@ const {
   AD_EXCLUDED_ACCOUNTS, AD_REWARD_FLAG_COLLECTION,
   AD_DEFAULT_COMMUNITY_PCT, AD_CREATOR_PREFS_COLLECTION, AD_PAYMENT_ACCOUNT,
   AD_PAYOUTS_ENABLED, AD_PAYOUT_INTERVAL_H, AD_PAYOUT_MIN_HBD, AD_CREDIT_MIN_HBD, AD_PAYOUT_PERIOD_DAYS, AD_PAYOUT_PERIOD_OFFSET_MIN, AD_PAYMENTS_COLLECTION, AD_BOOKING_EXPIRY_DAYS,
-  AD_VIEWER_POOL_PCT, AD_VIEWER_WATCH_COLLECTION,
+  AD_VIEWER_POOL_PCT, AD_VIEWER_WATCH_COLLECTION, AD_REFERRAL_POOL_PCT,
 } = require('../utils/config');
 const { STATES } = require('../utils/adModel');
 // The chain is the authority on which community a post was published to — see
@@ -48,6 +48,8 @@ const { hiveRpcBatch } = require('../utils/hive');
 const ACTIVE_KEY = (process.env.AD_PAYOUT_ACTIVE_KEY || '').trim();
 const SOURCE_ACCOUNT = (process.env.AD_PAYOUT_SOURCE || AD_PAYMENT_ACCOUNT || '').trim();
 const DAY_MS = 24 * 60 * 60 * 1000;
+const { referrersFor } = require('./adReferrals');
+
 const PERIOD_MS = () => AD_PAYOUT_PERIOD_DAYS * DAY_MS;
 const fmt3 = (n) => (Math.round(n * 1000) / 1000).toFixed(3);
 const dayKey = (d) => new Date(d).toISOString().slice(0, 10);
@@ -211,6 +213,122 @@ function scaleAssets(pool, fraction) {
     if (v > 0) out[symbol] = v;
   }
   return out;
+}
+
+/** Merge two `amounts` leg arrays by symbol. */
+function mergeLegs(...legLists) {
+  const bySymbol = {};
+  for (const legs of legLists) {
+    for (const leg of legs || []) {
+      const n = Number(leg?.amount) || 0;
+      if (leg?.symbol && n > 0) bySymbol[leg.symbol] = (bySymbol[leg.symbol] || 0) + n;
+    }
+  }
+  return Object.entries(bySymbol)
+    .map(([symbol, amount]) => ({ symbol, amount: Math.round(amount * 1000) / 1000 }))
+    .filter((l) => l.amount > 0);
+}
+
+/**
+ * Which of these names are real Hive accounts?
+ *
+ * 🚨 The gate between a typed name and a transfer. `referredBy` is whatever the
+ * user wrote in a form -- Butter Auth checks its SHAPE and nothing more -- so
+ * without this we would broadcast to whatever they typed. A misspelling sends
+ * somebody else's money to a stranger, or to an account a squatter registered
+ * precisely because it is a plausible typo.
+ *
+ * Fails CLOSED, unlike the rest of the referral path: an unreachable node means
+ * we cannot confirm anybody, so nobody is paid and the platform keeps the share
+ * for this period. Failing open here would be broadcasting on an assumption.
+ */
+async function existingHiveAccounts(names, deps = {}) {
+  const wanted = [...new Set(names.filter(Boolean))];
+  if (!wanted.length) return new Set();
+  try {
+    const client = deps.client || getClient();
+    const found = new Set();
+    // getAccounts caps a lookup; chunk rather than trust one big call.
+    for (let i = 0; i < wanted.length; i += 100) {
+      const accounts = await client.database.getAccounts(wanted.slice(i, i + 100));
+      for (const a of accounts || []) if (a?.name) found.add(String(a.name).toLowerCase());
+    }
+    return found;
+  } catch (err) {
+    console.warn(`[adPayout] could not verify referrer accounts (${err.message}) — paying none this period`);
+    return new Set();
+  }
+}
+
+/**
+ * What each referrer is owed for this period, in native units.
+ *
+ * Per CAMPAIGN, not per period: the question is whether the advertiser who
+ * booked THIS campaign was referred, so the cut has to be taken from that
+ * campaign's own accrual. A period-level percentage would pay a referrer out of
+ * revenue from advertisers they never introduced.
+ *
+ * 🚨 Native assets throughout, never an HBD figure split by a value ratio. Each
+ * campaign's accrual already knows which assets it was funded in, so a
+ * referrer's legs are that campaign's own assets scaled -- no exchange rate is
+ * involved at any point. See splitAmounts() for why that matters.
+ *
+ * 🚨 Comes out of the platform's own share. The creator and viewer pools are
+ * computed from their own percentages of revenue and must not move because an
+ * advertiser happened to have been referred.
+ */
+async function planReferralPayouts(db, campaigns, period, deps = {}) {
+  const empty = { rows: [], poolHbd: 0, skipped: [] };
+  if (!(AD_REFERRAL_POOL_PCT > 0)) return empty;
+
+  const byAdvertiser = new Map();
+  for (const c of campaigns) {
+    const acct = String(c.hiveAccount || '').trim().toLowerCase();
+    if (!acct) continue;
+    const hbd = accrualFor(c, period.start, period.end);
+    if (!(hbd > 0)) continue;
+    const cur = byAdvertiser.get(acct) || { hbd: 0, assets: {} };
+    cur.hbd += hbd;
+    cur.assets = mergeAssets(cur.assets, accrualAssetsFor(c, period.start, period.end));
+    byAdvertiser.set(acct, cur);
+  }
+  if (!byAdvertiser.size) return empty;
+
+  const referrers = deps.referrersFor
+    ? await deps.referrersFor([...byAdvertiser.keys()])
+    : await referrersFor([...byAdvertiser.keys()]);
+  if (!referrers.size) return empty;
+
+  const names = [...new Set(referrers.values())];
+  const real = await existingHiveAccounts(names, deps);
+  const blocked = await rewardBlockedSet(db, names);
+
+  const owed = new Map();
+  const skipped = [];
+  const fraction = AD_REFERRAL_POOL_PCT / 100;
+  for (const [advertiser, referrer] of referrers) {
+    const acc = byAdvertiser.get(advertiser);
+    if (!acc) continue;
+    // Self-referral is refused at write time in Butter Auth; checked again
+    // because this is the side that spends money on the answer.
+    if (referrer === advertiser) { skipped.push({ advertiser, referrer, why: 'self' }); continue; }
+    if (!real.has(referrer)) { skipped.push({ advertiser, referrer, why: 'no_such_account' }); continue; }
+    if (blocked.has(referrer)) { skipped.push({ advertiser, referrer, why: 'reward_blocked' }); continue; }
+    const cur = owed.get(referrer) || { hbd: 0, assets: {} };
+    cur.hbd += acc.hbd * fraction;
+    cur.assets = mergeAssets(cur.assets, scaleAssets(acc.assets, fraction));
+    owed.set(referrer, cur);
+  }
+
+  const rows = [...owed.entries()]
+    .map(([account, v]) => ({
+      account,
+      hbd: Math.round(v.hbd * 1000) / 1000,
+      amounts: splitAmounts(1, v.assets),
+      kind: 'referral',
+    }))
+    .filter((r) => r.hbd > 0 && r.amounts.length);
+  return { rows, poolHbd: Math.round(rows.reduce((a, r) => a + r.hbd, 0) * 1000) / 1000, skipped };
 }
 
 const isCommunity = (cat) => /^hive-\d+$/.test(String(cat || ''));
@@ -424,7 +542,39 @@ async function communitySharePctOf(db, owner) {
 }
 
 /** Settle one closed period. Idempotent — a settled period is skipped. */
-async function settlePeriod(db, period) {
+/**
+ * Write payout rows, merging anything owed to the same account.
+ *
+ * 🚨 MERGED, NOT WRITTEN TWICE. `ad_payouts` is uniquely indexed on
+ * (periodKey, account), so an account that earned as a creator AND is owed as a
+ * referrer in the same period would have had its first row OVERWRITTEN by the
+ * second -- silently paying them one and losing the other. Merging is also what
+ * the chain wants: one transfer per account per period.
+ */
+async function writePayoutRows(db, periodKey, rows) {
+  const byAccount = new Map();
+  for (const r of rows) {
+    const cur = byAccount.get(r.account);
+    if (!cur) { byAccount.set(r.account, { ...r }); continue; }
+    cur.hbd = Math.round((cur.hbd + r.hbd) * 1000) / 1000;
+    cur.amounts = mergeLegs(cur.amounts, r.amounts);
+    // One account, two reasons. Named so a payout report can say which.
+    cur.kind = cur.kind === r.kind ? cur.kind : [...new Set([cur.kind, r.kind])].sort().join('+');
+  }
+  for (const r of byAccount.values()) {
+    await db.collection(AD_PAYOUTS_COLLECTION).updateOne(
+      { periodKey, account: r.account },
+      {
+        $set: { hbd: r.hbd, amounts: r.amounts, kind: r.kind, updatedAt: new Date() },
+        $setOnInsert: { status: 'pending', createdAt: new Date() },
+      },
+      { upsert: true },
+    );
+  }
+  return [...byAccount.values()];
+}
+
+async function settlePeriod(db, period, deps = {}) {
   const periods = db.collection(AD_PAYOUT_PERIODS_COLLECTION);
   const existing = await periods.findOne({ _id: period.key });
   if (existing && existing.status === 'settled') return null;
@@ -496,6 +646,27 @@ async function settlePeriod(db, period) {
     viewerCarriedInAssets,
   );
 
+  /* ─── referrer share ────────────────────────────────────────────────────
+   * If the ADVERTISER who booked a campaign was themselves referred here, the
+   * person who brought them takes AD_REFERRAL_POOL_PCT of that campaign's
+   * accrual.
+   *
+   * 🚨 Out of the platform's slice, like the viewer share and for the same
+   * reason: creators must not fund it. With the defaults the split becomes
+   * 50 creator / 10 viewer / 2 referrer / 38 platform.
+   *
+   * Planned BEFORE the impressions branch because it does not depend on
+   * impressions at all. A period can deliver nothing and still owe a referrer:
+   * the advertiser's money accrued over the flight either way, and whether any
+   * creator happened to carry the ad is not the referrer's concern.
+   */
+  const referral = await planReferralPayouts(db, campaigns, period, deps);
+  if (referral.skipped.length) {
+    for (const sk of referral.skipped) {
+      console.warn(`[adPayout] period ${period.key}: referral for @${sk.advertiser} not paid to @${sk.referrer} (${sk.why})`);
+    }
+  }
+
   const impressions = await db.collection(AD_IMPRESSIONS_COLLECTION).find({
     completed: true,
     payoutId: null,
@@ -506,6 +677,9 @@ async function settlePeriod(db, period) {
     // No creator impressions does not mean no viewers: someone may still have
     // watched a video to 75% while a flight was running.
     const viewerPaidNoImp = await payViewers(db, period, viewerPoolHbd, viewerAssetPool);
+    // Referrers do not depend on delivery: the advertiser's money accrued over
+    // the flight whether or not any creator carried the ad this period.
+    await writePayoutRows(db, period.key, referral.rows);
     // Nothing delivered. The money is not ours to keep — carry it forward, in the
     // assets it arrived as so the next period can actually send it.
     await periods.updateOne({ _id: period.key }, {
@@ -520,6 +694,9 @@ async function settlePeriod(db, period) {
         viewerCarriedIn,
         viewerCarriedOut: viewerPaidNoImp.carriedOut,
         viewerCarriedOutAssets: scaleAssets(viewerAssetPool, viewerPoolHbd > 0 ? viewerPaidNoImp.carriedOut / viewerPoolHbd : 0),
+        referralPoolHbd: referral.poolHbd,
+        referralRecipients: referral.rows.length,
+        referralSkipped: referral.skipped,
         impressions: 0, ratePerImpression: 0, carriedIn, carriedOut: pool,
         carriedOutAssets: creatorAssetPool,
         carryTo: periodContaining(period.end.getTime()).key,
@@ -609,18 +786,29 @@ async function settlePeriod(db, period) {
   // rather than dropping it: across a long tail of small creators that is real money.
   const dust = rows.filter((r) => r.hbd < AD_PAYOUT_MIN_HBD).reduce((a, r) => a + r.hbd, 0);
 
-  for (const r of payable) {
-    await db.collection(AD_PAYOUTS_COLLECTION).updateOne(
-      { periodKey: period.key, account: r.account },
-      {
-        // `hbd` stays the HBD-equivalent total — it is what every report, test and
-        // dust threshold is expressed in. `amounts` is what actually gets sent.
-        $set: { hbd: r.hbd, amounts: splitAmounts(pool > 0 ? r.hbd / pool : 0, creatorAssetPool), kind: r.kind, updatedAt: new Date() },
-        $setOnInsert: { status: 'pending', createdAt: new Date() },
-      },
-      { upsert: true },
-    );
+  // `hbd` stays the HBD-equivalent total — it is what every report, test and dust
+  // threshold is expressed in. `amounts` is what actually gets sent.
+  const creatorRows = payable.map((r) => ({
+    account: r.account,
+    hbd: r.hbd,
+    amounts: splitAmounts(pool > 0 ? r.hbd / pool : 0, creatorAssetPool),
+    kind: r.kind,
+  }));
+
+  /* Referral rows join the creator rows HERE, after the creator dust threshold
+   * has already been applied to the creator pool.
+   *
+   * They are deliberately not put through that threshold as creator money: a
+   * referral too small to send is not creator dust and must not roll into
+   * `carriedOut`, which is the creator pool's carry. An unsendable referral
+   * simply stays with the platform this period -- payPending marks a row it
+   * cannot send as `review` rather than paying it, so nothing is lost quietly. */
+  const written = await writePayoutRows(db, period.key, [...creatorRows, ...referral.rows]);
+  const referralPaidHbd = Math.round(referral.rows.reduce((a, r) => a + r.hbd, 0) * 1000) / 1000;
+  if (referralPaidHbd > 0) {
+    console.log(`[adPayout] period ${period.key}: ${fmt3(referralPaidHbd)} HBD to ${referral.rows.length} referrer(s)`);
   }
+  void written;
 
   await db.collection(AD_IMPRESSIONS_COLLECTION).updateMany(
     { _id: { $in: impressions.map((i) => i._id) } },
@@ -636,6 +824,9 @@ async function settlePeriod(db, period) {
       startAt: period.start, endAt: period.end, revenueHbd: revenue, poolHbd: pool,
       assetTotals,
       assetSplit,
+      referralPoolHbd: referral.poolHbd,
+      referralRecipients: referral.rows.length,
+      referralSkipped: referral.skipped,
       viewerPoolHbd,
       viewerPoolStatus: viewerPaid.recipients ? 'paid' : 'earmarked',
       viewerRecipients: viewerPaid.recipients,
