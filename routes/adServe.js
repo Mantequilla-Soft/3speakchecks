@@ -39,6 +39,7 @@ const {
   AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, AD_SKIP_AFTER_SECONDS, AD_SKIP_MIN_SPOT_SECONDS,
   AD_BANNER_CLOSE_AFTER_SECONDS, AD_BANNER_FREQUENCY_CAP_MINUTES, AD_GATE_ALLOWED_UPLOADERS, ADS_STAGE,
   AD_COOLDOWN_MINUTES, AD_PACING_ENABLED, AD_PACING_MIN_FRACTION, AD_SESSION_RATE_PER_MIN,
+  AD_COUNT_AFTER_SECONDS,
   AD_SHORTS_EVERY_N, AD_SHORTS_IGNORE_REPEAT_CAP,
   AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT, AD_BANNER_LABEL,
 } = require('../utils/config');
@@ -1529,15 +1530,25 @@ router.get('/:sid/c', servingVisible, async (req, res) => {
  *
  * Keyed on (sid, campaignId), not sid: one playback can now carry two campaigns.
  */
-async function recordDelivery({ db, sid, campaignId, facts, completed }) {
+async function recordDelivery({ db, sid, campaignId, facts, completed, maxFacts }) {
   if (!campaignId) return;
   const impressions = db.collection(AD_IMPRESSIONS_COLLECTION);
   const key = { sid, campaignId };
+  /* Figures that may only ever GROW, applied with $max rather than $set.
+   *
+   * watchedSeconds is reported repeatedly over one playback, and beats can arrive out
+   * of order — a retry sent at four seconds can land after the one sent at nine. $set
+   * would let the late small number overwrite the true high-water mark and report a
+   * spot as less watched than it was. $max cannot go backwards.
+   *
+   * 🚨 A field here must never also appear in `facts`: $set and $max on one field is
+   * a conflicting update and Mongo rejects the whole write. */
+  const grow = (u) => (maxFacts ? { ...u, $max: maxFacts } : u);
   try {
     if (!completed) {
       await impressions.updateOne(
         key,
-        { $set: facts, $setOnInsert: { at: new Date(), started: true, payoutId: null } },
+        grow({ $set: facts, $setOnInsert: { at: new Date(), started: true, payoutId: null } }),
         { upsert: true },
       );
       return;
@@ -1556,15 +1567,25 @@ async function recordDelivery({ db, sid, campaignId, facts, completed }) {
     try {
       const r = await impressions.updateOne(
         { ...key, completed: { $ne: true } },
-        {
+        grow({
           $set: { ...facts, completed: true, completedAt: new Date() },
           $setOnInsert: { at: new Date(), started: true, payoutId: null },
-        },
+        }),
         { upsert: true },
       );
       first = r.upsertedCount === 1 || r.modifiedCount === 1;
     } catch (e) {
       if (e?.code !== 11000) throw e;   // already completed → not a failure
+    }
+    /* The high-water mark again, outside the transition guard.
+     *
+     * The write above only matches an impression that is not yet complete, so every
+     * beat after the one that completed it matched nothing and carried its
+     * watchedSeconds away with it — the figure would have frozen at whatever it was
+     * when the third second went by, which is the least interesting moment of the
+     * whole playback. */
+    if (maxFacts) {
+      await impressions.updateOne(key, { $max: maxFacts }).catch(() => {});
     }
     if (first) {
       await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
@@ -1914,6 +1935,90 @@ function skipAfterFor(durationSeconds) {
  * press on a spot the segments already completed, changes nothing and bills nothing
  * twice.
  */
+/* ─── POST /m/:sid/w — seconds of the spot that actually played ───────── */
+/**
+ * What the viewer really saw, reported by the player.
+ *
+ * 🚨 THIS IS NOW THE PRIMARY DELIVERY SIGNAL. Segment fetches measure what a player
+ * DOWNLOADED, and a player downloads ahead of what it shows: a five-segment 29s spot
+ * asks for its closing segment around eleven seconds in, and does not put that segment
+ * on screen until 24.6s. Billing off fetches therefore over-counted the buffered and
+ * under-counted the watched at the same time, and with a threshold of half the
+ * booking it managed to count nothing at all — spots stayed `started` forever and
+ * their campaigns never left `scheduled`.
+ *
+ * So the player says how many seconds of ad it actually played, and AD_COUNT_AFTER_SECONDS
+ * decides when that is worth billing. Three seconds on screen is a delivered
+ * impression: the advertiser was seen, the creator carried it, both get paid.
+ *
+ * `watchedSeconds` is kept whatever the verdict, as a high-water mark, so how much of
+ * a spot people really sit through stays an answerable question separately from who
+ * got paid. A spot billed at three seconds and watched to 29 are both true of the same
+ * row.
+ *
+ * NOT TAKEN ON TRUST, but the check is arithmetic rather than a puzzle: you cannot
+ * have watched N seconds in fewer than N seconds of wall clock. A script that opens a
+ * session and immediately claims the whole spot is credited with the time that has
+ * really passed, which is none. That is the same property the pacing rule had, at a
+ * threshold a genuine three-second view can actually reach.
+ *
+ * 🚨 The pre-upload gate is exempt. It completes on POST /:sid/posted, with a real
+ * video to point at, because there the person watching is the person being paid and
+ * "watch it and get credited" is a loop somebody can sit in. Watching it still records
+ * the seconds; it just never bills.
+ */
+router.post('/:sid/w', servingVisible, express.json({ limit: '1kb' }), async (req, res) => {
+  try {
+    const sid = str(req.params.sid, 64);
+    if (!/^[0-9a-f]{32}$/.test(sid)) return res.status(400).json({ ok: false });
+
+    const db = getDb();
+    const session = await db.collection(SESSIONS).findOne({ sid });
+    if (!session || !session.campaignId) return res.json({ ok: false, reason: 'no_spot' });
+
+    // A spot cannot be watched for longer than it runs. The extra second absorbs the
+    // drift between a creative's declared length and its real one — see the note on
+    // LANDING_MARGIN_S in the players: the two disagree by tens of milliseconds and a
+    // viewer who sits through the whole thing should not be clipped for it.
+    const booked = Number(session.adDurationSeconds) || 0;
+    const claimed = Number(req.body && req.body.seconds);
+    if (!Number.isFinite(claimed) || claimed < 0) return res.json({ ok: false, reason: 'bad_seconds' });
+    const asked = booked > 0 ? Math.min(claimed, booked + 1) : claimed;
+
+    /* Credited against the clock, not against the claim. adFirstFetchAt is when the
+     * first byte of the spot was actually served; before that exists nothing has
+     * played, whatever the client says. Falling back to startedAt would credit the
+     * time spent deciding to show the spot, which on shorts is the whole gap between
+     * one short ending and the spot being taken. */
+    const firstAt = session.adFirstFetchAt ? new Date(session.adFirstFetchAt).getTime() : null;
+    const elapsed = firstAt ? (Date.now() - firstAt) / 1000 : 0;
+    const credited = Math.max(0, Math.min(asked, elapsed));
+
+    const bills = session.surface !== 'upload' && credited >= AD_COUNT_AFTER_SECONDS;
+
+    await recordDelivery({
+      db,
+      sid,
+      campaignId: session.campaignId,
+      facts: {
+        campaignId: session.campaignId,
+        // The gate's impression belongs to the UPLOADER, who is the viewer there. Every
+        // other surface credits the creator whose content carried the spot.
+        owner: session.surface === 'upload' ? session.viewer : session.owner,
+        permlink: session.permlink,
+        country: session.country || null,
+      },
+      // Never $set alongside $max on the same field — see recordDelivery.
+      maxFacts: { watchedSeconds: Math.round(credited * 100) / 100 },
+      completed: bills,
+    });
+    return res.json({ ok: true, counted: bills, credited: Math.round(credited * 100) / 100 });
+  } catch (err) {
+    console.error('[ad-serve] watch beat failed:', err && err.message);
+    return res.json({ ok: false });
+  }
+});
+
 router.post('/:sid/skipped', servingVisible, express.json({ limit: '1kb' }), async (req, res) => {
   try {
     const sid = str(req.params.sid, 64);
@@ -2087,10 +2192,20 @@ router.get('/:sid/:n', servingVisible, async (req, res) => {
     const seg = mid != null ? segments[mid] : (n === 'a' ? segments[0] : segments[segments.length - 1]);
     if (!seg) return res.status(404).send('no such segment');
 
-    // Pacing: the closing segment cannot be reached before the spot has had time to
-    // play. Same deal as the banner — the bytes go out regardless, they just do not
-    // count, so a script cannot bank a completed impression in one round trip.
-    const needs = (n === 'a' || mid != null) ? 0 : (Number(session.adDurationSeconds) || 0);
+    /* Pacing: the closing segment cannot be reached before the spot has had time to
+     * play. Same deal as the banner — the bytes go out regardless, they just do not
+     * count, so a script cannot bank a completed impression in one round trip.
+     *
+     * 🚨 AD_COUNT_AFTER_SECONDS, not the spot's whole length. This used to require
+     * half the booking to have elapsed before the closing fetch, and a player that
+     * buffers ahead asks for that segment long before it plays it: a five-segment 29s
+     * spot was requesting it around eleven seconds in against a 14.5s threshold, so
+     * the spot could never complete and the campaign sat at `scheduled` with nothing
+     * delivered while it was visibly serving. What is being billed for is now three
+     * seconds of ad on screen, so that is what the wall clock is measured against
+     * here too. POST /:sid/w is the primary path; this stays as the backstop for any
+     * player that reports no playback of its own. */
+    const needs = (n === 'a' || mid != null) ? 0 : AD_COUNT_AFTER_SECONDS;
     if (await pacingRefusal(db, session, sid, needs)) {
       res.set('Cache-Control', 'no-store');
       return sendSegment(res, seg, session);

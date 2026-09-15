@@ -220,7 +220,7 @@ const FORMATS = Object.freeze({
   shorts_roll: Object.freeze({
     key: 'shorts_roll',
     label: 'Shorts spot',
-    blurb: 'A full-screen vertical spot in the Shorts feed, between one short and the next.',
+    blurb: 'A full-screen vertical spot in the Shorts feed, between one short and the next. Shown on 3speak.tv only, not in embedded players.',
     creativeKind: CREATIVE_KINDS.VIDEO,
     surface: 'shorts',
     creatorCredit: CREATOR_CREDIT.VIDEO_OWNER,
