@@ -949,6 +949,26 @@ module.exports = {
     // pulling every segment in one round trip. Erring generous: an uncounted real
     // impression costs a little revenue accuracy, a counted fake one costs trust.
     AD_PACING_MIN_FRACTION: parseFloat(process.env.AD_PACING_MIN_FRACTION) || 0.5,
+    /* 🚨 HOW MUCH OF A SPOT HAS TO PLAY BEFORE IT IS BILLED AND PAID OUT.
+     *
+     * Three seconds of the ad ACTUALLY ON SCREEN. Not a share of the booking, not a
+     * fetch of the closing segment: the seconds the viewer really saw.
+     *
+     * The old rule was "the player asked for the last segment, and did so at least
+     * half the spot's length after the first one". Both halves were wrong. Segment
+     * requests run ahead of playback by however much the player buffers, so a
+     * five-segment 29s spot had its closing segment REQUESTED about eleven seconds in
+     * while it does not PLAY until 24.6s — under the 14.5s the fraction demanded. The
+     * threshold was unreachable and shorts spots could never complete, whoever
+     * watched them. And a viewer who watched ten honest seconds and moved on never
+     * caused that request at all, so they counted for nothing either.
+     *
+     * Delivery is now reported by the player as seconds of ad that really played, and
+     * measured against this. The full watched figure is kept alongside it
+     * (`watchedSeconds` on the impression) so "billed" and "watched to the end" stay
+     * separate questions — this decides the first, not the second.
+     */
+    AD_COUNT_AFTER_SECONDS: parseFloat(process.env.AD_COUNT_AFTER_SECONDS) || 3,
     // Ad requests per minute from one address. Held IN MEMORY and never persisted —
     // the IP is used and dropped inside the request, exactly as watchTracking.js
     // already does for country lookup. Set high enough that shared connections
