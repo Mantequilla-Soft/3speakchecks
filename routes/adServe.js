@@ -726,7 +726,17 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     if (surface === 'upload') {
       const uploader = viewer;
       if (!uploader) return res.json({ ad: null, reason: 'no_uploader' });
-      if (!AD_GATE_ALLOWED_UPLOADERS.includes(uploader)) {
+      /* 🚨 GUARDED ON `.length`, exactly as the owner allowlist is in adEligibility.
+       *
+       * Without that guard these two lists meant OPPOSITE things when empty: an empty
+       * ADS_ALLOWED_OWNERS opens serving to every creator, while an empty list here hit
+       * `[].includes(...)` and refused everybody, silently turning the pre-upload spot
+       * off for the whole platform. One reads as "no restriction", the other as "nobody
+       * allowed", from the same empty value — so opening the gates the obvious way shut
+       * this format down instead, while it stayed on sale at a public rate.
+       *
+       * Empty now means what it means everywhere else: no restriction. */
+      if (AD_GATE_ALLOWED_UPLOADERS.length && !AD_GATE_ALLOWED_UPLOADERS.includes(uploader)) {
         return res.json({ ad: null, reason: 'uploader_not_in_trial' });
       }
       // Pro subscribers are never gated. Read through the same helper the watch surface
