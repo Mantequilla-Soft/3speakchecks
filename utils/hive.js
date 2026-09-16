@@ -32,6 +32,53 @@ async function hiveRpcBatch(rpcBatch) {
     return [];
 }
 
+/* Transfers into an account, bounded by DATE rather than by count.
+ *
+ * 🚨 `get_account_history` is capped at 1000 entries per call by the node — asking
+ * for more is not allowed, so a single call can only ever mean "the last 1000",
+ * which is a moving window that silently drops the oldest as traffic grows. For the
+ * ad payment account that is a real hazard: payouts leave the same account that
+ * advertisers pay into, so every creator payout consumes window that an incoming
+ * payment needs, and an advertiser who paid and claimed a day later could fall off
+ * the end and become unclaimable with their money already sent.
+ *
+ * So this pages BACKWARDS until it reaches `sinceMs` instead. Each page reports its
+ * own lowest index; the next call starts one below it. The walk stops at the first
+ * page whose oldest entry predates the cutoff, at the account's first operation, or
+ * at `maxPages` — which is a backstop against an unbounded scan, not a limit anyone
+ * is expected to reach, because the caller's cutoff should be days rather than years.
+ *
+ * Returns raw history entries, newest page last, exactly as a single call would.
+ */
+async function transfersSince(account, sinceMs, { maxPages = 25, pageSize = 1000 } = {}) {
+    const out = [];
+    let start = -1;
+    for (let page = 0; page < maxPages; page += 1) {
+        // operation filter (low) for `transfer` (op id 2) = 1<<2 = 4.
+        const [hist] = await hiveRpcBatch([{
+            jsonrpc: '2.0',
+            method: 'condenser_api.get_account_history',
+            params: [account, start, pageSize, 4, 0],
+            id: 1,
+        }]);
+        const entries = Array.isArray(hist?.result) ? hist.result : [];
+        if (!entries.length) break;
+        out.push(...entries);
+
+        // Entries come back ascending by index, so the FIRST is the oldest of the page.
+        const lowestIndex = entries[0]?.[0];
+        const rawTs = entries[0]?.[1]?.timestamp;
+        /* Hive stamps are UTC but carry no zone, and Date.parse would read a bare
+         * "2026-09-16T17:30:18" as local time. On a UTC box that happens to agree;
+         * anywhere else it silently shifts the cutoff by the offset. */
+        const oldestMs = rawTs ? Date.parse(`${rawTs}Z`) : NaN;
+        if (Number.isFinite(oldestMs) && oldestMs <= sinceMs) break;
+        if (!Number.isFinite(lowestIndex) || lowestIndex <= 0) break;
+        start = lowestIndex - 1;
+    }
+    return out;
+}
+
 // Convert raw Hive reputation to human-readable score (e.g., 9999999999999 -> ~69)
 function hiveReputationToScore(rawReputation) {
     const rep = parseInt(rawReputation);
@@ -380,6 +427,7 @@ async function fetchCommentReplyCounts(authorPerms, { batchSize = 20 } = {}) {
 }
 
 module.exports = {
+    transfersSince,
     hiveRpcBatch,
     hiveReputationToScore,
     fetchHiveRewards,

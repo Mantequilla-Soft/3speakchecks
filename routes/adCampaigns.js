@@ -26,12 +26,13 @@ const { ObjectId } = require('mongodb');
 const { getDb } = require('../utils/db');
 const { promisify } = require('util');
 const execFileP = promisify(require('child_process').execFile);
-const { hiveRpcBatch } = require('../utils/hive');
+const { hiveRpcBatch, transfersSince } = require('../utils/hive');
 const {
   ADVERTISERS_COLLECTION, AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION,
   AD_PAYMENTS_COLLECTION, AD_PAYMENT_ACCOUNT,
   AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_SLOT_PERCENTS, AD_LENGTH_SECONDS,
   AD_PRODUCTION_FEE_HBD, ADS_STAGE, AD_SLOT_MAX_SHARES, AD_SLOT_HOLD_HOURS, AD_DAY_CURVE_K,
+  AD_BOOKING_EXPIRY_DAYS,
 } = require('../utils/config');
 const {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, DAY_MS, ensureAdIndexes, priceForDays, ratePerDayFor,
@@ -1083,12 +1084,26 @@ router.post('/campaigns/:id/claim', featureVisible, express.json({ limit: '8kb' 
       return res.status(409).json({ success: false, error: 'That campaign was cancelled' });
     }
 
-    // operation filter (low) for `transfer` (op id 2) = 1<<2 = 4.
-    const [hist] = await hiveRpcBatch([{
-      jsonrpc: '2.0', method: 'condenser_api.get_account_history',
-      params: [AD_PAYMENT_ACCOUNT, -1, 1000, 4, 0], id: 1,
-    }]);
-    const ops = Array.isArray(hist?.result) ? hist.result : [];
+    /* 🚨 BOUNDED BY DATE, NOT BY COUNT.
+     *
+     * This read the last 1000 transfers in one call, which is the most a node will
+     * return. That is a moving window, and payouts leave the same account advertisers
+     * pay into, so every creator payout pushes older payments towards the edge of it.
+     * An advertiser who paid and came back to claim a day later could find their
+     * transfer had fallen off the end: money sent, nothing claimable, and no error
+     * that says why.
+     *
+     * The honest bound is time. A payment carrying `ad:<id>` cannot predate the
+     * campaign it names, so the scan only has to reach back to when the campaign was
+     * booked. An hour of margin covers clock skew between us and the chain, and the
+     * fallback covers a campaign with no createdAt — older than the booking expiry,
+     * so it still spans every window in which a payment could arrive and still count.
+     */
+    const bookedAtMs = Date.parse(campaign.createdAt);
+    const sinceMs = Number.isFinite(bookedAtMs)
+      ? bookedAtMs - 60 * 60 * 1000
+      : Date.now() - (AD_BOOKING_EXPIRY_DAYS + 1) * 24 * 60 * 60 * 1000;
+    const ops = await transfersSince(AD_PAYMENT_ACCOUNT, sinceMs);
 
     const memoWanted = String(campaign.memo || `ad:${id}`).toLowerCase();
     const matches = [];
