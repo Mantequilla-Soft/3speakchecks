@@ -688,6 +688,19 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     const bannerOverlay = b.bannerOverlay === true || String(b.bannerOverlay) === 'true';
     const rawSurface = str(b.surface, 16);
     const surface = rawSurface === 'shorts' ? 'shorts' : (rawSurface === 'upload' ? 'upload' : 'watch');
+    /* WHICH APPLICATION is playing this, as opposed to `surface`, which is which
+     * kind of slot within it. Carried onto the impression so delivery can be read
+     * per app.
+     *
+     * ⚠️ NULL WHEN NOT SENT, and null is not a synonym for '3speak'. Our own site
+     * and the embed do not send it today, so a null means "one of ours, unsplit",
+     * which is exactly the discriminator needed while the only caller that DOES
+     * send it is a partner. Defaulting it to '3speak' instead would quietly relabel
+     * every embed impression as coming from the site.
+     *
+     * Sanitised to the same shape as the player's own source field so the two are
+     * comparable when reporting across collections. */
+    const app = str(b.app, 20).toLowerCase().replace(/[^a-z0-9-]/g, '') || null;
     /* The pre-upload gate has no video behind it. It runs before anything is posted, so
      * there is no owner and no permlink to validate, and demanding them would reject
      * every honest request from the surface. */
@@ -817,6 +830,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         clickUrl: siteG,
         adDurationSeconds: Number(pickCrG.durationSeconds) || Number(pickG.spotSeconds) || null,
         startedAt: new Date(),
+        app,
         expiresAt: new Date(Date.now() + AD_SESSION_TTL_MINUTES * 60 * 1000),
       });
 
@@ -949,6 +963,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         clickUrl: site2,
         adDurationSeconds: Number(pickCr.durationSeconds) || Number(pickC.spotSeconds) || null,
         startedAt: new Date(),
+        app,
         expiresAt: new Date(Date.now() + AD_SESSION_TTL_MINUTES * 60 * 1000),
       });
 
@@ -1169,6 +1184,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       // approved advertiser record rather than by whatever the client was told.
       clickUrl: websiteOf(brandDoc),
       startedAt: new Date(),
+      app,
       expiresAt: new Date(Date.now() + AD_SESSION_TTL_MINUTES * 60 * 1000),
     });
 
@@ -1512,7 +1528,7 @@ router.get('/:sid/c', servingVisible, async (req, res) => {
             clicked: true,
             clickedAt: new Date(),
           },
-          $setOnInsert: { at: new Date(), started: true, payoutId: null },
+          $setOnInsert: { at: new Date(), started: true, payoutId: null, app: session.app },
         },
         { upsert: true },
       );
@@ -1540,7 +1556,7 @@ router.get('/:sid/c', servingVisible, async (req, res) => {
  *
  * Keyed on (sid, campaignId), not sid: one playback can now carry two campaigns.
  */
-async function recordDelivery({ db, sid, campaignId, facts, completed, maxFacts }) {
+async function recordDelivery({ db, sid, campaignId, facts, completed, maxFacts, app = null }) {
   if (!campaignId) return;
   const impressions = db.collection(AD_IMPRESSIONS_COLLECTION);
   const key = { sid, campaignId };
@@ -1554,11 +1570,17 @@ async function recordDelivery({ db, sid, campaignId, facts, completed, maxFacts 
    * 🚨 A field here must never also appear in `facts`: $set and $max on one field is
    * a conflicting update and Mongo rejects the whole write. */
   const grow = (u) => (maxFacts ? { ...u, $max: maxFacts } : u);
+  /* Stamped ON INSERT ONLY, and never part of `facts` or `maxFacts` — a field in
+   * two operators is a conflicting update and Mongo rejects the whole write, which
+   * on this path would mean silently losing a delivery. On insert only is also the
+   * right semantics: an impression belongs to the playback that opened it, and a
+   * later beat from the same session must not be able to move it. */
+  const onInsert = { at: new Date(), started: true, payoutId: null, app };
   try {
     if (!completed) {
       await impressions.updateOne(
         key,
-        grow({ $set: facts, $setOnInsert: { at: new Date(), started: true, payoutId: null } }),
+        grow({ $set: facts, $setOnInsert: onInsert }),
         { upsert: true },
       );
       return;
@@ -1579,7 +1601,7 @@ async function recordDelivery({ db, sid, campaignId, facts, completed, maxFacts 
         { ...key, completed: { $ne: true } },
         grow({
           $set: { ...facts, completed: true, completedAt: new Date() },
-          $setOnInsert: { at: new Date(), started: true, payoutId: null },
+          $setOnInsert: onInsert,
         }),
         { upsert: true },
       );
@@ -1665,6 +1687,7 @@ router.get('/:sid/s/:vk/:i', servingVisible, async (req, res) => {
       await recordDelivery({
         db,
         sid,
+        app: session.app,
         campaignId: session.banner.campaignId,
         facts: {
           campaignId: session.banner.campaignId,
@@ -1773,7 +1796,7 @@ router.get('/:sid/bc', servingVisible, async (req, res) => {
             clicked: true,
             clickedAt: new Date(),
           },
-          $setOnInsert: { at: new Date(), started: true, payoutId: null },
+          $setOnInsert: { at: new Date(), started: true, payoutId: null, app: session.app },
         },
         { upsert: true },
       );
@@ -1896,6 +1919,7 @@ router.post('/:sid/posted', servingVisible, express.json({ limit: '2kb' }), asyn
     await recordDelivery({
       db,
       sid,
+      app: session.app,
       campaignId: session.campaignId,
       facts: {
         campaignId: session.campaignId,
@@ -2009,6 +2033,7 @@ router.post('/:sid/w', servingVisible, express.json({ limit: '1kb' }), async (re
     await recordDelivery({
       db,
       sid,
+      app: session.app,
       campaignId: session.campaignId,
       facts: {
         campaignId: session.campaignId,
@@ -2041,6 +2066,7 @@ router.post('/:sid/skipped', servingVisible, express.json({ limit: '1kb' }), asy
     await recordDelivery({
       db,
       sid,
+      app: session.app,
       campaignId: session.campaignId,
       facts: {
         campaignId: session.campaignId,
@@ -2100,6 +2126,7 @@ router.post('/:sid/banner-shown', servingVisible, express.json({ limit: '1kb' })
     await recordDelivery({
       db,
       sid,
+      app: session.app,
       campaignId: session.banner.campaignId,
       facts: {
         campaignId: session.banner.campaignId,
@@ -2226,6 +2253,7 @@ router.get('/:sid/:n', servingVisible, async (req, res) => {
     await recordDelivery({
       db,
       sid,
+      app: session.app,
       campaignId: session.campaignId,
       facts: {
         campaignId: session.campaignId,
