@@ -865,18 +865,14 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       return res.json({ ad: null, reason: decision.reason, premium: decision.reason === 'premium_viewer' });
     }
 
-    // The quiet period after this viewer's last ad, whichever advertiser it was for.
-    if (await inCooldown(getDb(), { viewer, lastAdAt: b.lastAdAt })) {
-      return res.json({ ad: null, reason: 'cooldown', cooldownMinutes: AD_COOLDOWN_MINUTES });
-    }
-
     // ── THE SHORTS SURFACE ────────────────────────────────────────────────────
     // A full-screen vertical spot BETWEEN shorts, not inside one. Nothing is
     // stitched, nothing is burned: the ad is its own item in the feed and simply
     // plays, which is why this returns before any of the splicing below.
     //
     // ⚠️ Its pacing is counted in SHORTS WATCHED, not minutes, and it deliberately
-    // does NOT consult the time-based cooldown. Someone swiping the feed clears ten
+    // does NOT consult the time-based cooldown — which is why that check sits BELOW
+    // this branch rather than above it. Someone swiping the feed clears ten
     // shorts well inside ten minutes, so a minutes rule would either silence the
     // surface entirely or fire constantly depending on how fast they swipe. The two
     // surfaces keep their own cadence and do not block each other.
@@ -990,6 +986,19 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
 
     const db = getDb();
     const now = new Date();
+
+    // The quiet period after this viewer's last ad, whichever advertiser it was for.
+    //
+    // 🚨 Deliberately BELOW the shorts and upload-gate branches, not above them. It
+    // used to run before both, which silently contradicted the comment on the shorts
+    // branch: a viewer who had just been served a pre-roll was refused a shorts spot
+    // on the very minutes rule that surface is documented to ignore, and the two
+    // surfaces did block each other after all. Inert while AD_COOLDOWN_MINUTES is 0,
+    // so it never showed up in delivery — the day anyone set a cooldown, the watch
+    // surface would have muted the shorts feed for every viewer.
+    if (await inCooldown(db, { viewer, lastAdAt: b.lastAdAt })) {
+      return res.json({ ad: null, reason: 'cooldown', cooldownMinutes: AD_COOLDOWN_MINUTES });
+    }
 
     // How long THIS video is, for campaigns that target video length. Looked up
     // rather than taken from the request: the client could otherwise claim any
