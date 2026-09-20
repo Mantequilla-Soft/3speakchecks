@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
 
-const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, BADGE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN, DURATION_SYNC_ENABLED, DURATION_SYNC_INTERVAL_MIN, AD_INVENTORY_ENABLED, AD_INVENTORY_INTERVAL_H } = require('./utils/config');
+const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, BADGE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN, VIDEO_HIVE_SYNC_ENABLED, VIDEO_HIVE_SYNC_INTERVAL_MIN, DURATION_SYNC_ENABLED, DURATION_SYNC_INTERVAL_MIN, AD_INVENTORY_ENABLED, AD_INVENTORY_INTERVAL_H } = require('./utils/config');
 const { connectToMongo, getDb } = require('./utils/db');
 const { calculateAndFlagTrendingVideos } = require('./services/trending');
 const { syncHiveCommunities } = require('./services/communitySync');
@@ -13,6 +13,7 @@ const { startTagSyncWatcher } = require('./services/tagSync');
 const { syncAudioHiveLinks } = require('./services/audioHiveSync');
 const { syncEmbedCategories } = require('./services/embedCategorySync');
 const { syncThumbnails } = require('./services/thumbnailSync');
+const { syncVideoHiveLinks } = require('./services/videoHiveSync');
 const { syncDurations } = require('./services/durationSync');
 const { syncPremiumFromSubs } = require('./services/premiumSubsSync');
 const { schedule: scheduleCollectSubs } = require('./services/collectSubscriptions');
@@ -273,6 +274,23 @@ async function startServer() {
             }, thumbIntervalMs);
         }, 90 * 1000);
         console.log(`Thumbnail sync scheduled every ${THUMBNAIL_SYNC_INTERVAL_MIN}min (first run in 90s)`);
+    }
+
+    // Link embed-video docs to their Hive post where the external indexer left
+    // hive_author/hive_permlink null. That pair is the join key for thumbnailSync,
+    // embedCategorySync, commentCounts, pushNotify and the feeds, and it is what
+    // /video/thumbnail matches on — so without it a creator editing a short's
+    // thumbnail gets a Hive broadcast and a silent 404 on the Mongo write.
+    if (VIDEO_HIVE_SYNC_ENABLED) {
+        const vhsIntervalMs = VIDEO_HIVE_SYNC_INTERVAL_MIN * 60 * 1000;
+        setTimeout(() => {
+            syncVideoHiveLinks().catch(err => console.error('Video Hive link sync error:', err));
+            setInterval(() => {
+                if (syncRunning) return;
+                syncVideoHiveLinks().catch(err => console.error('Video Hive link sync error:', err));
+            }, vhsIntervalMs);
+        }, 150 * 1000);
+        console.log(`Video-Hive link sync scheduled every ${VIDEO_HIVE_SYNC_INTERVAL_MIN}min (first run in 150s)`);
     }
 
     // Recover embed-video.duration for videos published without one. The field is
