@@ -178,7 +178,17 @@ async function conformedSegment(segmentUrl, target) {
   await ensureDir();
 
   const lvl = levelArg(level);
-  const prof = profile && /baseline|main|high/.test(profile) ? profile.split(' ')[0] : 'high';
+  // ffprobe reports Constrained Baseline as "constrained baseline", so taking the
+  // FIRST word gave "constrained" — not an x264 profile name. libx264 then refuses to
+  // open the encoder ("invalid profile: constrained") and EVERY conform for such a
+  // source fails. Match the meaningful token instead, as adBurner.js already does.
+  // High 10 / 4:2:2 / 4:4:4 collapse to plain "high", which is honest: -pix_fmt
+  // yuv420p below already takes the output down to 8-bit 4:2:0.
+  const prof = !profile ? 'high'
+    : profile.includes('baseline') ? 'baseline'
+    : profile.includes('high') ? 'high'
+    : profile.includes('main') ? 'main'
+    : 'high';
   const key = `cf-${keyOf(segmentUrl)}-${width}x${height}-${prof}-${lvl || 'auto'}-${sampleRate || 'na'}`;
   const out = path.join(CACHE_DIR, `${key}.ts`);
   try {
