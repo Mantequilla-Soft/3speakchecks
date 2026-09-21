@@ -914,7 +914,7 @@ module.exports = {
     // a viewer swiping through shorts covers ten of them in well under the
     // time-based cooldown, so minutes would let the feed carry an ad almost
     // continuously (or, tuned the other way, almost never).
-    AD_SHORTS_EVERY_N: parseInt(process.env.AD_SHORTS_EVERY_N) || 10,
+    AD_SHORTS_EVERY_N: parseInt(process.env.AD_SHORTS_EVERY_N) || 5,
     // Let the SAME shorts spot come round again instead of waiting out the repeat cap.
     //
     // 🚨 A TESTING SWITCH. It must not be left on. The repeat cap is the thing that
@@ -1011,7 +1011,7 @@ module.exports = {
     // double-selling straight back.
     AD_SLOT_MAX_SHARES: parseInt(process.env.AD_SLOT_MAX_SHARES) || 3,
 
-    AD_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_FREQUENCY_CAP_MINUTES) || 30,
+    AD_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_FREQUENCY_CAP_MINUTES) || 15,
     // The same cap for BANNERS, which are cheaper to sit through than a roll: a banner
     // shares the picture for a few seconds and never takes the viewer's time away, so
     // the window that stops a roll burning an audience is longer than a banner needs.
