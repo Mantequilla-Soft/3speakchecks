@@ -513,6 +513,27 @@ module.exports = {
     THUMBNAIL_SYNC_FRESH_RECHECK_MIN: parseInt(process.env.THUMBNAIL_SYNC_FRESH_RECHECK_MIN) || 30,
     THUMBNAIL_SYNC_RECHECK_DAYS: parseInt(process.env.THUMBNAIL_SYNC_RECHECK_DAYS) || 7,
 
+    // --- Video → Hive link backfill (services/videoHiveSync.js) ---
+    // Fills hive_author/hive_permlink on embed-video docs the external indexer
+    // never reached — 4,053 of 6,598 shorts as of 2026-09-20. Without that pair
+    // the checker's own /video/thumbnail, /video/listing, /video/nsfw and
+    // /videodetails cannot resolve the row, so editing a short's thumbnail
+    // updates Hive and silently fails on Mongo.
+    VIDEO_HIVE_SYNC_ENABLED: parseBool(process.env.VIDEO_HIVE_SYNC_ENABLED, true),
+    VIDEO_HIVE_SYNC_INTERVAL_MIN: parseInt(process.env.VIDEO_HIVE_SYNC_INTERVAL_MIN) || 10,
+    // Docs per run. The backlog drains over successive runs rather than in one
+    // burst; measured ~12s per run at these defaults.
+    VIDEO_HIVE_SYNC_BATCH: parseInt(process.env.VIDEO_HIVE_SYNC_BATCH) || 60,
+    // Docs with no embed_url need one account_history call per owner, so the
+    // owners touched per run are capped separately from the doc batch.
+    VIDEO_HIVE_SYNC_OWNERS_PER_RUN: parseInt(process.env.VIDEO_HIVE_SYNC_OWNERS_PER_RUN) || 20,
+    // An asset can be uploaded days before its post exists, so a miss is stamped
+    // and retried rather than given up on: recent docs on the short cadence,
+    // older ones occasionally.
+    VIDEO_HIVE_SYNC_FRESH_DAYS: parseInt(process.env.VIDEO_HIVE_SYNC_FRESH_DAYS) || 7,
+    VIDEO_HIVE_SYNC_FRESH_RECHECK_MIN: parseInt(process.env.VIDEO_HIVE_SYNC_FRESH_RECHECK_MIN) || 30,
+    VIDEO_HIVE_SYNC_RECHECK_DAYS: parseInt(process.env.VIDEO_HIVE_SYNC_RECHECK_DAYS) || 7,
+
     // --- Ad platform: intake, approval gate, inventory forecast ---
     // Advertisers apply, a human approves, and only an approved record can hold a
     // campaign later. See routes/advertise.js + services/adInventory.js.
@@ -893,7 +914,7 @@ module.exports = {
     // a viewer swiping through shorts covers ten of them in well under the
     // time-based cooldown, so minutes would let the feed carry an ad almost
     // continuously (or, tuned the other way, almost never).
-    AD_SHORTS_EVERY_N: parseInt(process.env.AD_SHORTS_EVERY_N) || 10,
+    AD_SHORTS_EVERY_N: parseInt(process.env.AD_SHORTS_EVERY_N) || 5,
     // Let the SAME shorts spot come round again instead of waiting out the repeat cap.
     //
     // 🚨 A TESTING SWITCH. It must not be left on. The repeat cap is the thing that
@@ -990,7 +1011,7 @@ module.exports = {
     // double-selling straight back.
     AD_SLOT_MAX_SHARES: parseInt(process.env.AD_SLOT_MAX_SHARES) || 3,
 
-    AD_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_FREQUENCY_CAP_MINUTES) || 30,
+    AD_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_FREQUENCY_CAP_MINUTES) || 15,
     // The same cap for BANNERS, which are cheaper to sit through than a roll: a banner
     // shares the picture for a few seconds and never takes the viewer's time away, so
     // the window that stops a roll burning an audience is longer than a banner needs.

@@ -688,6 +688,19 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     const bannerOverlay = b.bannerOverlay === true || String(b.bannerOverlay) === 'true';
     const rawSurface = str(b.surface, 16);
     const surface = rawSurface === 'shorts' ? 'shorts' : (rawSurface === 'upload' ? 'upload' : 'watch');
+    /* WHICH APPLICATION is playing this, as opposed to `surface`, which is which
+     * kind of slot within it. Carried onto the impression so delivery can be read
+     * per app.
+     *
+     * ⚠️ NULL WHEN NOT SENT, and null is not a synonym for '3speak'. Our own site
+     * and the embed do not send it today, so a null means "one of ours, unsplit",
+     * which is exactly the discriminator needed while the only caller that DOES
+     * send it is a partner. Defaulting it to '3speak' instead would quietly relabel
+     * every embed impression as coming from the site.
+     *
+     * Sanitised to the same shape as the player's own source field so the two are
+     * comparable when reporting across collections. */
+    const app = str(b.app, 20).toLowerCase().replace(/[^a-z0-9-]/g, '') || null;
     /* The pre-upload gate has no video behind it. It runs before anything is posted, so
      * there is no owner and no permlink to validate, and demanding them would reject
      * every honest request from the surface. */
@@ -726,7 +739,17 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     if (surface === 'upload') {
       const uploader = viewer;
       if (!uploader) return res.json({ ad: null, reason: 'no_uploader' });
-      if (!AD_GATE_ALLOWED_UPLOADERS.includes(uploader)) {
+      /* 🚨 GUARDED ON `.length`, exactly as the owner allowlist is in adEligibility.
+       *
+       * Without that guard these two lists meant OPPOSITE things when empty: an empty
+       * ADS_ALLOWED_OWNERS opens serving to every creator, while an empty list here hit
+       * `[].includes(...)` and refused everybody, silently turning the pre-upload spot
+       * off for the whole platform. One reads as "no restriction", the other as "nobody
+       * allowed", from the same empty value — so opening the gates the obvious way shut
+       * this format down instead, while it stayed on sale at a public rate.
+       *
+       * Empty now means what it means everywhere else: no restriction. */
+      if (AD_GATE_ALLOWED_UPLOADERS.length && !AD_GATE_ALLOWED_UPLOADERS.includes(uploader)) {
         return res.json({ ad: null, reason: 'uploader_not_in_trial' });
       }
       // Pro subscribers are never gated. Read through the same helper the watch surface
@@ -807,6 +830,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         clickUrl: siteG,
         adDurationSeconds: Number(pickCrG.durationSeconds) || Number(pickG.spotSeconds) || null,
         startedAt: new Date(),
+        app,
         expiresAt: new Date(Date.now() + AD_SESSION_TTL_MINUTES * 60 * 1000),
       });
 
@@ -841,18 +865,14 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       return res.json({ ad: null, reason: decision.reason, premium: decision.reason === 'premium_viewer' });
     }
 
-    // The quiet period after this viewer's last ad, whichever advertiser it was for.
-    if (await inCooldown(getDb(), { viewer, lastAdAt: b.lastAdAt })) {
-      return res.json({ ad: null, reason: 'cooldown', cooldownMinutes: AD_COOLDOWN_MINUTES });
-    }
-
     // ── THE SHORTS SURFACE ────────────────────────────────────────────────────
     // A full-screen vertical spot BETWEEN shorts, not inside one. Nothing is
     // stitched, nothing is burned: the ad is its own item in the feed and simply
     // plays, which is why this returns before any of the splicing below.
     //
     // ⚠️ Its pacing is counted in SHORTS WATCHED, not minutes, and it deliberately
-    // does NOT consult the time-based cooldown. Someone swiping the feed clears ten
+    // does NOT consult the time-based cooldown — which is why that check sits BELOW
+    // this branch rather than above it. Someone swiping the feed clears ten
     // shorts well inside ten minutes, so a minutes rule would either silence the
     // surface entirely or fire constantly depending on how fast they swipe. The two
     // surfaces keep their own cadence and do not block each other.
@@ -939,6 +959,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         clickUrl: site2,
         adDurationSeconds: Number(pickCr.durationSeconds) || Number(pickC.spotSeconds) || null,
         startedAt: new Date(),
+        app,
         expiresAt: new Date(Date.now() + AD_SESSION_TTL_MINUTES * 60 * 1000),
       });
 
@@ -965,6 +986,19 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
 
     const db = getDb();
     const now = new Date();
+
+    // The quiet period after this viewer's last ad, whichever advertiser it was for.
+    //
+    // 🚨 Deliberately BELOW the shorts and upload-gate branches, not above them. It
+    // used to run before both, which silently contradicted the comment on the shorts
+    // branch: a viewer who had just been served a pre-roll was refused a shorts spot
+    // on the very minutes rule that surface is documented to ignore, and the two
+    // surfaces did block each other after all. Inert while AD_COOLDOWN_MINUTES is 0,
+    // so it never showed up in delivery — the day anyone set a cooldown, the watch
+    // surface would have muted the shorts feed for every viewer.
+    if (await inCooldown(db, { viewer, lastAdAt: b.lastAdAt })) {
+      return res.json({ ad: null, reason: 'cooldown', cooldownMinutes: AD_COOLDOWN_MINUTES });
+    }
 
     // How long THIS video is, for campaigns that target video length. Looked up
     // rather than taken from the request: the client could otherwise claim any
@@ -1159,6 +1193,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       // approved advertiser record rather than by whatever the client was told.
       clickUrl: websiteOf(brandDoc),
       startedAt: new Date(),
+      app,
       expiresAt: new Date(Date.now() + AD_SESSION_TTL_MINUTES * 60 * 1000),
     });
 
@@ -1502,7 +1537,7 @@ router.get('/:sid/c', servingVisible, async (req, res) => {
             clicked: true,
             clickedAt: new Date(),
           },
-          $setOnInsert: { at: new Date(), started: true, payoutId: null },
+          $setOnInsert: { at: new Date(), started: true, payoutId: null, app: session.app },
         },
         { upsert: true },
       );
@@ -1530,7 +1565,7 @@ router.get('/:sid/c', servingVisible, async (req, res) => {
  *
  * Keyed on (sid, campaignId), not sid: one playback can now carry two campaigns.
  */
-async function recordDelivery({ db, sid, campaignId, facts, completed, maxFacts }) {
+async function recordDelivery({ db, sid, campaignId, facts, completed, maxFacts, app = null }) {
   if (!campaignId) return;
   const impressions = db.collection(AD_IMPRESSIONS_COLLECTION);
   const key = { sid, campaignId };
@@ -1544,11 +1579,17 @@ async function recordDelivery({ db, sid, campaignId, facts, completed, maxFacts 
    * 🚨 A field here must never also appear in `facts`: $set and $max on one field is
    * a conflicting update and Mongo rejects the whole write. */
   const grow = (u) => (maxFacts ? { ...u, $max: maxFacts } : u);
+  /* Stamped ON INSERT ONLY, and never part of `facts` or `maxFacts` — a field in
+   * two operators is a conflicting update and Mongo rejects the whole write, which
+   * on this path would mean silently losing a delivery. On insert only is also the
+   * right semantics: an impression belongs to the playback that opened it, and a
+   * later beat from the same session must not be able to move it. */
+  const onInsert = { at: new Date(), started: true, payoutId: null, app };
   try {
     if (!completed) {
       await impressions.updateOne(
         key,
-        grow({ $set: facts, $setOnInsert: { at: new Date(), started: true, payoutId: null } }),
+        grow({ $set: facts, $setOnInsert: onInsert }),
         { upsert: true },
       );
       return;
@@ -1569,7 +1610,7 @@ async function recordDelivery({ db, sid, campaignId, facts, completed, maxFacts 
         { ...key, completed: { $ne: true } },
         grow({
           $set: { ...facts, completed: true, completedAt: new Date() },
-          $setOnInsert: { at: new Date(), started: true, payoutId: null },
+          $setOnInsert: onInsert,
         }),
         { upsert: true },
       );
@@ -1655,6 +1696,7 @@ router.get('/:sid/s/:vk/:i', servingVisible, async (req, res) => {
       await recordDelivery({
         db,
         sid,
+        app: session.app,
         campaignId: session.banner.campaignId,
         facts: {
           campaignId: session.banner.campaignId,
@@ -1763,7 +1805,7 @@ router.get('/:sid/bc', servingVisible, async (req, res) => {
             clicked: true,
             clickedAt: new Date(),
           },
-          $setOnInsert: { at: new Date(), started: true, payoutId: null },
+          $setOnInsert: { at: new Date(), started: true, payoutId: null, app: session.app },
         },
         { upsert: true },
       );
@@ -1886,6 +1928,7 @@ router.post('/:sid/posted', servingVisible, express.json({ limit: '2kb' }), asyn
     await recordDelivery({
       db,
       sid,
+      app: session.app,
       campaignId: session.campaignId,
       facts: {
         campaignId: session.campaignId,
@@ -1999,6 +2042,7 @@ router.post('/:sid/w', servingVisible, express.json({ limit: '1kb' }), async (re
     await recordDelivery({
       db,
       sid,
+      app: session.app,
       campaignId: session.campaignId,
       facts: {
         campaignId: session.campaignId,
@@ -2031,6 +2075,7 @@ router.post('/:sid/skipped', servingVisible, express.json({ limit: '1kb' }), asy
     await recordDelivery({
       db,
       sid,
+      app: session.app,
       campaignId: session.campaignId,
       facts: {
         campaignId: session.campaignId,
@@ -2090,6 +2135,7 @@ router.post('/:sid/banner-shown', servingVisible, express.json({ limit: '1kb' })
     await recordDelivery({
       db,
       sid,
+      app: session.app,
       campaignId: session.banner.campaignId,
       facts: {
         campaignId: session.banner.campaignId,
@@ -2216,6 +2262,7 @@ router.get('/:sid/:n', servingVisible, async (req, res) => {
     await recordDelivery({
       db,
       sid,
+      app: session.app,
       campaignId: session.campaignId,
       facts: {
         campaignId: session.campaignId,
