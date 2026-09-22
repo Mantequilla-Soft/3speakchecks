@@ -269,6 +269,37 @@ const isBrowserSafe = (url) => {
   try { return BROWSER_SAFE_HOSTS.includes(new URL(url).hostname); } catch (_) { return false; }
 };
 
+/**
+ * The same object, on a gateway the PAGE can actually get bytes from.
+ *
+ * 🚨 An asset url handed to the browser has no fallback. Every server-side fetch in
+ * here walks gatewaySiblings() when one answers 500, but an overlay creative goes
+ * straight onto a <video>/<img> element and gets exactly one try — and
+ * hotipfs-3speak-1 answers 500 forever for anything not already in its cache, which
+ * is every freshly encoded creative, because that is the host adCreativeSync stamped
+ * onto the row minutes earlier. Browser-safe is not enough on its own: that host
+ * sends perfect CORS headers on the 500.
+ *
+ * The symptom is specific and was worth a while to read: the banner drew NOTHING
+ * while its click target, close button and "Ad" label all rendered, because those
+ * are built from the placement the server sent and never touch the asset.
+ *
+ * Urls that are not on a gateway at all (images.3speak.tv, an advertiser's own host)
+ * are returned untouched.
+ */
+function browserGatewayUrl(url) {
+  try {
+    const u = new URL(url);
+    if (!GATEWAY_HOSTS.includes(u.hostname)) return url;
+    // First in the list is the one measured to serve COLD content. Order here is
+    // preference, unlike GATEWAY_HOSTS, because there is no second attempt.
+    u.hostname = BROWSER_SAFE_HOSTS[0];
+    return u.href;
+  } catch (_) {
+    return url;
+  }
+}
+
 /** The same object on the other gateways, in order. Empty for a non-gateway URL. */
 function gatewaySiblings(url) {
   try {
@@ -1247,8 +1278,10 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
          * are already in the video — and handing an asset url to a client that does
          * not need it is just a wider surface. */
         overlay: bannerOverlay ? {
-          imageUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO ? null : bannerCreative.imageUrl,
-          videoUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO ? bannerCreative.manifestUrl : null,
+          // Through browserGatewayUrl(), because this pair is read by the PAGE and
+          // the stored host cannot serve a creative this new. See the helper.
+          imageUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO ? null : browserGatewayUrl(bannerCreative.imageUrl),
+          videoUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO ? browserGatewayUrl(bannerCreative.manifestUrl) : null,
           // Required disclosure. Burned banners carry it in the pixels; an overlay has
           // to draw its own, and it is not optional in either case.
           label: AD_BANNER_LABEL || 'Ad',
