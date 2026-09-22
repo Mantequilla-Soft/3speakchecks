@@ -20,19 +20,6 @@ const {
 } = require('../utils/config');
 const { CREATIVE_STATES } = require('../utils/adModel');
 
-/* The gateway stamped onto every encoded creative.
- *
- * 🚨 NOT hotipfs-3speak-1, which this used to default to. That gateway cannot pull
- * from its origin at all: it serves what is already in its cache and answers 500
- * forever for everything else, with correct CORS headers on the 500 so it looks
- * healthy. A creative is COLD by definition at the moment this line runs, so the url
- * it wrote was broken for exactly the content it was written for.
- *
- * routes/adServe.js rewrites the host anyway before handing an overlay creative to a
- * page, and falls back across siblings on its own server-side fetches, so this is not
- * the only guard. It is the one that stops a broken url being stored in the first
- * place. */
-const CDN = process.env.AD_CDN_GATEWAY || 'https://ipfs-3speak.b-cdn.net/ipfs';
 // How often we check whether a spot has finished encoding. This is the whole delay an
 // advertiser sees between their upload being ready and the page saying so, and there is
 // no push from the encoder to shorten it. The sweep only touches creatives that are
@@ -78,12 +65,25 @@ async function runOnce() {
 
       await db.collection(AD_CREATIVES_COLLECTION).updateOne({ _id: cr._id }, {
         $set: {
-          manifestUrl: `${CDN}/${embed.manifest_cid}/manifest.m3u8`,
+          /* The CID, never a url.
+           *
+           * 🚨 This line used to write `https://<gateway>/ipfs/<cid>/manifest.m3u8`,
+           * and the gateway it named could not serve content this new: a creative is
+           * COLD by definition at the moment this runs. Every reader then inherited a
+           * host chosen here, minutes before anyone would try to fetch it, including
+           * the one that hands a url to a browser. utils/adGateways.js picks a host
+           * at the moment of use instead. */
+          manifestCid: embed.manifest_cid,
           durationSeconds,
           status: CREATIVE_STATES.REVIEW,
           encodedAt: new Date(),
           updatedAt: new Date(),
         },
+        // Legacy rows carry a url with a host baked into it. Nothing reads it any
+        // more (creativeManifestUrl falls back to parsing the CID out of one), and
+        // leaving a stale, wrong host in the row is how this is rediscovered wrongly
+        // in a year.
+        $unset: { manifestUrl: '' },
       });
       advanced += 1;
     }

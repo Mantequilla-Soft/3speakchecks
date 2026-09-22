@@ -65,6 +65,10 @@ const PAYMENTS = process.env.AD_PAYMENTS_COLLECTION || 'ad_payments';
 // its own connection rather than booting the checker's db layer to read a price.
 const { FORMATS, FORMAT_KEYS } = require('../utils/adFormats');
 const adSettings = require('../utils/adSettings');
+// One answer to "has the encoder produced anything", shared with the review gate,
+// the serving gate and the advertiser console. It used to be `!!c.manifestUrl` here,
+// which stopped being true the day the row started holding a CID instead.
+const { creativeIsEncoded } = require('../utils/adGateways');
 
 const argv = process.argv.slice(2);
 const [cmd, arg] = argv;
@@ -177,7 +181,7 @@ withDb(async (db) => {
       spots.forEach((c) => {
         const what = c.kind === 'image'
           ? `image  ${c.imageUrl}`
-          : `video  ${c.durationSeconds || '?'}s  ${c.manifestUrl ? 'encoded' : 'still encoding'}`;
+          : `video  ${c.durationSeconds || '?'}s  ${creativeIsEncoded(c) ? 'encoded' : 'still encoding'}`;
         console.log(`    ${pad(c.status, 10)} ${what}`);
         if (c.kind !== 'image' && c.owner && c.permlink) {
           console.log(`               watch: https://3speak.tv/embed/${c.owner}/${c.permlink}`);
@@ -460,7 +464,7 @@ withDb(async (db) => {
     console.log(`  advertiser  ${advertiser ? `${advertiser.projectName} (@${advertiser.hiveAccount})` : c.advertiserRef}`);
     console.log(`  status      ${c.status}${c.reviewedAt ? ` by ${c.reviewedBy || '?'} on ${date(c.reviewedAt)}` : ''}`);
     console.log(`  length      ${c.durationSeconds ? c.durationSeconds + 's' : 'not measured yet'}`);
-    console.log(`  encoded     ${c.manifestUrl ? 'yes' : 'NOT YET — cannot be approved'}`);
+    console.log(`  encoded     ${creativeIsEncoded(c) ? 'yes' : 'NOT YET — cannot be approved'}`);
     if (c.owner && c.permlink) console.log(`\n  WATCH IT:   https://3speak.tv/embed/${c.owner}/${c.permlink}`);
     if (c.reviewNote) console.log(`\n  note        ${c.reviewNote}`);
     return;
@@ -472,7 +476,7 @@ withDb(async (db) => {
     const coll = db.collection(CREATIVES);
     const c = await coll.findOne({ $or: [{ embedId: arg }, { permlink: arg }] });
     if (!c) { console.error(`No spot with id ${arg}`); process.exitCode = 1; return; }
-    if (approving && !c.manifestUrl) {
+    if (approving && !creativeIsEncoded(c)) {
       console.error('That spot has not finished encoding — there is nothing to play yet.');
       process.exitCode = 1;
       return;

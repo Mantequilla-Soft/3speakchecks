@@ -225,9 +225,9 @@ async function ensureSessionIndexes() {
 }
 
 /**
- * The IPFS gateways that serve the same content and may stand in for each other.
+ * Gateways: which one, and why it is not stored anywhere.
  *
- * 🚨 BunnyCDN 500s on COLD-CACHE content — an object it has not been asked for
+ * 🚨 BunnyCDN 500s on COLD-CACHE content, an object it has not been asked for
  * recently. That is not an error the stitcher can absorb: fetchText throws, the
  * manifest route falls open with a 302 to the un-stitched video, and the playback
  * carries no ad. Worse, it is invisible from the outside — the video plays fine, so
@@ -235,97 +235,14 @@ async function ensureSessionIndexes() {
  * `scheduled` forever. The same cold-cache 500s made a 2,000-row duration backfill
  * look like the whole archive had gone missing (see utils/videoDuration.js).
  *
- * Order is not preference, it is fallback: the player hands us whichever URL it is
- * using, we try that first, and only reach for a sibling gateway if it fails.
+ * The lists, the CORS-versus-cold distinction they used to conflate, and the url
+ * builders all live in utils/adGateways.js now, shared with adCreativeSync,
+ * adCampaigns and videoDuration so they cannot drift apart. Everything below asks
+ * that module for a host at the moment it needs one.
  */
-const GATEWAY_HOSTS = [
-  // The one the PLAYER itself resolves to (play.3speak.tv/hls races gateways and this
-  // is what wins), and the only one measured to serve cold content: hotipfs-3speak-1
-  // answers 500 for anything not already in its cache and never recovers on retry —
-  // 24 of 24 random published videos, four attempts each.
-  'ipfs-3speak.b-cdn.net',
-  'hotipfs-3speak-1.b-cdn.net',
-  'ipfs.3speak.tv',
-];
-
-/**
- * Of those, the ones a BROWSER can actually read.
- *
- * 🚨 ipfs.3speak.tv answers 200 with the bytes but sends no `Access-Control-Allow-
- * Origin`, so every segment fetch from a page is blocked at the browser. It is fine
- * for anything server-side (the duration backfill reads it happily — no CORS applies
- * between two servers) and useless in a playlist we hand to hls.js.
- *
- * That distinction cost a whole debugging session: falling back to it made the
- * stitcher succeed — correct playlist, correct splice, correct burn, all verifiable
- * with curl — while the viewer's player was blocked on every ordinary segment,
- * errored, and quietly fell back to the un-stitched source. The video played, so
- * nothing looked broken, and no server log said otherwise. The gateway is not ours
- * to fix (it resolves off-box), so the rule is enforced here instead: never sign a
- * playlist pointing somewhere a browser cannot follow.
- */
-const BROWSER_SAFE_HOSTS = ['ipfs-3speak.b-cdn.net', 'hotipfs-3speak-1.b-cdn.net'];
-const isBrowserSafe = (url) => {
-  try { return BROWSER_SAFE_HOSTS.includes(new URL(url).hostname); } catch (_) { return false; }
-};
-
-/**
- * The same object, on a gateway the PAGE can actually get bytes from.
- *
- * 🚨 An asset url handed to the browser has no fallback. Every server-side fetch in
- * here walks gatewaySiblings() when one answers 500, but an overlay creative goes
- * straight onto a <video>/<img> element and gets exactly one try — and
- * hotipfs-3speak-1 answers 500 forever for anything not already in its cache, which
- * is every freshly encoded creative, because that is the host adCreativeSync stamped
- * onto the row minutes earlier. Browser-safe is not enough on its own: that host
- * sends perfect CORS headers on the 500.
- *
- * The symptom is specific and was worth a while to read: the banner drew NOTHING
- * while its click target, close button and "Ad" label all rendered, because those
- * are built from the placement the server sent and never touch the asset.
- *
- * Urls that are not on a gateway at all (images.3speak.tv, an advertiser's own host)
- * are returned untouched.
- */
-function browserGatewayUrl(url) {
-  try {
-    const u = new URL(url);
-    if (!GATEWAY_HOSTS.includes(u.hostname)) return url;
-    // First in the list is the one measured to serve COLD content. Order here is
-    // preference, unlike GATEWAY_HOSTS, because there is no second attempt.
-    u.hostname = BROWSER_SAFE_HOSTS[0];
-    return u.href;
-  } catch (_) {
-    return url;
-  }
-}
-
-/** The same object on the other gateways, in order. Empty for a non-gateway URL. */
-function gatewaySiblings(url) {
-  try {
-    const u = new URL(url);
-    if (!GATEWAY_HOSTS.includes(u.hostname)) return [];
-    return GATEWAY_HOSTS.filter((h) => h !== u.hostname).map((h) => {
-      const alt = new URL(u.href);
-      alt.hostname = h;
-      return alt.href;
-    });
-  } catch (_) {
-    return [];
-  }
-}
-
-/** Do these two URLs address the same content through interchangeable gateways? */
-function sameContentScope(a, b) {
-  try {
-    const x = new URL(a);
-    const y = new URL(b);
-    if (x.origin === y.origin) return true;
-    return GATEWAY_HOSTS.includes(x.hostname) && GATEWAY_HOSTS.includes(y.hostname);
-  } catch (_) {
-    return false;
-  }
-}
+const {
+  isBrowserSafe, browserAssetUrl, gatewaySiblings, sameContentScope, creativeManifestUrl,
+} = require('../utils/adGateways');
 
 async function fetchOnce(url) {
   const ac = new AbortController();
@@ -844,7 +761,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         surface: 'upload',
         campaignId: pickG._id,
         creativeId: pickCrG._id,
-        adManifestUrl: pickCrG.manifestUrl,
+        adManifestUrl: creativeManifestUrl(pickCrG),
         contentManifestUrl: null,
         adFirstFetchAt: null,
         // Set when the viewer closes the banner; from then on segments serve unburned.
@@ -972,7 +889,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         surface: 'shorts',
         campaignId: pickC._id,
         creativeId: pickCr._id,
-        adManifestUrl: pickCr.manifestUrl,
+        adManifestUrl: creativeManifestUrl(pickCr),
         // No content to stitch into — the spot IS the item. Kept null rather than
         // omitted so every reader downstream sees the shape it already handles.
         contentManifestUrl: null,
@@ -1175,7 +1092,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       // nothing, so an absent roll is not a new shape.
       campaignId: campaign ? campaign._id : null,
       creativeId: creative ? creative._id : null,
-      adManifestUrl: creative ? creative.manifestUrl : null,
+      adManifestUrl: creativeManifestUrl(creative),
       // Stored unwrapped: the scope check on nested playlists is only meaningful
       // against the manifest's real origin.
       contentManifestUrl: unwrapProxiedManifest(contentManifestUrl),
@@ -1207,7 +1124,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
          * the session for the same reason the still is: the creative can be swapped
          * mid-playback, and every burn behind one manifest has to come from the asset
          * that manifest was built for. Exactly one of these is ever set. */
-        videoUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO ? bannerCreative.manifestUrl : null,
+        videoUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO ? creativeManifestUrl(bannerCreative) : null,
         slotPercent: bannerCampaign.slotPercent ?? null,
         slotPosition: bannerCampaign.slotPosition ?? null,
         seconds: Number(bannerCampaign.spotSeconds) || 0,
@@ -1278,10 +1195,12 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
          * are already in the video — and handing an asset url to a client that does
          * not need it is just a wider surface. */
         overlay: bannerOverlay ? {
-          // Through browserGatewayUrl(), because this pair is read by the PAGE and
-          // the stored host cannot serve a creative this new. See the helper.
-          imageUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO ? null : browserGatewayUrl(bannerCreative.imageUrl),
-          videoUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO ? browserGatewayUrl(bannerCreative.manifestUrl) : null,
+          // Resolved for a PAGE, which gets one attempt and no fallback. The image
+          // is an absolute url from somewhere else entirely and is only rewritten in
+          // the case where it does sit on a gateway of ours.
+          imageUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO ? null : browserAssetUrl(bannerCreative.imageUrl),
+          videoUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO
+            ? creativeManifestUrl(bannerCreative, { browser: true }) : null,
           // Required disclosure. Burned banners carry it in the pixels; an overlay has
           // to draw its own, and it is not optional in either case.
           label: AD_BANNER_LABEL || 'Ad',

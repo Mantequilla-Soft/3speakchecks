@@ -27,15 +27,12 @@ const fsp = require('fs/promises');
 const crypto = require('crypto');
 const execFileP = require('util').promisify(require('child_process').execFile);
 
-const GATEWAYS = [
-    // Same order as routes/adServe.js, and for the same measured reason: hotipfs-3speak-1
-    // only serves what is already in its cache. ipfs-3speak is what play.3speak.tv's own
-    // gateway race picks, and ipfs.3speak.tv is the last resort (fine here — no CORS
-    // applies to a server-side read — but never usable in a browser-facing playlist).
-    'https://ipfs-3speak.b-cdn.net/ipfs',
-    'https://ipfs.3speak.tv/ipfs',
-    'https://hotipfs-3speak-1.b-cdn.net/ipfs',
-];
+// One list, in utils/adGateways.js. It used to be copied here with a comment saying
+// to keep it in step with routes/adServe.js, which is a note, not a mechanism.
+// Server-side reads, so every gateway is allowed: no CORS applies between two servers.
+const { GATEWAY_HOSTS } = require('./adGateways');
+
+const GATEWAYS = GATEWAY_HOSTS.map((h) => `https://${h}/ipfs`);
 const FETCH_TIMEOUT_MS = 15000;
 // A manifest that sums to more than this is a parse gone wrong, not a long video.
 // Written onto the doc it would quietly break every length-targeted ad campaign and

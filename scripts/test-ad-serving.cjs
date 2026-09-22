@@ -16,7 +16,17 @@ if (require('../utils/config').ADS_STAGE === 'off') {
   process.exit(0);
 }
 
-const CDN = 'https://hotipfs-3speak-1.b-cdn.net/ipfs';
+/* 🚨 NOT a hardcoded gateway any more, and specifically not hotipfs-3speak-1.
+ *
+ * This line named that host, and the SAFE list below blessed it, so a suite whose
+ * whole job is to assert "never point a browser somewhere it cannot follow" was
+ * affirming the one gateway that cannot serve content it has not already cached.
+ * Both come from utils/adGateways.js now, which is the thing under test. */
+const {
+  CORS_HOSTS, COLD_CAPABLE_HOSTS, preferredHost,
+} = require('../utils/adGateways');
+
+const CDN = `https://${preferredHost()}/ipfs`;
 const BASE = 'https://checker.3speak.tv';
 const CREATIVE = { cid: 'QmRCr2MuWpWXB4DxvXGXBq1p7vdQ4uzg12nmKcP68WSZnr', dur: 15 };
 // Owner is the account on ADS_ALLOWED_OWNERS — ads run on its videos and no others.
@@ -58,7 +68,10 @@ const ok = (l, cond, detail='') => { if (!cond) fails++; console.log(`${cond?' o
  * must not leave it there. Removes it and says so.
  */
 async function discardStray(d, cfg, response, label) {
-  const url = response && response.ad && response.ad.manifestUrl;
+  // Either placement carries the same sid, and a banner-only response has no `ad` at
+  // all — so reading only that one would walk past a session and leave it billing.
+  const url = (response && response.ad && response.ad.manifestUrl)
+    || (response && response.banner && response.banner.manifestUrl);
   const m = url && String(url).match(/\/m\/([0-9a-f]{32})\.m3u8/);
   if (!m) return null;
   const session = await d.collection('ad_sessions').findOne({ sid: m[1] });
@@ -104,6 +117,10 @@ async function assertOurs(d, cfg, sid, ourCampaignId) {
       // Below zero on purpose: the picker sorts eligible campaigns by fewest
       // delivered, so this wins against any real flight. Reset to 0 the moment the
       // selection is made, so the delivery assertions below read as they should.
+      // 🚨 creativesByCampaign() looks a creative up by THIS, not by the creative's
+      // own campaignId. Without it the fixture below is invisible, the campaign is
+      // never servable, and the suite fails at "an ad was selected" with no clue why.
+      creativeEmbedId: 'e2e-creative',
       deliveredImpressions: -1, createdAt: new Date(),
     });
     ids.camp = camp.insertedId;
@@ -113,7 +130,9 @@ async function assertOurs(d, cfg, sid, ourCampaignId) {
       // Formats match a campaign's creativeKind against this, so a fixture without
       // it is refused as the wrong kind — which is what silently broke this suite.
       kind: 'video',
-      durationSeconds: CREATIVE.dur, manifestUrl: `${CDN}/${CREATIVE.cid}/manifest.m3u8`,
+      // A CID, because that is what a creative row holds. A url here would be a
+      // fixture asserting the shape this change removed.
+      durationSeconds: CREATIVE.dur, manifestCid: CREATIVE.cid,
       status: 'ready', createdAt: new Date(),
     });
     ids.cre = cre.insertedId;
@@ -174,7 +193,7 @@ async function assertOurs(d, cfg, sid, ourCampaignId) {
      * playlist pointing somewhere a browser cannot follow. ipfs.3speak.tv serves the
      * bytes with no Access-Control-Allow-Origin, so a playlist naming it plays fine
      * under curl and dies silently in the viewer's player. Assert that, not a host. */
-    const SAFE = ['ipfs-3speak.b-cdn.net', 'hotipfs-3speak-1.b-cdn.net', new URL(BASE).hostname];
+    const SAFE = [...CORS_HOSTS, new URL(BASE).hostname];
     const segLines = t2.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
     const notAbsolute = segLines.filter((l) => !/^https?:\/\//.test(l));
     const unsafe = segLines.filter((l) => /^https?:\/\//.test(l) && !SAFE.includes(new URL(l).hostname));
@@ -287,11 +306,62 @@ async function assertOurs(d, cfg, sid, ourCampaignId) {
       !pendingImp ? 'NO IMPRESSION FOR THIS CAMPAIGN' : (pendingImp.payoutId === null ? 'null' : pendingImp.payoutId),
       'null');
 
+    /* ── 8. the banner url handed to a PAGE ──
+     *
+     * The regression this exists for: an overlay banner's creative goes straight onto
+     * a <video> element in the viewer's browser. That element gets ONE attempt and no
+     * fallback, unlike every server-side fetch in adServe, which walks sibling
+     * gateways. The creative row used to carry a gateway that answers 500 for anything
+     * it has not already cached, which is every creative at the moment it is encoded.
+     *
+     * The symptom is why this is asserted rather than eyeballed: the banner drew
+     * NOTHING while its close button, its open-in-new icon and its "Ad" label all
+     * rendered correctly, because those three are built from the placement the server
+     * sends and never touch the asset. It reads as a styling bug, not a dead url.
+     *
+     * Runs last: it opens a second session, and putting it earlier would perturb the
+     * delivery counts every assertion above depends on. */
+    console.log('\n── the banner url a page is given ──');
+    const bCamp = await d.collection(cfg.AD_CAMPAIGNS_COLLECTION).insertOne({
+      advertiserRef: 'E2E-TEST-REF', hiveAccount: 'meno', projectName: 'E2E Test Co',
+      name: 'E2E banner', format: 'video_banner', status: 'scheduled', slotPercent: 40,
+      days: 7, markets: [], spotSeconds: 10, priceHbd: 10, paidHbd: 10,
+      startAt: new Date(Date.now() - 60000), endAt: new Date(Date.now() + 864e5),
+      creativeEmbedId: 'e2e-banner-creative',
+      deliveredImpressions: -1, createdAt: new Date(),
+    });
+    ids.bCamp = bCamp.insertedId;
+    await d.collection(cfg.AD_CREATIVES_COLLECTION).insertOne({
+      advertiserRef: 'E2E-TEST-REF', embedId: 'e2e-banner-creative', kind: 'video',
+      durationSeconds: 10, manifestCid: CREATIVE.cid, status: 'ready', createdAt: new Date(),
+    });
+
+    const bj = await (await fetch(`${BASE}/m/session`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      // What the web player sends: draw the banner rather than burning it.
+      body: JSON.stringify({
+        owner: CONTENT.owner, permlink: CONTENT.permlink, capId: 'e2e-banner-cap',
+        manifestUrl: contentManifest, bannerOverlay: true,
+      }),
+    })).json();
+    ok('a banner was selected', !!(bj.banner && bj.banner.overlay),
+      bj.banner ? 'no overlay on it' : `reason=${bj.reason}`);
+    const vurl = bj.banner && bj.banner.overlay ? bj.banner.overlay.videoUrl : null;
+    ok('  the page is given a url at all', !!vurl, String(vurl));
+    const vhost = vurl ? new URL(vurl).hostname : '';
+    ok('  on a gateway that sends CORS', CORS_HOSTS.includes(vhost), vhost);
+    ok('  AND that can serve content it has not cached', COLD_CAPABLE_HOSTS.includes(vhost), vhost);
+    await discardStray(d, cfg, bj, 'banner overlay');
+
   } finally {
     // ── clean up everything this test created ──
     await d.collection(cfg.ADVERTISERS_COLLECTION).deleteMany({ reference: 'E2E-TEST-REF' });
     await d.collection(cfg.AD_CAMPAIGNS_COLLECTION).deleteMany({ advertiserRef: 'E2E-TEST-REF' });
     await d.collection(cfg.AD_CREATIVES_COLLECTION).deleteMany({ advertiserRef: 'E2E-TEST-REF' });
+    if (ids.bCamp) {
+      await d.collection(cfg.AD_IMPRESSIONS_COLLECTION).deleteMany({ campaignId: ids.bCamp });
+      await d.collection('ad_sessions').deleteMany({ 'banner.campaignId': ids.bCamp });
+    }
     if (ids.camp) {
       await d.collection(cfg.AD_IMPRESSIONS_COLLECTION).deleteMany({ campaignId: ids.camp });
       await d.collection(cfg.AD_PAYOUTS_COLLECTION).deleteMany({ periodKey: String(ids.camp) });
