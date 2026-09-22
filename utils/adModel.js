@@ -39,6 +39,7 @@ const STATES = Object.freeze({
  * says only what a file is.
  */
 const { CREATIVE_KINDS } = require('./adCreativeKinds');
+const { creativeIsEncoded } = require('./adGateways');
 
 const CREATIVE_STATES = Object.freeze({
   PENDING: 'pending',      // uploaded, still encoding
@@ -200,7 +201,7 @@ function missingAssetFor(creative) {
   if (creative.kind === CREATIVE_KINDS.IMAGE) {
     return creative.imageUrl ? null : 'creative_has_no_image';
   }
-  return creative.manifestUrl ? null : 'creative_not_encoded';
+  return creativeIsEncoded(creative) ? null : 'creative_not_encoded';
 }
 
 /**

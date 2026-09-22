@@ -8,6 +8,7 @@ const fs = require('fs');
 const db = require('../utils/db');
 const cfg = require('../utils/config');
 const { servableReason } = require('../utils/adModel');
+const { creativeIsEncoded } = require('../utils/adGateways');
 
 // The feature can be switched fully dark (ADS_STAGE=off), in which case every route
 // under test answers 404 by design. Say so and skip, rather than reporting a wall of
@@ -86,7 +87,7 @@ const ok = (l, c, d='') => { if (!c) fails++; console.log(`${c?' ok ':'FAIL'}  $
     // it to `ready`, so no ad could ever serve. This walks the whole path.
     const creatives = d.collection(cfg.AD_CREATIVES_COLLECTION);
     let cr = await creatives.findOne({ permlink });
-    check('starts pending with no manifest', `${cr.status}/${cr.manifestUrl ? 'has' : 'none'}`, 'pending/none');
+    check('starts pending with no manifest', `${cr.status}/${creativeIsEncoded(cr) ? 'has' : 'none'}`, 'pending/none');
 
     // Pretend the encoder finished.
     await d.collection('embed-video').updateOne({ owner: 'meno', permlink },
@@ -94,7 +95,9 @@ const ok = (l, c, d='') => { if (!c) fails++; console.log(`${c?' ok ':'FAIL'}  $
     const sync = await require('../services/adCreativeSync').runOnce();
     ok('encode watcher advanced it', sync && sync.advanced >= 1, JSON.stringify(sync));
     cr = await creatives.findOne({ permlink });
-    check('now awaiting review, with a manifest', `${cr.status}/${cr.manifestUrl ? 'has' : 'none'}`, 'review/has');
+    check('now awaiting review, with a manifest', `${cr.status}/${creativeIsEncoded(cr) ? 'has' : 'none'}`, 'review/has');
+    check('and stored a CID, not a gateway url', `${cr.manifestCid || 'none'}/${cr.manifestUrl || 'no-url'}`,
+      'QmTestManifestCidForLifecycleCheck00000000000/no-url');
     check('still not servable', servableReason({ status: 'running', paidHbd: 1, startAt: new Date(Date.now()-1000), endAt: new Date(Date.now()+1000) }, cr), 'creative_review');
 
     // Approve, exactly as the CLI and the admin endpoint do.
@@ -103,7 +106,7 @@ const ok = (l, c, d='') => { if (!c) fails++; console.log(`${c?' ok ':'FAIL'}  $
     check('approved spot is servable', servableReason({ status: 'running', paidHbd: 1, startAt: new Date(Date.now()-1000), endAt: new Date(Date.now()+1000) }, cr) === null ? 'yes' : 'no', 'yes');
 
     // An over-long spot must be caught once the encoder measures it, not at splice time.
-    await creatives.updateOne({ _id: cr._id }, { $set: { status: 'pending', manifestUrl: null } });
+    await creatives.updateOne({ _id: cr._id }, { $set: { status: 'pending', manifestCid: null } });
     await d.collection('embed-video').updateOne({ owner: 'meno', permlink }, { $set: { duration: 900 } });
     await require('../services/adCreativeSync').runOnce();
     cr = await creatives.findOne({ permlink });

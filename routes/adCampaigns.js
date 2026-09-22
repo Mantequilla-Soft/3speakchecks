@@ -62,7 +62,7 @@ function featureVisible(req, res, next) {
   return next();
 }
 
-const CDN = process.env.AD_CDN_GATEWAY || 'https://hotipfs-3speak-1.b-cdn.net/ipfs';
+const { manifestUrlFor, creativeIsEncoded } = require('../utils/adGateways');
 const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 
 /* ─── shared helpers ──────────────────────────────────────────────────── */
@@ -149,7 +149,9 @@ function publicCreative(cr) {
     permlink: cr.permlink || null,
     status: cr.status,
     durationSeconds: cr.durationSeconds,
-    encoded: !!cr.manifestUrl,
+    // Asked through adGateways so the console, the review gate, the serving gate
+    // and the operator CLI all answer this the same way.
+    encoded: creativeIsEncoded(cr),
     note: cr.reviewNote || null,
     // Deliberately absent: a creative is no longer owned by one flight, so a single
     // `campaignId` here could only ever be wrong. Which flights use it is a property
@@ -783,7 +785,7 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
             // A still has no duration of its own. How long it is ON SCREEN is what
             // the flight booked, and that lives on the campaign.
             durationSeconds: 0,
-            manifestUrl: null,
+            manifestCid: null,
             status: settled ? prior.status : CREATIVE_STATES.REVIEW,
             updatedAt: new Date(),
           },
@@ -864,7 +866,9 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
     }
 
     const encoded = !!embed.manifest_cid;
-    const manifestUrl = encoded ? `${CDN}/${embed.manifest_cid}/manifest.m3u8` : null;
+    // Only to probe the shape with, below. What gets STORED is the CID: a host is a
+    // delivery decision and goes stale in a row. See utils/adGateways.js.
+    const manifestUrl = manifestUrlFor(embed.manifest_cid);
     const creativeKey = String(embed._id);
 
     // Shape, for the formats that constrain it — today that is the shorts spot, which
@@ -923,11 +927,14 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
           owner: embed.owner || null,
           permlink: embed.permlink,
           durationSeconds,
-          manifestUrl,
+          manifestCid: embed.manifest_cid || null,
           status,
           updatedAt: new Date(),
         },
         $setOnInsert: { embedId: creativeKey, reviewNote: null, createdAt: new Date() },
+        // A host stored in a row is exactly what utils/adGateways.js exists to
+        // prevent, so a row this code touches loses its legacy url.
+        $unset: { manifestUrl: '' },
       },
       { upsert: true },
     );
@@ -990,7 +997,7 @@ router.post('/creatives', featureVisible, express.json({ limit: '16kb' }), async
             imageHeight: imgSize ? imgSize.height : null,
             owner: advertiser.hiveAccount,
             durationSeconds: 0,
-            manifestUrl: null,
+            manifestCid: null,
             status: CREATIVE_STATES.REVIEW,
             updatedAt: new Date(),
           },
@@ -1033,13 +1040,16 @@ router.post('/creatives', featureVisible, express.json({ limit: '16kb' }), async
           owner: embed.owner || null,
           permlink: embed.permlink,
           durationSeconds,
-          manifestUrl: encoded ? `${CDN}/${embed.manifest_cid}/manifest.m3u8` : null,
+          manifestCid: encoded ? embed.manifest_cid : null,
           // Never straight to READY. We are about to put this in front of other
           // people's audiences, so a human looks at it first.
           status: encoded ? CREATIVE_STATES.REVIEW : CREATIVE_STATES.PENDING,
           updatedAt: new Date(),
         },
         $setOnInsert: { embedId: String(embed._id), campaignId: null, reviewNote: null, createdAt: new Date() },
+        // A host stored in a row is exactly what utils/adGateways.js exists to
+        // prevent, so a row this code touches loses its legacy url.
+        $unset: { manifestUrl: '' },
       },
       { upsert: true },
     );
