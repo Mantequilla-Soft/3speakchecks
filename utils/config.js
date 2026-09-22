@@ -369,6 +369,16 @@ module.exports = {
     COMMENT_SYNC_MAX_VIDEOS: parseInt(process.env.COMMENT_SYNC_MAX_VIDEOS) || 8000,     // hard cap per run (safety)
     COMMENT_CACHE_MS: parseInt(process.env.COMMENT_CACHE_MS) || 5 * 60 * 1000,          // in-process count-map TTL (follow feed)
 
+    // ─── Small-collection feed caches (utils/feedCache.js) ───────────────────
+    // Mongo is not in this datacentre: the measured round trip to the replica-set
+    // primary swings between 110ms and 389ms, so a route's cost is (round trips) ×
+    // RTT and nothing else. /playlists-feed executes in 2ms server-side and returns
+    // 1 document out of 59 public playlists, yet answered in 0.115s at 110ms ping
+    // and 0.39s at 389ms. For a set this small the fix is to not make the trip.
+    // The whole set is cached and all per-viewer work happens in memory.
+    // 0 disables the cache (every request goes to Mongo again).
+    PLAYLIST_FEED_CACHE_MS: parseInt(process.env.PLAYLIST_FEED_CACHE_MS ?? '') || 60 * 1000,
+
     // ─── Engagement affinity (utils/engagementBoost.js + services/engagementSync.js) ──
     // The mirror image of the curation boost: instead of "how many people cared about
     // this video", it asks "whose videos does THIS viewer care about", and boosts them
