@@ -369,6 +369,84 @@ module.exports = {
     COMMENT_SYNC_MAX_VIDEOS: parseInt(process.env.COMMENT_SYNC_MAX_VIDEOS) || 8000,     // hard cap per run (safety)
     COMMENT_CACHE_MS: parseInt(process.env.COMMENT_CACHE_MS) || 5 * 60 * 1000,          // in-process count-map TTL (follow feed)
 
+    // ─── Engagement affinity (utils/engagementBoost.js + services/engagementSync.js) ──
+    // The mirror image of the curation boost: instead of "how many people cared about
+    // this video", it asks "whose videos does THIS viewer care about", and boosts them
+    // for that one person on discover + interests.
+    //
+    // Engaged = in the last ENGAGE_WINDOW_DAYS you commented on it (Hive), reshared it
+    // (`reshares`) or saved it to a playlist (`playlists.items`). Two of those are ours
+    // and free; comments are a 2-8 call paged Hive walk per viewer (0.2-1.1s measured),
+    // far too slow for a ~0.12s discover request — so a background sync precomputes the
+    // whole affinity into ENGAGE_COLLECTION and the request path does one `_id` read.
+    //
+    //   engagementBoost = min(CAP, 1 + Wa·ln(1 + authorWeight) + Wt·topicShare)
+    //
+    // CAP sits below the explicit interest multipliers (3.0 exact / 1.8 sibling): a
+    // topic the viewer picked by hand must outrank one we inferred from behaviour.
+    // <= 1 disables the boost without touching code.
+    ENGAGE_BOOST_ENABLED: parseBool(process.env.ENGAGE_BOOST_ENABLED, true),
+    ENGAGE_MAX_BOOST: parseFloat(process.env.ENGAGE_MAX_BOOST ?? '2.0'),
+    // Author term. Log-damped because an active commenter engages with a LOT of
+    // accounts (measured: 76 distinct authors over 155 comments in 90d) — the boost has
+    // to separate "I reply to them constantly" from "I said nice video once".
+    ENGAGE_AUTHOR_WEIGHT: parseFloat(process.env.ENGAGE_AUTHOR_WEIGHT ?? '0.35'),
+    // Topic term. Multiplies a SHARE in [0,1], not a count, so it is self-bounding:
+    // a topic that is 40% of everything you engage with earns 0.4·Wt. Measured live,
+    // a viewer's dominant topic sits at 25-34% of their engagement, so Wt=1.0 puts a
+    // topic-only match around ×1.25-1.34 — clearly felt, and still well under the
+    // ×1.8 a merely ADJACENT hand-picked interest gets.
+    ENGAGE_TOPIC_WEIGHT: parseFloat(process.env.ENGAGE_TOPIC_WEIGHT ?? '1.0'),
+    // Evidence gate on the topic term, the same shape as the retention penalty ramp.
+    // A share is a proportion, so two engaged videos in one topic reads as "100% of
+    // what you like", which is not a preference, it is a coincidence. The term scales
+    // in linearly and only reaches full strength at this many topic-resolved events.
+    ENGAGE_TOPIC_FULL_EVENTS: parseInt(process.env.ENGAGE_TOPIC_FULL_EVENTS) || 10,
+    // Below this share a topic is noise (one stray comment in 90 days) and is ignored,
+    // so the boost focuses the feed instead of quietly widening it.
+    ENGAGE_TOPIC_MIN_SHARE: parseFloat(process.env.ENGAGE_TOPIC_MIN_SHARE ?? '0.05'),
+    // Per-event weights. A reshare/save is a deliberate keep; a comment is cheaper to
+    // write but a bigger time investment. Kept close together on purpose.
+    ENGAGE_W_COMMENT: parseFloat(process.env.ENGAGE_W_COMMENT ?? '1.0'),
+    ENGAGE_W_RESHARE: parseFloat(process.env.ENGAGE_W_RESHARE ?? '1.0'),
+    ENGAGE_W_SAVE: parseFloat(process.env.ENGAGE_W_SAVE ?? '1.2'),
+    // The window, and how fast an event inside it fades. A half-life keeps the whole
+    // 90 days meaningful (an event at the far edge is still worth 0.25) while letting
+    // last week outweigh last quarter. 0 disables decay (every event weighs the same).
+    ENGAGE_WINDOW_DAYS: parseInt(process.env.ENGAGE_WINDOW_DAYS) || 90,
+    ENGAGE_HALFLIFE_DAYS: parseFloat(process.env.ENGAGE_HALFLIFE_DAYS ?? '45'),
+    // 'max' = a creator you both follow AND engage with gets the LARGER of the two
+    // multipliers, not their product (×1.6 × ×2.0 = ×3.2 would outrank a hand-picked
+    // interest). 'multiply' restores stacking.
+    ENGAGE_COMBINE_WITH_FOLLOW: (process.env.ENGAGE_COMBINE_WITH_FOLLOW || 'max').trim().toLowerCase(),
+    // Container/aggregator accounts that collect other people's posts (snap and wave
+    // containers). Replying under one of those is engagement with the THREAD, not with
+    // the account, and they attract a lot of replies — left in, they would dominate.
+    ENGAGE_AUTHOR_BLACKLIST: (process.env.ENGAGE_AUTHOR_BLACKLIST ?? 'peak.snaps,ecency.waves,leothreads,dbuzz')
+        .split(',').map((s) => s.trim().toLowerCase().replace(/^@/, '')).filter(Boolean),
+    // Count only comments left on 3Speak VIDEOS, rather than on any Hive post by that
+    // author. Off by default: replying to a creator's text post is still a signal that
+    // you want more of them, and a non-creator author simply never matches a candidate.
+    ENGAGE_COMMENTS_VIDEOS_ONLY: parseBool(process.env.ENGAGE_COMMENTS_VIDEOS_ONLY, false),
+    ENGAGE_COLLECTION: process.env.ENGAGE_COLLECTION || 'user-engagement',
+    // In-process affinity cache: TTL, and a hard LRU cap for the same reason
+    // FOLLOW_BOOST_MAX_USERS exists — `?currentuser=` is unauthenticated.
+    ENGAGE_CACHE_TTL_MS: parseInt(process.env.ENGAGE_CACHE_TTL_MS) || 10 * 60 * 1000,
+    ENGAGE_MAX_USERS: parseInt(process.env.ENGAGE_MAX_USERS) || 5000,
+    // How old a stored row may get before the sync refreshes it. Comment history moves
+    // slowly and the window is 90 days wide, so hours is the right unit, not minutes.
+    ENGAGE_SYNC_TTL_MS: parseInt(process.env.ENGAGE_SYNC_TTL_MS) || 6 * 60 * 60 * 1000,
+    // Background sync pacing. The queue is seeded by viewers who actually arrive, so
+    // these bound Hive load against real traffic rather than against the user table.
+    ENGAGE_SYNC_ENABLED: parseBool(process.env.ENGAGE_SYNC_ENABLED, true),
+    ENGAGE_SYNC_INTERVAL_SEC: parseInt(process.env.ENGAGE_SYNC_INTERVAL_SEC) || 60,
+    ENGAGE_SYNC_CONCURRENCY: parseInt(process.env.ENGAGE_SYNC_CONCURRENCY) || 2,
+    ENGAGE_SYNC_PER_TICK: parseInt(process.env.ENGAGE_SYNC_PER_TICK) || 10,
+    // Safety caps per user: pages of comment history to walk, and authors/topics kept.
+    ENGAGE_MAX_COMMENT_PAGES: parseInt(process.env.ENGAGE_MAX_COMMENT_PAGES) || 30,
+    ENGAGE_MAX_AUTHORS: parseInt(process.env.ENGAGE_MAX_AUTHORS) || 200,
+    ENGAGE_MAX_TOPICS: parseInt(process.env.ENGAGE_MAX_TOPICS) || 30,
+
     // ─── Feed card stats (services/videoStats.js) ─────────────────────────────
     // The payout / vote / comment numbers on a feed card used to be fetched by EVERY
     // browser, one condenser_api.get_content per visible card — ~964KB and ~1.3s for a
