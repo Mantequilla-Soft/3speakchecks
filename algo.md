@@ -499,6 +499,170 @@ to the follow feed's rank at request time (one cached-map read). Trending is unt
 
 ---
 
+# Engagement affinity (`utils/engagementBoost.js` + `services/engagementSync.js`)
+
+Videos by creators **you** engaged with, and about the topics you engage with, rank
+higher on **discover** and **interests**. Per-viewer, not global.
+
+Engaged means you deliberately did something about someone's video in the last
+`ENGAGE_WINDOW_DAYS` (90):
+
+| signal | where it lives | cost |
+|---|---|---|
+| **commented** — you wrote a reply under it | **Hive only** (`bridge.get_account_posts`, sort `comments`) | 2-8 paged RPCs, 0.2-1.1s |
+| **reshared** — you put it on your own blog | `reshares` (230 docs) | free |
+| **saved** — you added it to a playlist / Watch Later | `playlists.items` (677 playlists) | free |
+
+This is the mirror image of the [curation signals](#curation-signals--the-manual-votes-utilscurationjs).
+Curation asks *"how many people cared about this video"* and boosts it for everyone.
+This asks *"whose videos does this viewer care about"* and boosts them for one person.
+
+## Why it is precomputed
+
+A 90-day comment walk costs **0.2-1.1s** (measured: 28 comments / 2 pages for a quiet
+account, 155 comments / 8 pages for a busy one, 294 / 19 for the busiest). Discover
+answers in ~0.12s, so that walk can never sit in the request path — and doing it
+per-viewer would turn our own traffic into an amplifier aimed at the Hive nodes.
+
+So `services/engagementSync.js` precomputes the whole affinity into **`user-engagement`**
+(one row per viewer) and the request path does **one indexed `_id` read**, cached
+in-process. Measured A/B on the real route, warm: **382ms with the boost on, 384ms
+with it off** — it costs nothing.
+
+**The queue is DEMAND-SEEDED.** We do not crawl the user table: a viewer is queued the
+first time they actually request a feed, and again once their row goes stale
+(`ENGAGE_SYNC_TTL_MS`, 6h). Hive load therefore tracks real traffic rather than how
+many accounts exist. A cold viewer gets **no boost for that one request** and is warmed
+in the background — the same stale-while-revalidate contract as
+[the follow boost](#follow-boost-utilsfollowboostjs), except the row survives a restart,
+so after a deploy a known viewer is fully boosted on their first request instead of
+going cold.
+
+## The calculation
+
+```
+engagementBoost = min(CAP, 1 + Wa·ln(1 + authorWeight) + Wt·topicShare·evidence)
+```
+
+**Per event**, weighted by kind and faded by age:
+
+```
+w = KIND_WEIGHT · 0.5^(ageDays / ENGAGE_HALFLIFE_DAYS)
+```
+
+A half-life rather than a cliff, so the whole 90 days stays meaningful (an event at the
+far edge is still worth 0.25) while last week clearly outweighs last quarter.
+
+**`authorWeight`** = Σ w over that creator's videos. Log-damped, because an active
+commenter engages with a LOT of accounts — measured live, one viewer had **58 distinct
+authors across 133 events**, another **90 across 294**. A flat multiplier would light up
+a large slice of the catalogue and stop discriminating; the log separates "I reply to
+them constantly" from "I said nice video once".
+
+**`topicShare`** = that topic's share of the viewer's total topical engagement, **not** a
+raw count. A share is self-bounding in [0,1], so a heavy commenter cannot saturate the
+term, and "40% of what I engage with is tech" means the same for someone with 10 events
+and someone with 300. Live, a viewer's dominant topic sits at **25-34%**.
+
+**`evidence`** = `min(1, topic_events / ENGAGE_TOPIC_FULL_EVENTS)` — the same shape as the
+[retention penalty ramp](#why-a-demotion-needs-evidence). A proportion of almost nothing
+is not evidence: two engaged videos that happen to share a topic read as "100% of what
+you like", which is a coincidence, not a preference.
+
+The topic is resolved with the feeds' **own** winner-tag machinery (`utils/effectiveTags.js`),
+so an "engaged topic" is the exact same thing a candidate's `winnerTag` is. Anything else
+and the two would drift and the match would quietly stop firing.
+
+### Measured strength (live pool, 3823 candidates, one real viewer)
+
+| tier | share of pool | what it is |
+|---|---|---|
+| none (×1.00) | 51.1% | never engaged with, topic below the floor |
+| weak (×1.00-1.25) | 17.4% | a minor topic, or one old light engagement |
+| mid (×1.25-1.60) | 30.6% | the dominant topic, or a few engagements |
+| **strong (≥×1.60)** | **0.9%** (34 videos) | creators actually engaged with, repeatedly |
+
+That is the intended shape: a **small** set of creators rises sharply, with a broad, gentle
+topic tilt underneath. Topic-only lands at ×1.25-1.34 for a dominant topic and ×1.05 for a
+tail one.
+
+## Three rules that are load-bearing
+
+**1. Self-engagement does not count.** Creators are by far the heaviest commenters on
+their own threads — measured, 41 of one account's 154 comments and 77 of another's 294
+were replies under their own posts. Counting them would turn every creator's discover
+page into their own back catalogue.
+
+**2. Container accounts do not count.** Snap/wave aggregators (`peak.snaps` and friends)
+are the root author of every thread under them and, left alone, instantly become the
+single biggest "creator" every viewer engages with — 44 of one account's 154 comments,
+more than three times the next real author. A comment credits the **root** author (the
+creator whose content the conversation hangs under, not `parent_author`, who on a nested
+reply is just the person you answered) — **unless** that root is a container, in which
+case the credit falls back to the person actually replied to. A reply to the container
+itself credits nobody.
+
+**3. It does not compound with the follow boost.** With `ENGAGE_COMBINE_WITH_FOLLOW=max`
+(the default) a creator you both follow AND engage with gets the **larger** of the two
+multipliers, not their product: ×1.6 × ×2.0 = ×3.2 would put "a creator I like" above an
+interest the viewer picked **by hand**. This is why `applyEngagementBoost` must run
+**after** `applyFollowBoost` — it needs the `follow_match` flag to divide the follow
+multiplier back out.
+
+`ENGAGE_MAX_BOOST` (2.0) is likewise capped **below** the discover interest multipliers
+(3.0 exact / 1.8 sibling), for the same reason: an inferred preference must never
+outrank a stated one.
+
+## Performance
+
+- Request path: one `_id` read into `user-engagement`, then an in-process LRU
+  (`ENGAGE_CACHE_TTL_MS`, capped at `ENGAGE_MAX_USERS` — `?currentuser=` is
+  unauthenticated, so the same two guards as the follow boost: a Hive-account-name
+  regex before any I/O, and a hard LRU cap).
+- Sync: 0.3-3.7s per viewer, dominated by the Hive comment walk. In-process (network
+  I/O, not CPU), `ENGAGE_SYNC_CONCURRENCY` (2) at a time, so it never blocks feeds and
+  keeps clear of the worker hot-reload hazard.
+- ⚠️ **Added index `embed-video {hive_author: 1, hive_permlink: 1}`.** Topic resolution
+  looks embeds up by their HIVE key, and the collection only had `{owner, hive_permlink}`
+  and `{owner, permlink}`, which a `hive_author` lookup cannot use. Before: a 200-clause
+  `$or` was a full **COLLSCAN of all 12,370 docs at 804ms**, per viewer, per sync. After:
+  **99 docs examined, 17ms**.
+
+## Debugging
+
+`/feeds/discover?debug=1&currentuser=<name>` exposes `engagement_match` and
+`engagement_boost` per video, alongside the existing `follow_match` / `curation_boost` /
+`comment_boost` fields.
+
+## Configuration (env)
+
+| var | default | meaning |
+|---|---|---|
+| `ENGAGE_BOOST_ENABLED` | `true` | kill switch (request side) |
+| `ENGAGE_SYNC_ENABLED` | `true` | kill switch (background sync) |
+| `ENGAGE_MAX_BOOST` | `2.0` | hard cap; must stay under `DISCOVER_INTEREST_EXACT_MULT` |
+| `ENGAGE_AUTHOR_WEIGHT` | `0.35` | Wa, on `ln(1 + authorWeight)` |
+| `ENGAGE_TOPIC_WEIGHT` | `1.0` | Wt, on a share ∈ [0,1] |
+| `ENGAGE_TOPIC_MIN_SHARE` | `0.05` | below this a topic is noise and is ignored |
+| `ENGAGE_TOPIC_FULL_EVENTS` | `10` | topic-resolved events for full topic strength |
+| `ENGAGE_W_COMMENT` / `_RESHARE` / `_SAVE` | `1.0` / `1.0` / `1.2` | per-event kind weights |
+| `ENGAGE_WINDOW_DAYS` | `90` | how far back an engagement counts |
+| `ENGAGE_HALFLIFE_DAYS` | `45` | recency fade inside the window (`0` = no decay) |
+| `ENGAGE_COMBINE_WITH_FOLLOW` | `max` | `max` or `multiply` |
+| `ENGAGE_AUTHOR_BLACKLIST` | `peak.snaps,ecency.waves,leothreads,dbuzz` | container accounts |
+| `ENGAGE_COMMENTS_VIDEOS_ONLY` | `false` | count comments only on 3Speak videos |
+| `ENGAGE_COLLECTION` | `user-engagement` | where rows are stored |
+| `ENGAGE_CACHE_TTL_MS` | `600000` | in-process affinity cache TTL |
+| `ENGAGE_MAX_USERS` | `5000` | LRU cap on cached affinities |
+| `ENGAGE_SYNC_TTL_MS` | `21600000` | how stale a row may get (6h) |
+| `ENGAGE_SYNC_INTERVAL_SEC` | `60` | queue drain tick |
+| `ENGAGE_SYNC_CONCURRENCY` | `2` | concurrent viewer syncs |
+| `ENGAGE_SYNC_PER_TICK` | `10` | max dequeued per tick |
+| `ENGAGE_MAX_COMMENT_PAGES` | `30` | backstop on the Hive walk |
+| `ENGAGE_MAX_AUTHORS` / `_TOPICS` | `200` / `30` | stored per row |
+
+---
+
 ---
 
 # Discover feed (`GET /feeds/discover`)

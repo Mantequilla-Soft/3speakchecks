@@ -45,6 +45,7 @@ const { DISCOVER_AGE_STRATIFY, DISCOVER_AGE_WEIGHTS, DISCOVER_INTEREST_SHARE } =
 const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
 const { getFollowSetForReq, applyFollowBoost } = require('../utils/followBoost');
 const { getPremiumSet, applyPremiumBoost } = require('../utils/premiumBoost');
+const { getEngagementAffinity, applyEngagementBoost } = require('../utils/engagementBoost');
 const { getSuggestedCreators } = require('../utils/suggestedCreators');
 const { attachTopicTags } = require('../utils/topicTag');
 const { SUGGEST_MAX_LIMIT } = require('../utils/config');
@@ -101,6 +102,7 @@ router.get('/interests', async (req, res) => {
         // multiplier to apply here — just a mild recency tilt, the follow boost and jitter.
         const chrono = req.query.chrono === '1' || req.query.chrono === 'true';
         const followSet = getFollowSetForReq(req);
+        const affinity = await getEngagementAffinity(db, req.query.currentuser);
         const scored = candidates.map((e) => ({
             ...e,
             interest_match: true,
@@ -108,6 +110,10 @@ router.get('/interests', async (req, res) => {
         }));
         applyFollowBoost(scored, followSet, { scoreField: 'discover_score' });
         applyPremiumBoost(scored, getPremiumSet(db), { scoreField: 'discover_score' });
+        // Creators you replied to / reshared / saved, and the topics you do that in.
+        // AFTER applyFollowBoost: a creator you both follow and engage with takes the
+        // larger of the two multipliers, not their product (see engagementBoost.js).
+        applyEngagementBoost(scored, affinity, { scoreField: 'discover_score' });
 
         if (chrono) {
             scored.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
@@ -390,6 +396,7 @@ router.get('/discover', async (req, res) => {
         // newest-first — for interestsOnly it stays interest-filtered but chronological.
         const chrono = req.query.chrono === '1' || req.query.chrono === 'true';
         const followSet = getFollowSetForReq(req);
+        const affinity = await getEngagementAffinity(db, req.query.currentuser);
         const scored = candidates.map((e) => {
             // Tiered rather than a flat interest/not-interest split: an exact pick
             // outranks its neighbours, which outrank everything else. Pick
@@ -406,6 +413,11 @@ router.get('/discover', async (req, res) => {
         // this only tilts (×1.6, below the 2.5 interest multiplier), never filters.
         applyFollowBoost(scored, followSet, { scoreField: 'discover_score' });
         applyPremiumBoost(scored, getPremiumSet(db), { scoreField: 'discover_score' });
+        // Creators you engaged with in the last 90 days (commented / reshared / saved),
+        // and the topics you engage with, rank higher. Capped below the hand-picked
+        // interest multipliers, and applied AFTER the follow boost so the two don't
+        // compound for the same creator — see utils/engagementBoost.js.
+        applyEngagementBoost(scored, affinity, { scoreField: 'discover_score' });
 
         if (chrono) {
             scored.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
@@ -462,6 +474,8 @@ router.get('/discover', async (req, res) => {
                 v.comments = p.comments;
                 v.native_comments = p.native3Speak;
                 v.follow_match = !!p.follow_match;
+                v.engagement_match = !!p.engagement_match;
+                v.engagement_boost = p.engagement_boost;
                 v.retention_mult = p.retentionMult;
                 v.retention_relq = p.relQ;
                 v.retention_viewers = p.retentionViewers;

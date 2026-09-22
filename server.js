@@ -29,6 +29,7 @@ const adCreativeSync = require('./services/adCreativeSync');
 const adSettings = require('./utils/adSettings');
 const { scheduleDiscover } = require('./services/discover');
 const { scheduleCommentCounts } = require('./services/commentCounts');
+const { scheduleEngagementSync } = require('./services/engagementSync');
 
 // Routes
 const healthRoutes = require('./routes/health');
@@ -404,6 +405,12 @@ async function startServer() {
     // stamp them into video-comment-counts, so the feeds can apply a comment boost
     // cheaply. In-process (network I/O, not CPU) — see services/commentCounts.js.
     scheduleCommentCounts();
+
+    // Engagement affinity: per-viewer "whose videos do I engage with, and about
+    // what" for the discover/interests boost. DEMAND-SEEDED — the queue is filled by
+    // viewers who actually request a feed, so Hive load tracks real traffic rather
+    // than the size of the user table. In-process, like commentCounts above.
+    scheduleEngagementSync();
 
     // Feed card stats (payout/votes/comments): drain the lazily-built refresh queue
     // from Hive into `video-stats`. Populated by what the feeds actually serve —

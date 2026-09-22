@@ -426,8 +426,104 @@ async function fetchCommentReplyCounts(authorPerms, { batchSize = 20 } = {}) {
     return results;
 }
 
+
+/* A single (non-batched) JSON-RPC call that actually FAILS OVER.
+ *
+ * hiveRpcBatch returns whatever the first endpoint answers, and a node that replies
+ * `{"error": ...}` with HTTP 200 counts as an answer — fine for the batch callers,
+ * which tolerate missing entries, but not here: one endpoint in the default list
+ * does exactly that for `bridge.*` (it is not a hivemind node), so without this the
+ * comment walk would return nothing and every viewer would silently read as having
+ * engaged with no one. See the hivemind-probe trap in the frontend for the same bug
+ * in the other direction.
+ */
+async function hiveRpcCall(method, params) {
+    for (const endpoint of HIVE_RPC_ENDPOINTS) {
+        try {
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+                signal: AbortSignal.timeout(15000),
+            });
+            const json = await response.json();
+            if (json && json.error) continue;            // node answered, but can't serve this
+            if (json && json.result !== undefined) return json.result;
+        } catch (error) {
+            // Try the next endpoint. A total outage returns null, which every caller
+            // treats as "no data", never as "the answer is empty".
+        }
+    }
+    return null;
+}
+
+// bridge returns a comment's root post in `url`: "/<category>/@<root_author>/<root_permlink>#@<author>/<permlink>".
+// The root author is the CREATOR whose video the conversation hangs under, which is
+// what a discovery boost cares about — `parent_author` on a nested reply is just the
+// person replied to, who may not have posted anything at all.
+const ROOT_FROM_URL = /^\/[^/]+\/@([^/]+)\/([^#?]+)/;
+
+/* Every comment an account wrote since `sinceMs`, newest first.
+ *
+ * 🚨 `bridge.get_account_posts` caps `limit` at 20 — asking for 100 is an assert
+ * failure on the node, not a silent clamp — so 90 days of an active commenter is a
+ * short paged walk (measured: 8 pages / 155 comments / ~1.1s for a busy account,
+ * 2 pages / 28 comments / ~0.23s for a quiet one). The walk stops at the first
+ * comment older than the cutoff, at the end of the account's comments, or at
+ * `maxPages`, which is a backstop against an unbounded scan rather than a limit
+ * anyone is expected to reach.
+ *
+ * Each page repeats the item it was anchored on, so the anchor is skipped rather
+ * than counted twice.
+ *
+ * @returns {Promise<Array<{author,permlink,parent_author,root_author,root_permlink,created,depth}>>}
+ */
+async function fetchAccountComments(account, sinceMs, { maxPages = 30 } = {}) {
+    const acct = String(account || '').trim().toLowerCase().replace(/^@/, '');
+    if (!acct) return [];
+
+    const out = [];
+    let startAuthor = '';
+    let startPermlink = '';
+
+    for (let page = 0; page < maxPages; page += 1) {
+        const res = await hiveRpcCall('bridge.get_account_posts', {
+            sort: 'comments', account: acct, limit: 20,
+            start_author: startAuthor, start_permlink: startPermlink,
+        });
+        if (!Array.isArray(res) || !res.length) break;
+
+        let reachedCutoff = false;
+        for (const c of res) {
+            if (startAuthor && c.author === startAuthor && c.permlink === startPermlink) continue;
+            const created = Date.parse(`${c.created}Z`);
+            if (!Number.isFinite(created)) continue;
+            if (created < sinceMs) { reachedCutoff = true; break; }
+            const m = ROOT_FROM_URL.exec(String(c.url || ''));
+            out.push({
+                author: c.author,
+                permlink: c.permlink,
+                parent_author: String(c.parent_author || '').toLowerCase(),
+                root_author: m ? m[1].toLowerCase() : String(c.parent_author || '').toLowerCase(),
+                root_permlink: m ? m[2] : c.parent_permlink,
+                created,
+                depth: c.depth,
+            });
+        }
+
+        const last = res[res.length - 1];
+        if (reachedCutoff || res.length < 20 || !last) break;
+        startAuthor = last.author;
+        startPermlink = last.permlink;
+    }
+
+    return out;
+}
+
 module.exports = {
     transfersSince,
+    hiveRpcCall,
+    fetchAccountComments,
     hiveRpcBatch,
     hiveReputationToScore,
     fetchHiveRewards,
