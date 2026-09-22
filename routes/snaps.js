@@ -24,6 +24,35 @@ const SNAP_APP = '3speak/snap'; // json_metadata.app our composer stamps on a sn
 // Community posts only surface in the home feed while they're fresh.
 const SNAP_FEED_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
+const { getCached, invalidate: dropCache } = require('../utils/feedCache');
+const { SNAP_FEED_CACHE_MS } = require('../utils/config');
+
+// ── Caches ────────────────────────────────────────────────────────────────────
+// Mongo is not in this datacentre and the round trip costs 110-390ms, which was the
+// entire cost of this feed: one trip for the snaps, plus a second for a signed-in
+// viewer's hides and interactions. Live, those three collections hold 22, 3 and 11
+// documents, so all three are cached whole and every per-viewer decision happens in
+// memory. Writes below invalidate their own cache, so hiding a snap or interacting
+// with one still takes effect on the very NEXT request; the TTL only bounds how
+// stale a snap written by another process can be.
+const SNAPS_KEY = 'snaps:recent';
+const HIDDEN_KEY = 'snaps:hidden';
+const INTERACT_KEY = 'snaps:interactions';
+
+// Widened by the TTL so a set built a minute ago still covers a window requested
+// now; the exact cutoff is applied per request.
+const loadSnaps = (db) => getCached(SNAPS_KEY, SNAP_FEED_CACHE_MS, () => db
+  .collection(COLLECTION)
+  .find({ created: { $gt: new Date(Date.now() - SNAP_FEED_MAX_AGE_MS - SNAP_FEED_CACHE_MS) } })
+  .sort({ created: -1 })
+  .toArray(), []);
+
+const loadHidden = (db) => getCached(HIDDEN_KEY, SNAP_FEED_CACHE_MS,
+  () => db.collection(HIDDEN_COLLECTION).find({}).toArray(), []);
+
+const loadInteractions = (db) => getCached(INTERACT_KEY, SNAP_FEED_CACHE_MS,
+  () => db.collection(INTERACT_COLLECTION).find({}, { projection: { user: 1, key: 1 } }).toArray(), []);
+
 // Callers may ask for a TIGHTER window than the default (Discover only wants the
 // last few days, so stale posts don't pad a browse surface). Clamped so a caller
 // can narrow but never widen past the default.
@@ -107,6 +136,7 @@ router.post('/snaps', async (req, res) => {
       indexedAt: new Date(),
     };
     await getDb().collection(COLLECTION).updateOne({ _id }, { $set: doc }, { upsert: true });
+    dropCache(SNAPS_KEY);      // a new snap must appear immediately, not in a minute
     res.json({ success: true, snap: { _id, ...doc } });
   } catch (err) {
     console.error('POST /snaps failed:', err);
@@ -158,41 +188,47 @@ router.get('/snaps-feed', async (req, res) => {
     const db = getDb();
     await ensureIndex();
 
-    const query = { created: { $gt: new Date(Date.now() - maxAgeMsFrom(req, SNAP_FEED_MAX_AGE_MS)) } };
-    if (req.query.nsfw !== 'true') query.nsfw = { $ne: true };
-
-    const ownerClause = {};
+    let following = null;
     if (scope === 'following') {
       if (!currentuser) return res.json({ success: true, snaps: [], page, limit, hasMore: false });
-      const following = await getFollowingList(currentuser);
-      if (!following || !following.length) return res.json({ success: true, snaps: [], page, limit, hasMore: false });
-      ownerClause.$in = following;
+      const list = await getFollowingList(currentuser);
+      if (!list || !list.length) return res.json({ success: true, snaps: [], page, limit, hasMore: false });
+      following = new Set(list);
     }
 
     // Per-viewer exclusions: hidden creators/posts + already-engaged snaps + the
     // viewer's OWN snaps (you see those on your profile's Community tab, not in
     // your own home feed).
+    let hiddenCreators = null;
+    let excludedKeys = null;
     if (currentuser) {
-      const [hides, interactions] = await Promise.all([
-        db.collection(HIDDEN_COLLECTION).find({ user: currentuser }).toArray(),
-        db.collection(INTERACT_COLLECTION).find({ user: currentuser }, { projection: { key: 1 } }).toArray(),
+      const [allHides, allInteractions] = await Promise.all([loadHidden(db), loadInteractions(db)]);
+      const hides = allHides.filter((h) => h.user === currentuser);
+      hiddenCreators = new Set([...hides.filter((h) => h.type === 'creator').map((h) => h.owner), currentuser]);
+      excludedKeys = new Set([
+        ...hides.filter((h) => h.type === 'post').map((h) => `${h.owner}/${h.permlink}`),
+        ...allInteractions.filter((i) => i.user === currentuser).map((i) => i.key),
       ]);
-      const hiddenCreators = hides.filter((h) => h.type === 'creator').map((h) => h.owner);
-      const excludedKeys = [
-        ...new Set([
-          ...hides.filter((h) => h.type === 'post').map((h) => `${h.owner}/${h.permlink}`),
-          ...interactions.map((i) => i.key),
-        ]),
-      ];
-      ownerClause.$nin = [...new Set([...hiddenCreators, currentuser])];
-      if (excludedKeys.length) query._id = { $nin: excludedKeys };
     }
-    if (Object.keys(ownerClause).length) query.owner = ownerClause;
 
-    // Fetch limit+1 to know if there's a next page.
-    const items = await db.collection(COLLECTION).find(query).sort({ created: -1 }).skip(skip).limit(limit + 1).toArray();
-    const hasMore = items.length > limit;
-    res.json({ success: true, snaps: items.slice(0, limit), page, limit, hasMore });
+    const cutoff = Date.now() - maxAgeMsFrom(req, SNAP_FEED_MAX_AGE_MS);
+    const allowNsfw = req.query.nsfw === 'true';
+    const all = await loadSnaps(db);
+    const matching = all.filter((sn) => (
+      new Date(sn.created).getTime() > cutoff
+      && (allowNsfw || sn.nsfw !== true)
+      && (!following || following.has(sn.owner))
+      && (!hiddenCreators || !hiddenCreators.has(sn.owner))
+      && (!excludedKeys || !excludedKeys.has(sn._id))
+    ));
+
+    res.json({
+      success: true,
+      snaps: matching.slice(skip, skip + limit),
+      page,
+      limit,
+      hasMore: matching.length > skip + limit,
+    });
   } catch (err) {
     console.error('GET /snaps-feed failed:', err);
     res.status(500).json({ success: false, error: 'internal error' });
@@ -218,6 +254,7 @@ router.post('/snaps/interaction', async (req, res) => {
       { $set: { user, key, at: new Date() } },
       { upsert: true },
     );
+    dropCache(INTERACT_KEY);   // the snap must stop surfacing on the NEXT request
     res.json({ success: true });
   } catch (err) {
     console.error('POST /snaps/interaction failed:', err);
@@ -234,6 +271,7 @@ async function setHide(res, { user, owner, permlink, type, remove }) {
   const col = getDb().collection(HIDDEN_COLLECTION);
   if (remove) await col.deleteOne({ _id });
   else await col.updateOne({ _id }, { $set: { user, type, owner, permlink: type === 'post' ? permlink : null, at: new Date() } }, { upsert: true });
+  dropCache(HIDDEN_KEY);       // hiding must take effect on the NEXT request
   return res.json({ success: true });
 }
 

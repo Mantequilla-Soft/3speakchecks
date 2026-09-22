@@ -22,6 +22,8 @@ const excludedCreators = () => [...hiddenListSync(), ...LEADERBOARD_EXCLUDED_USE
 const router = express.Router();
 const { getDb } = require('../utils/db');
 const { expandTag } = require('../utils/interestTags');
+const { getCached } = require('../utils/feedCache');
+const { LEADERBOARD_CACHE_MS } = require('../utils/config');
 
 const COLLECTION = 'leaderboard';
 
@@ -112,6 +114,50 @@ function normalize(doc) {
 }
 
 /**
+ * Every row for one window, cached.
+ *
+ * Mongo is not in this datacentre: the round trip costs 110-390ms, so these routes
+ * were paying 2 of them each and /leaderboard/badges paid up to THIRTY TWO (four
+ * windows x eight metrics, each an unbatched countDocuments in a nested loop).
+ *
+ * The boards are a precomputed rollup -- every row carries its own from/to/updated_at
+ * -- so nothing here is live data, and 13,783 rows across all four windows is ~4.8MB.
+ * Caching the window and doing the ranking in memory turns all of it into zero round
+ * trips. Same idea as the topicsCache already in this file, just for the main boards.
+ *
+ * ⚠️ Rows are cached UNFILTERED. `excludedCreators()` reads a live hidden-creators
+ * list that can change between requests, so the exclusion is applied per request,
+ * never baked into the cache.
+ */
+function loadWindow(db, window) {
+  return getCached(`leaderboard:${window}`, LEADERBOARD_CACHE_MS, () => db
+    .collection(COLLECTION)
+    .find({ window }, { projection: projection() })
+    .toArray(), []);
+}
+
+// Mongo's `{ [metric]: -1, user: 1 }`, reproduced exactly. Hive account names are
+// ASCII (`[a-z][a-z0-9.-]{2,15}`), so JS string order and Mongo's binary collation
+// agree; the byte-identical route comparison checks that rather than trusting it.
+const byMetric = (metric) => (a, b) => (
+  (b[metric] || 0) - (a[metric] || 0)
+  || (String(a.user) < String(b.user) ? -1 : String(a.user) > String(b.user) ? 1 : 0)
+);
+
+/** Rows with a non-zero metric, minus currently-excluded creators, ranked. */
+function rankedBoard(rows, metric) {
+  const excluded = new Set(excludedCreators());
+  return rows
+    .filter((d) => (d[metric] || 0) > 0 && !excluded.has(d.user))
+    .sort(byMetric(metric));
+}
+
+// How many users are strictly ahead on this metric. NOTE: deliberately NOT
+// exclusion-filtered — the countDocuments call this replaces wasn't either, and a
+// rank that changed depending on the hidden list would be a behaviour change.
+const aheadOf = (rows, metric, value) => rows.reduce((n, d) => n + ((d[metric] || 0) > value ? 1 : 0), 0);
+
+/**
  * GET /leaderboard?window=7d&metric=video_uploads&limit=50&page=1
  *
  * One ranked board. Rows with a zero value for the sorted metric are excluded —
@@ -127,18 +173,9 @@ router.get('/leaderboard', async (req, res) => {
     const skip = (page - 1) * limit;
 
     const db = getDb();
-    const col = db.collection(COLLECTION);
-    const filter = { window, [metric]: { $gt: 0 }, user: { $nin: excludedCreators() } };
-
-    // (window, metric) has its own index, so this sort is served by it.
-    const [docs, total] = await Promise.all([
-      col.find(filter, { projection: projection() })
-        .sort({ [metric]: -1, user: 1 })
-        .skip(skip)
-        .limit(limit)
-        .toArray(),
-      col.countDocuments(filter),
-    ]);
+    const ranked = rankedBoard(await loadWindow(db, window), metric);
+    const total = ranked.length;
+    const docs = ranked.slice(skip, skip + limit);
 
     const first = docs[0] || null;
     res.json({
@@ -173,20 +210,16 @@ router.get('/leaderboard/summary', async (req, res) => {
     const limit = parseLimit(req.query.limit, 10, 50);
 
     const db = getDb();
-    const col = db.collection(COLLECTION);
+    const rows = await loadWindow(db, window);
 
-    const boards = await Promise.all(METRICS.map(async (metric) => {
-      const docs = await col
-        .find({ window, [metric]: { $gt: 0 }, user: { $nin: excludedCreators() } }, { projection: projection() })
-        .sort({ [metric]: -1, user: 1 })
-        .limit(limit)
-        .toArray();
+    const boards = METRICS.map((metric) => {
+      const docs = rankedBoard(rows, metric).slice(0, limit);
       return [metric, {
         metric,
         ...metaFor(window, metric, docs[0] ? docs[0].from : null),
         entries: docs.map((d, i) => ({ rank: i + 1, ...normalize(d) })),
       }];
-    }));
+    });
 
     const any = boards.map(([, b]) => b.entries[0]).find(Boolean);
     res.json({
@@ -221,8 +254,8 @@ router.get('/leaderboard/user/:username', async (req, res) => {
     const window = parseWindow(req.query.window);
 
     const db = getDb();
-    const col = db.collection(COLLECTION);
-    const doc = await col.findOne({ window, user: username }, { projection: projection() });
+    const rows = await loadWindow(db, window);
+    const doc = rows.find((d) => d.user === username) || null;
 
     if (!doc) {
       const zero = Object.fromEntries(METRICS.map(m => [m, 0]));
@@ -236,12 +269,11 @@ router.get('/leaderboard/user/:username', async (req, res) => {
       });
     }
 
-    const ranks = await Promise.all(METRICS.map(async (metric) => {
+    const ranks = METRICS.map((metric) => {
       const value = doc[metric] || 0;
       if (value <= 0) return [metric, null];
-      const ahead = await col.countDocuments({ window, [metric]: { $gt: value } });
-      return [metric, ahead + 1];
-    }));
+      return [metric, aheadOf(rows, metric, value) + 1];
+    });
 
     res.json({
       success: true,
@@ -447,12 +479,15 @@ router.get('/leaderboard/badges/:username', async (req, res) => {
     }
 
     const db = getDb();
-    const col = db.collection(COLLECTION);
-
-    const docs = await col
-      .find({ user: username }, { projection: projection() })
-      .toArray();
-    const byWindow = new Map(docs.map(d => [d.window, d]));
+    // All four windows at once. Every countDocuments below then becomes an in-memory
+    // pass, which is what removes the 32 sequential round trips.
+    const windows = await Promise.all(WINDOWS.map((w) => loadWindow(db, w)));
+    const rowsByWindow = new Map(WINDOWS.map((w, i) => [w, windows[i]]));
+    const byWindow = new Map();
+    for (const w of WINDOWS) {
+      const mine = (rowsByWindow.get(w) || []).find((d) => d.user === username);
+      if (mine) byWindow.set(w, mine);
+    }
 
     // best[metric] = the strongest tier this user holds on that metric, across windows.
     const best = new Map();
@@ -462,8 +497,7 @@ router.get('/leaderboard/badges/:username', async (req, res) => {
       for (const metric of METRICS) {
         const value = doc[metric] || 0;
         if (value <= 0) continue;
-        const ahead = await col.countDocuments({ window, [metric]: { $gt: value } });
-        const rank = ahead + 1;
+        const rank = aheadOf(rowsByWindow.get(window) || [], metric, value) + 1;
         const tier = tierFor(rank);
         if (!tier) continue;
         const current = best.get(metric);
