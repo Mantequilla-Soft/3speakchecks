@@ -7,6 +7,8 @@ const {
     VIDEO_HIVE_SYNC_FRESH_DAYS,
     VIDEO_HIVE_SYNC_FRESH_RECHECK_MIN,
     VIDEO_HIVE_SYNC_RECHECK_DAYS,
+    VIDEO_HIVE_SYNC_VERIFY_BATCH,
+    VIDEO_HIVE_SYNC_VERIFY_DAYS,
 } = require('../utils/config');
 
 // Video → Hive link sync. The embed-video twin of services/audioHiveSync.js.
@@ -40,6 +42,17 @@ const {
 //
 // Additive only: never overwrites an existing hive_permlink, and title/body/tags
 // are filled only where the doc has none.
+//
+// Third path, added 2026-09-23: VERIFY the links that already exist. A link that
+// was right when it was written still rots when the post is deleted, and the two
+// paths above only ever look at rows with NO link, so a rotted one was never
+// revisited. That is not theoretical: a client that publishes a snap twice and
+// then drops one leaves the doc pointing at the deleted twin, which is exactly
+// what happened to rachaeldwatson/mlh6no57 (two snaps three seconds apart,
+// ...-592 deleted, ...-397 live with five replies on it). Downstream the short
+// then takes no comments and no votes, and the shorts panel simply looks broken.
+// Measured the same day: ~0.5% of linked published docs (roughly 45 rows) point
+// at a deleted post, and none of them were written by this worker.
 
 const RPC_BATCH = 20;
 // Bitmask for filtering account_history to comment_operation (op id 1) = 1 << 1.
@@ -47,6 +60,11 @@ const RPC_BATCH = 20;
 // snap-style shorts are exactly that, so the raw ops are the only way to see them.
 const COMMENT_OP_FILTER_LOW = 2;
 const HISTORY_OPS = 100;
+// The repair path walks much deeper: it runs only for a doc whose link is already
+// known to be dead (rare), and the post it is looking for can be days old. 100 ops
+// covers less than two days for a chatty account -- rachaeldwatson's snap sat at
+// depth ~200, so the shallow budget would have declared it unrecoverable.
+const REPAIR_HISTORY_OPS = 1000;
 const OWNER_DELAY_MS = 500;
 
 // "@author/permlink" -> { author, permlink }. Anything else is not a usable link.
@@ -120,6 +138,55 @@ function linkOp(doc, post) {
     };
 }
 
+// A link that was checked and still resolves. Only the stamp moves, so the pass
+// paces itself off `hive_link_verified_at` instead of re-reading the chain for
+// every linked doc on every run.
+function verifiedOp(doc) {
+    return {
+        updateOne: {
+            filter: { _id: doc._id },
+            update: { $set: { hive_link_verified_at: new Date() } },
+        },
+    };
+}
+
+// Repoint a doc whose linked post is gone at the live one. The filter re-asserts
+// the dead permlink so a concurrent write elsewhere wins instead of being
+// clobbered. hive_title/hive_body/hive_tags keep metadataFill's "only where
+// empty" rule: a duplicate twin carries the same text anyway, and overwriting
+// would throw away a title somebody curated by hand.
+function repairOp(doc, post) {
+    return {
+        updateOne: {
+            filter: { _id: doc._id, hive_permlink: doc.hive_permlink },
+            update: {
+                $set: {
+                    hive_author: post.author,
+                    hive_permlink: post.permlink,
+                    embed_url: `@${post.author}/${post.permlink}`,
+                    hive_link_synced_at: new Date(),
+                    hive_link_verified_at: new Date(),
+                    hive_link_repaired_at: new Date(),
+                    ...metadataFill(doc, post),
+                },
+            },
+        },
+    };
+}
+
+// The linked post is gone and nothing live references the asset. The dead link is
+// LEFT IN PLACE on purpose: nulling it would hand the doc straight back to path 1,
+// which reads the equally dead embed_url, and other collections join on the pair.
+// The stamp is what lets a human (or a query) find these.
+function deadOp(doc) {
+    return {
+        updateOne: {
+            filter: { _id: doc._id },
+            update: { $set: { hive_link_verified_at: new Date(), hive_link_dead_at: new Date() } },
+        },
+    };
+}
+
 // Stamp a miss so a doc whose post we cannot find stops being re-fetched every run.
 function stampOp(doc) {
     return {
@@ -132,12 +199,12 @@ function stampOp(doc) {
 
 // The owner's recent comment operations, shaped like posts. Used only for docs
 // with no embed_url to go on.
-async function getRecentComments(account) {
+async function getRecentComments(account, depth = HISTORY_OPS) {
     const [res] = await hiveRpcBatch([{
         jsonrpc: '2.0',
         id: 1,
         method: 'condenser_api.get_account_history',
-        params: [account, -1, HISTORY_OPS, COMMENT_OP_FILTER_LOW, 0],
+        params: [account, -1, depth, COMMENT_OP_FILTER_LOW, 0],
     }]);
     const ops = Array.isArray(res?.result) ? res.result : [];
     const posts = [];
@@ -155,14 +222,154 @@ async function getRecentComments(account) {
     return posts;
 }
 
+// Of the owner's comment ops that reference this asset, the newest one that is
+// STILL ON CHAIN.
+//
+// The existence check is the point. account_history keeps the comment op of a post
+// that was later deleted, so an op proves only that something was published once —
+// matching on ops alone is how a doc ends up linked to a deleted twin, and the
+// duplicate-publish case guarantees there are two ops to choose from. Newest first
+// because when a client publishes twice it is the first attempt that gets dropped.
+async function pickLivePost(posts, assetPermlink, excludePermlink = null) {
+    const candidates = [];
+    for (let i = posts.length - 1; i >= 0; i -= 1) {   // account_history is oldest-first
+        const p = posts[i];
+        if (excludePermlink && p.permlink === excludePermlink) continue;
+        if (postReferencesAsset(p, assetPermlink)) candidates.push(p);
+    }
+    if (candidates.length === 0) return null;
+
+    const slice = candidates.slice(0, RPC_BATCH);
+    const results = await hiveRpcBatch(slice.map((c, idx) => ({
+        jsonrpc: '2.0',
+        id: idx,
+        method: 'condenser_api.get_content',
+        params: [c.author, c.permlink],
+    })));
+    const live = new Map();
+    for (const r of results) {
+        if (r?.result?.author) live.set(r.id, r.result);
+    }
+    for (let idx = 0; idx < slice.length; idx += 1) {
+        if (live.has(idx)) return live.get(idx);
+    }
+    return null;
+}
+
+/**
+ * Re-check the links that already exist, and repoint the ones that have rotted.
+ * @returns {{ checked: number, verified: number, repaired: number, dead: number, errors: number }}
+ */
+async function verifyLinkedDocs(ev) {
+    const out = { checked: 0, verified: 0, repaired: 0, dead: 0, errors: 0 };
+    if (!(VIDEO_HIVE_SYNC_VERIFY_BATCH > 0)) return out;
+
+    const staleCutoff = new Date(Date.now() - VIDEO_HIVE_SYNC_VERIFY_DAYS * 24 * 60 * 60 * 1000);
+    const docs = await ev.find({
+        status: 'published',
+        hive_permlink: { $ne: null, $exists: true },
+        $or: [
+            { hive_link_verified_at: { $exists: false } },
+            { hive_link_verified_at: { $lt: staleCutoff } },
+        ],
+    })
+        .project({ owner: 1, permlink: 1, hive_author: 1, hive_permlink: 1, hive_title: 1, hive_body: 1, hive_tags: 1, createdAt: 1 })
+        .sort({ createdAt: -1 })   // a fresh rot is the one still worth repairing
+        .limit(VIDEO_HIVE_SYNC_VERIFY_BATCH)
+        .toArray();
+
+    out.checked = docs.length;
+    if (docs.length === 0) return out;
+
+    const ops = [];
+    const broken = [];
+
+    for (let i = 0; i < docs.length; i += RPC_BATCH) {
+        const slice = docs.slice(i, i + RPC_BATCH);
+        let results;
+        try {
+            results = await hiveRpcBatch(slice.map((d, idx) => ({
+                jsonrpc: '2.0',
+                id: idx,
+                method: 'condenser_api.get_content',
+                params: [d.hive_author || d.owner, d.hive_permlink],
+            })));
+        } catch (err) {
+            console.error('[videoHiveSync] verify batch failed:', err.message);
+            out.errors++;
+            continue;   // unstamped: it comes round again next run
+        }
+        for (const r of results) {
+            const doc = slice[r?.id];
+            if (!doc) continue;
+            if (r.result && r.result.author) {
+                // Still there. A post that no longer MENTIONS the asset is left
+                // alone deliberately: postReferencesAsset is a heuristic, and
+                // acting on it here would unlink rows that are perfectly fine.
+                ops.push(verifiedOp(doc));
+                out.verified++;
+                continue;
+            }
+            broken.push(doc);
+        }
+    }
+
+    // Everything below runs only for a link that is already known to be dead.
+    const byOwner = new Map();
+    for (const doc of broken) {
+        if (!byOwner.has(doc.owner)) byOwner.set(doc.owner, []);
+        byOwner.get(doc.owner).push(doc);
+    }
+    for (const [owner, items] of byOwner) {
+        let posts;
+        try {
+            posts = await getRecentComments(owner, REPAIR_HISTORY_OPS);
+        } catch (err) {
+            console.error(`[videoHiveSync] repair history walk failed for ${owner}:`, err.message);
+            out.errors++;
+            continue;   // unstamped on purpose: retry next run rather than call it dead
+        }
+        for (const doc of items) {
+            let live = null;
+            try {
+                live = await pickLivePost(posts, doc.permlink, doc.hive_permlink);
+            } catch (err) {
+                console.error(`[videoHiveSync] repair lookup failed for ${owner}/${doc.permlink}:`, err.message);
+                out.errors++;
+                continue;
+            }
+            if (live) {
+                ops.push(repairOp(doc, live));
+                out.repaired++;
+                console.log(`[videoHiveSync] repaired ${doc.owner}/${doc.permlink}: @${doc.hive_author || doc.owner}/${doc.hive_permlink} is gone -> @${live.author}/${live.permlink}`);
+            } else {
+                ops.push(deadOp(doc));
+                out.dead++;
+                console.warn(`[videoHiveSync] dead link ${doc.owner}/${doc.permlink} -> @${doc.hive_author || doc.owner}/${doc.hive_permlink} (no live post references the asset)`);
+            }
+        }
+        await new Promise((r) => setTimeout(r, OWNER_DELAY_MS));
+    }
+
+    if (ops.length && ENABLE_MONGO_WRITES) {
+        await ev.bulkWrite(ops, { ordered: false });
+    }
+    return out;
+}
+
 /**
  * Run one batch of embed-video -> Hive link resolution.
- * @returns {{ scanned: number, linked: number, missed: number, errors: number }}
+ * @returns {{ scanned: number, linked: number, missed: number, errors: number, verify: object }}
  */
 async function syncVideoHiveLinks() {
     const db = getDb();
     const ev = db.collection('embed-video');
     const now = Date.now();
+
+    // Before spending the run on rows with no link, re-check the ones that have
+    // one. The backlog query below can never see a rotted link, because it only
+    // selects rows where hive_permlink is null.
+    const verify = await verifyLinkedDocs(ev);
 
     // An asset can legitimately exist before its post does (upload, then publish
     // later), so a miss is not permanent. Recent docs are retried on a short
@@ -189,7 +396,12 @@ async function syncVideoHiveLinks() {
         .limit(VIDEO_HIVE_SYNC_BATCH)
         .toArray();
 
-    if (docs.length === 0) return { scanned: 0, linked: 0, missed: 0, errors: 0 };
+    if (docs.length === 0) {
+        if (verify.checked) {
+            console.log(`[videoHiveSync] backlog empty; verified ${verify.checked} existing links, repaired ${verify.repaired}, dead ${verify.dead}, errors ${verify.errors}${ENABLE_MONGO_WRITES ? '' : ' [WRITES DISABLED]'}`);
+        }
+        return { scanned: 0, linked: 0, missed: 0, errors: verify.errors, verify };
+    }
 
     const direct = [];   // embed_url tells us which post to verify
     const search = [];   // nothing to go on — walk the owner's history
@@ -260,7 +472,11 @@ async function syncVideoHiveLinks() {
         try {
             const posts = await getRecentComments(owner);
             for (const doc of items) {
-                const match = posts.find((p) => postReferencesAsset(p, doc.permlink));
+                // Not posts.find(): that took the OLDEST matching op and never
+                // asked whether the post still exists, so a client that published
+                // twice and dropped its first attempt got the doc linked to the
+                // deleted one.
+                const match = await pickLivePost(posts, doc.permlink);
                 if (match) {
                     ops.push(linkOp(doc, match));
                     linked++;
@@ -280,8 +496,14 @@ async function syncVideoHiveLinks() {
         await ev.bulkWrite(ops, { ordered: false });
     }
 
-    console.log(`[videoHiveSync] scanned ${docs.length} (${direct.length} by embed_url, ${search.length} by history), linked ${linked}, missed ${missed}, errors ${errors}${ENABLE_MONGO_WRITES ? '' : ' [WRITES DISABLED]'}`);
-    return { scanned: docs.length, linked, missed, errors };
+    console.log(`[videoHiveSync] scanned ${docs.length} (${direct.length} by embed_url, ${search.length} by history), linked ${linked}, missed ${missed}, errors ${errors}; verified ${verify.checked} existing (repaired ${verify.repaired}, dead ${verify.dead})${ENABLE_MONGO_WRITES ? '' : ' [WRITES DISABLED]'}`);
+    return { scanned: docs.length, linked, missed, errors: errors + verify.errors, verify };
 }
 
-module.exports = { syncVideoHiveLinks, parseEmbedUrl, postReferencesAsset };
+module.exports = {
+    syncVideoHiveLinks,
+    verifyLinkedDocs,
+    pickLivePost,
+    parseEmbedUrl,
+    postReferencesAsset,
+};

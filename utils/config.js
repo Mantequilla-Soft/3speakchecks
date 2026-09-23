@@ -633,6 +633,19 @@ module.exports = {
     VIDEO_HIVE_SYNC_FRESH_DAYS: parseInt(process.env.VIDEO_HIVE_SYNC_FRESH_DAYS) || 7,
     VIDEO_HIVE_SYNC_FRESH_RECHECK_MIN: parseInt(process.env.VIDEO_HIVE_SYNC_FRESH_RECHECK_MIN) || 30,
     VIDEO_HIVE_SYNC_RECHECK_DAYS: parseInt(process.env.VIDEO_HIVE_SYNC_RECHECK_DAYS) || 7,
+    // A link that was correct when it was written can still rot: a post gets
+    // deleted, and the row keeps pointing at a permlink that is no longer on
+    // chain. Measured 2026-09-23: 3 of a random 600 linked published docs (~0.5%,
+    // so roughly 45 rows) point at a deleted post, and NONE of them were written
+    // by this worker -- they all came from the upstream indexer. Each one is a
+    // video or short that quietly takes no comments and no votes. This pass
+    // re-checks linked docs on a slow cadence and repoints them when the real
+    // post can still be found. 0 disables it.
+    VIDEO_HIVE_SYNC_VERIFY_BATCH: parseInt(process.env.VIDEO_HIVE_SYNC_VERIFY_BATCH) || 40,
+    // How long a verified link is trusted before it is checked again. At 40 docs
+    // per 10min run the whole collection comes round in well under a day, so this
+    // is what actually paces the pass.
+    VIDEO_HIVE_SYNC_VERIFY_DAYS: parseInt(process.env.VIDEO_HIVE_SYNC_VERIFY_DAYS) || 14,
 
     // --- Ad platform: intake, approval gate, inventory forecast ---
     // Advertisers apply, a human approves, and only an approved record can hold a
