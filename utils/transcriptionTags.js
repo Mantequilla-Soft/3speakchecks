@@ -11,6 +11,9 @@
  * 27 topics) written by the background tagger. They live alongside the v1 `tags`
  * and are returned additively as `tagsV2` — v1 consumers are untouched.
  *
+ * The same pipeline also writes `ai_generated_v2`, surfaced here as `aiGenerated`.
+ * The watch page and the shorts panel draw a small AI badge off it.
+ *
  * NOTE: `subtitles-tags.tags_v2` (a comma STRING of v2 slugs) is a different field
  * from the `tags_v2` ARRAY on video/embed-video docs (lowercased Hive tags). Same
  * name, different collections, different meaning — don't mix them up.
@@ -35,6 +38,13 @@ const V2_PROJECTION = {
   tag_model_v2: 1,
   tagged_v2_at: 1,
   unavailableOnTagging: 1,
+  // AI-generation detection, written by the same pipeline (backfill started
+  // 2026-09-23). Three states, and they are not the same thing: true = detected,
+  // false = looked at and not detected, absent = never looked at. Only an
+  // explicit `true` earns the badge.
+  ai_generated_v2: 1,
+  ai_generated_evidence_v2: 1,
+  ai_generated_checked_at: 1,
 };
 
 const shape = (doc, assetPermlink, resolvedVia) => ({
@@ -47,12 +57,19 @@ const shape = (doc, assetPermlink, resolvedVia) => ({
   tagModelV2: doc?.tag_model_v2 || null,
   taggedV2At: doc?.tagged_v2_at || null,
   unavailableOnTagging: doc?.unavailableOnTagging === true,
+  // --- AI-generation detection (additive) ---
+  // Strict `=== true`: a row the detector has not reached yet must not read as
+  // "not AI", and must never read as AI either.
+  aiGenerated: doc?.ai_generated_v2 === true,
+  aiGeneratedEvidence: Array.isArray(doc?.ai_generated_evidence_v2) ? doc.ai_generated_evidence_v2 : [],
+  aiGeneratedCheckedAt: doc?.ai_generated_checked_at || null,
 });
 
 /**
  * @returns {Promise<{tags:string[], assetPermlink:string|null, resolvedVia:'direct'|'embed'|'none',
  *   taggedAt:Date|null, tagsV2:string[], tagModelV2:string|null, taggedV2At:Date|null,
- *   unavailableOnTagging:boolean}>}
+ *   unavailableOnTagging:boolean, aiGenerated:boolean, aiGeneratedEvidence:string[],
+ *   aiGeneratedCheckedAt:Date|null}>}
  */
 async function getTranscriptionTags(db, authorRaw, permlinkRaw) {
   const author = String(authorRaw || '').trim().toLowerCase().replace(/^@/, '');
