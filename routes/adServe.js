@@ -36,6 +36,7 @@ const { getDb } = require('../utils/db');
 const { adDecision, isPremiumViewer } = require('../utils/adEligibility');
 const {
   AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_IMPRESSIONS_COLLECTION, ADVERTISERS_COLLECTION,
+  AD_SELFPROMO_ALLOWED_OWNERS,
   AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, AD_SKIP_AFTER_SECONDS, AD_SKIP_MIN_SPOT_SECONDS,
   AD_BANNER_CLOSE_AFTER_SECONDS, AD_BANNER_FREQUENCY_CAP_MINUTES, AD_GATE_ALLOWED_UPLOADERS, ADS_STAGE,
   AD_COOLDOWN_MINUTES, AD_PACING_ENABLED, AD_PACING_MIN_FRACTION, AD_SESSION_RATE_PER_MIN,
@@ -302,7 +303,55 @@ function unwrapProxiedManifest(url) {
  * on purpose: the spot is a few seconds long, the viewer's player has no chance to
  * adapt within it, and a blurry ad is worth less than the bandwidth it saves.
  */
-async function loadAdSegments(adManifestUrl) {
+/**
+ * How many seconds of a creative may actually play.
+ *
+ * Normal spots are made to length, so this is null and every segment runs. A
+ * SELF-PROMO creative is somebody's published video: the flight bought fifteen
+ * seconds of it, not all ten minutes, so the booking becomes a trim.
+ */
+/**
+ * May a SELF-PROMO flight appear on this creator's content?
+ *
+ * A beta limit while the product is being proven, not targeting. Whoever is in
+ * AD_SELFPROMO_ALLOWED_OWNERS carries these ads; everyone else carries none.
+ *
+ * 🚨 EMPTY MEANS NO RESTRICTION, guarded on `.length` — the same shape as
+ * ADS_ALLOWED_OWNERS and AD_GATE_ALLOWED_UPLOADERS. Without that guard an empty
+ * list hits `[].includes(...)` and refuses everybody, which reads as "the feature
+ * is broken" rather than "the feature is open", and is exactly how the pre-upload
+ * gate once turned itself off platform-wide while still on sale.
+ */
+function selfPromoAllowedOn(owner) {
+  if (!AD_SELFPROMO_ALLOWED_OWNERS.length) return true;
+  return AD_SELFPROMO_ALLOWED_OWNERS.includes(String(owner || '').toLowerCase());
+}
+
+/** The candidate-query fragment that enforces it. */
+const selfPromoFilter = (owner) => (selfPromoAllowedOn(owner) ? {} : { selfPromo: { $ne: true } });
+
+function trimOf(creative) {
+  const n = Number(creative && creative.trimToSeconds);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * The length to tell the player the ad is.
+ *
+ * A trimmed creative must report the TRIM, never the media's own duration: the
+ * player builds its timeline and its skip button from this number, and a ten-minute
+ * answer for a fifteen-second spot would hold the viewer in an ad that ended long
+ * ago.
+ */
+function adSecondsFor(creative, campaign) {
+  const trim = trimOf(creative);
+  if (trim) return trim;
+  return Number(creative && creative.durationSeconds) || Number(campaign && campaign.spotSeconds) || null;
+}
+
+const extinfSeconds = (seg) => parseFloat((String(seg.extinf).match(/#EXTINF:\s*([\d.]+)/i) || [])[1]) || 0;
+
+async function loadAdSegments(adManifestUrl, trimToSeconds = null) {
   const master = await fetchText(adManifestUrl);
   let mediaUrl = master.url;
   if (isMaster(master.text)) {
@@ -331,7 +380,27 @@ async function loadAdSegments(adManifestUrl) {
     pendingExtinf = null;
   }
   if (!out.length) throw new Error('creative has no segments');
-  return out;
+
+  /* Cut to the booked length, at a segment boundary.
+   *
+   * HLS cannot express a cut inside a segment, so the spot is the longest run of
+   * whole segments that does NOT exceed what was booked — under, never over, which
+   * is the same contract every other creative is held to (the attach path refuses a
+   * spot longer than its slot). One segment is always kept: a booking shorter than
+   * the first segment would otherwise play nothing at all, and an empty ad block
+   * would splice a discontinuity into the content for no reason.
+   */
+  const trim = Number(trimToSeconds);
+  if (!Number.isFinite(trim) || trim <= 0) return out;
+  const kept = [];
+  let acc = 0;
+  for (const seg of out) {
+    const secs = extinfSeconds(seg);
+    if (kept.length && acc + secs > trim) break;
+    kept.push(seg);
+    acc += secs;
+  }
+  return kept;
 }
 
 /**
@@ -711,6 +780,9 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       const nowG = new Date();
       const candsG = await dbG.collection(AD_CAMPAIGNS_COLLECTION).find({
         format: 'upload_gate',
+        // Never here, whatever the beta list says: this surface interrupts somebody's
+        // work, and a creator's self-promotion is not what it exists to show.
+        selfPromo: { $ne: true },
         status: { $in: [STATES.SCHEDULED, STATES.RUNNING] },
         startAt: { $lte: nowG },
         endAt: { $gt: nowG },
@@ -762,6 +834,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         campaignId: pickG._id,
         creativeId: pickCrG._id,
         adManifestUrl: creativeManifestUrl(pickCrG),
+        adTrimSeconds: trimOf(pickCrG),
         contentManifestUrl: null,
         adFirstFetchAt: null,
         // Set when the viewer closes the banner; from then on segments serve unburned.
@@ -776,7 +849,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         capId,
         country,
         clickUrl: siteG,
-        adDurationSeconds: Number(pickCrG.durationSeconds) || Number(pickG.spotSeconds) || null,
+        adDurationSeconds: adSecondsFor(pickCrG, pickG),
         startedAt: new Date(),
         app,
         expiresAt: new Date(Date.now() + AD_SESSION_TTL_MINUTES * 60 * 1000),
@@ -786,7 +859,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         ad: null,
         uploadAd: {
           manifestUrl: `${baseG}/m/${sidG}/short.m3u8`,
-          durationSeconds: Number(pickCrG.durationSeconds) || Number(pickG.spotSeconds) || null,
+          durationSeconds: adSecondsFor(pickCrG, pickG),
           label: 'Sponsored',
           adKey: adKeyOf(pickG._id),
           advertiser: brandG ? brandG.projectName : null,
@@ -834,6 +907,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       const now2 = new Date();
       const cands = await db2.collection(AD_CAMPAIGNS_COLLECTION).find({
         format: 'shorts_roll',
+        ...selfPromoFilter(owner),
         status: { $in: [STATES.SCHEDULED, STATES.RUNNING] },
         startAt: { $lte: now2 },
         endAt: { $gt: now2 },
@@ -890,6 +964,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         campaignId: pickC._id,
         creativeId: pickCr._id,
         adManifestUrl: creativeManifestUrl(pickCr),
+        adTrimSeconds: trimOf(pickCr),
         // No content to stitch into — the spot IS the item. Kept null rather than
         // omitted so every reader downstream sees the shape it already handles.
         contentManifestUrl: null,
@@ -905,7 +980,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         capId,
         country,
         clickUrl: site2,
-        adDurationSeconds: Number(pickCr.durationSeconds) || Number(pickC.spotSeconds) || null,
+        adDurationSeconds: adSecondsFor(pickCr, pickC),
         startedAt: new Date(),
         app,
         expiresAt: new Date(Date.now() + AD_SESSION_TTL_MINUTES * 60 * 1000),
@@ -915,7 +990,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         ad: null,
         shortsAd: {
           manifestUrl: `${base2}/m/${sid2}/short.m3u8`,
-          durationSeconds: Number(pickCr.durationSeconds) || Number(pickC.spotSeconds) || null,
+          durationSeconds: adSecondsFor(pickCr, pickC),
           label: 'Sponsored',
           adKey: adKeyOf(pickC._id),
           advertiser: brandDoc2 ? brandDoc2.projectName : null,
@@ -973,6 +1048,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     }
 
     const candidates = await db.collection(AD_CAMPAIGNS_COLLECTION).find({
+      ...selfPromoFilter(owner),
       status: { $in: [STATES.SCHEDULED, STATES.RUNNING] },
       startAt: { $lte: now },
       endAt: { $gt: now },
@@ -1093,6 +1169,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       campaignId: campaign ? campaign._id : null,
       creativeId: creative ? creative._id : null,
       adManifestUrl: creativeManifestUrl(creative),
+      adTrimSeconds: trimOf(creative),
       // Stored unwrapped: the scope check on nested playlists is only meaningful
       // against the manifest's real origin.
       contentManifestUrl: unwrapProxiedManifest(contentManifestUrl),
@@ -1365,7 +1442,7 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
 
     // A banner-only playback has no roll to splice: the playlist is already correct.
     if (session.adManifestUrl) {
-      const adSegments = await loadAdSegments(session.adManifestUrl);
+      const adSegments = await loadAdSegments(session.adManifestUrl, session.adTrimSeconds);
 
       /* 🚨 DOES THIS SPOT'S AUDIO MATCH THE VIDEO IT IS GOING INTO?
        *
@@ -1807,7 +1884,7 @@ router.get('/:sid/short.m3u8', servingVisible, async (req, res) => {
     }
     if (!session.adManifestUrl) return res.status(404).send('no spot on this session');
 
-    const segments = await loadAdSegments(session.adManifestUrl);
+    const segments = await loadAdSegments(session.adManifestUrl, session.adTrimSeconds);
     if (!segments.length) return res.status(502).send('unavailable');
 
     const publicBase = publicBaseOf(req);
@@ -2185,7 +2262,7 @@ router.get('/:sid/:n', servingVisible, async (req, res) => {
     if (!session) return res.status(404).send('expired');
 
     if (!session.adManifestUrl) return res.status(404).send('no spot on this session');
-    const segments = await loadAdSegments(session.adManifestUrl);
+    const segments = await loadAdSegments(session.adManifestUrl, session.adTrimSeconds);
     const mid = n.startsWith('am') ? parseInt(n.slice(2), 10) : null;
     const seg = mid != null ? segments[mid] : (n === 'a' ? segments[0] : segments[segments.length - 1]);
     if (!seg) return res.status(404).send('no such segment');
@@ -2246,3 +2323,7 @@ router.get('/:sid/:n', servingVisible, async (req, res) => {
 });
 
 module.exports = router;
+/* Reachable for scripts/test-ad-selfpromo.cjs. The trim rule is arithmetic on a
+ * segment list with a boundary condition, which is exactly the kind of thing that
+ * is cheap to test directly and expensive to test through a live playback. */
+module.exports.__test = { trimOf, adSecondsFor, selfPromoAllowedOn, loadAdSegments };

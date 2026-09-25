@@ -63,6 +63,7 @@ const streamStatsRoutes = require('./routes/streamStats');
 const subtitleProxyRoutes = require('./routes/subtitleProxy');
 const advertiseRoutes = require('./routes/advertise');
 const adCampaignRoutes = require('./routes/adCampaigns');
+const adSelfPromoRoutes = require('./routes/adSelfPromo');
 const adServeRoutes = require('./routes/adServe');
 const badgeRoutes = require('./routes/badges');
 
@@ -123,6 +124,7 @@ app.use('/', reportsRoutes);
 app.use('/', subtitleProxyRoutes);
 app.use('/advertise', advertiseRoutes);   // same reason as above: must precede streamStatsRoutes
 app.use('/advertise', adCampaignRoutes);  // booking + payment, same mount, same ordering rule
+app.use('/advertise', adSelfPromoRoutes); // a creator promoting their OWN video, same mount
 // Ad SERVING lives at /m, deliberately not under /advertise: every URL the browser
 // fetches during playback has to be indistinguishable from ordinary streaming, and
 // a path containing "advertise" is the easiest possible thing for a filter list to

@@ -647,6 +647,49 @@ module.exports = {
     // is what actually paces the pass.
     VIDEO_HIVE_SYNC_VERIFY_DAYS: parseInt(process.env.VIDEO_HIVE_SYNC_VERIFY_DAYS) || 14,
 
+    /* --- Self-promotion: a creator runs their OWN video as a spot ---------
+     * routes/adSelfPromo.js. The creative is a PUBLISHED video, which every other
+     * path refuses, and the advertiser record is their own channel, created without
+     * a human. What a person still approves is the creative itself.
+     */
+    AD_SELFPROMO_ENABLED: parseBool(process.env.AD_SELFPROMO_ENABLED, true),
+    /* WHOSE CONTENT these ads may appear on. A beta limit, not a targeting feature:
+     * while it is non-empty a self-promo flight only serves on videos and shorts
+     * owned by these accounts. EMPTY MEANS NO RESTRICTION, the same way
+     * ADS_ALLOWED_OWNERS and AD_GATE_ALLOWED_UPLOADERS read it — guard on `.length`
+     * before using it, or an empty list flips to "nobody" and silently kills the
+     * product while it is still on sale.
+     */
+    AD_SELFPROMO_ALLOWED_OWNERS: String(process.env.AD_SELFPROMO_ALLOWED_OWNERS ?? 'badadib')
+        .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+    // Shown under the creator's name on the ad disclosure overlay.
+    AD_SELFPROMO_SLOGAN: process.env.AD_SELFPROMO_SLOGAN || 'Content Creator on 3Speak',
+    /* What a creator pays per second of spot, per day, to promote their OWN video.
+     *
+     * Deliberately NOT the platform rate card: this is a different product sold to a
+     * different person (a creator spending their own post rewards, not a project with
+     * a budget), and while it is being tested it is priced at nearly nothing so a
+     * real end-to-end booking costs a fraction of a cent.
+     *
+     * 🚨 IT WINS OVER EVERYTHING, including an advertiser's stored `rates` copy, so
+     * putting it back to normal pricing is one value rather than a migration of every
+     * self-promo record. Set it to 0 to fall back to the ordinary rate card for that
+     * format. Only self-promo flights read it (routes/adSelfPromo.js) — no other
+     * booking path can see it.
+     *
+     * 🔔 TURN THIS OFF WHEN SELF-PROMOTION GOES LIVE. It moves together with
+     * AD_SELFPROMO_ALLOWED_OWNERS: opening delivery to every creator while this is
+     * still 0.001 sells a 7-day spot for under a tenth of an HBD, and the rate is
+     * snapshotted onto each advertiser record at their first booking, so whoever
+     * books during the window keeps it for good.
+     */
+    AD_SELFPROMO_RATE_HBD: (() => {
+        const raw = process.env.AD_SELFPROMO_RATE_HBD;
+        if (raw === undefined || raw === '') return 0.001;   // testing rate, 2026-09-24
+        const n = Number(raw);
+        return Number.isFinite(n) && n >= 0 ? n : 0.001;
+    })(),
+
     // --- Ad platform: intake, approval gate, inventory forecast ---
     // Advertisers apply, a human approves, and only an approved record can hold a
     // campaign later. See routes/advertise.js + services/adInventory.js.

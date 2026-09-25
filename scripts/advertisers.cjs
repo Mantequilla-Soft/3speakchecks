@@ -197,6 +197,76 @@ withDb(async (db) => {
     return;
   }
 
+  /* ─── creative review ────────────────────────────────────────────────────
+   *
+   * The advertiser queue above decides who may advertise. This decides what
+   * actually plays, which until now had an HTTP endpoint and no operator surface
+   * at all — fine while every spot arrived through a conversation, and not fine
+   * from the moment self-promotion started putting creators' own videos into the
+   * queue by themselves (routes/adSelfPromo.js).
+   *
+   * Keyed by embedId rather than the row's _id: that is the id the booking, the
+   * campaign and the serving path all use, and it is what an operator has in front
+   * of them.
+   */
+  if (cmd === 'creatives') {
+    const wanted = arg || 'review';
+    const rows = await db.collection(CREATIVES)
+      .find(wanted === 'all' ? {} : { status: wanted })
+      .sort({ createdAt: -1 }).limit(100).toArray();
+    if (!rows.length) { console.log(wanted === 'review' ? 'No spots waiting for review.' : `No ${wanted} creatives.`); return; }
+    for (const c of rows) {
+      const flights = await db.collection(process.env.AD_CAMPAIGNS_COLLECTION || 'ad_campaigns')
+        .countDocuments({ creativeEmbedId: c.embedId });
+      console.log(`${pad(c.embedId, 26)} ${pad(c.status, 9)} ${pad(c.kind || 'video', 6)} `
+        + `${pad(c.selfPromo ? 'SELF-PROMO' : 'advertiser', 11)} ${pad(`@${c.owner || '?'}`, 18)} `
+        + `${pad(c.trimToSeconds ? `first ${c.trimToSeconds}s` : `${c.durationSeconds || 0}s`, 14)} ${flights} flight(s)`);
+    }
+    console.log(`\n${rows.length} creative(s). approve-creative <embedId> | reject-creative <embedId> [--note "…"]`);
+    return;
+  }
+
+  if (cmd === 'approve-creative' || cmd === 'reject-creative') {
+    const approving = cmd === 'approve-creative';
+    if (!arg) { console.error(`Usage: node scripts/advertisers.cjs ${cmd} <embedId> [--note "…"]`); process.exitCode = 1; return; }
+    const coll = db.collection(CREATIVES);
+    const c = await coll.findOne({ embedId: arg });
+    if (!c) { console.error(`No creative with embedId ${arg}`); process.exitCode = 1; return; }
+
+    if (approving) {
+      // The same two refusals the HTTP route makes, for the same reasons: an
+      // approved creative with nothing to play looks servable and then fails at
+      // delivery, and an approved spot behind an unapproved advertiser is a lie on
+      // the record. Duplicated deliberately — this path must not be the lenient one.
+      if ((c.kind || 'video') === 'video' && !creativeIsEncoded(c)) {
+        console.error('That spot has not finished encoding yet — there is nothing to play.');
+        process.exitCode = 1; return;
+      }
+      if ((c.kind || 'video') === 'image' && !c.imageUrl) {
+        console.error('That banner has no image on record — nothing to show.');
+        process.exitCode = 1; return;
+      }
+      if (c.advertiserRef) {
+        const adv = await db.collection(ADVERTISERS).findOne({ reference: c.advertiserRef }, { projection: { status: 1 } });
+        if (!adv || adv.status !== 'approved') {
+          console.error(`The advertiser behind that spot is ${adv ? adv.status : 'unknown'}. Approve the application first.`);
+          process.exitCode = 1; return;
+        }
+      }
+    }
+
+    await coll.updateOne({ _id: c._id }, { $set: {
+      status: approving ? 'ready' : 'rejected',
+      reviewNote: flag('--note') || null,
+      reviewedBy: process.env.USER || 'cli',
+      reviewedAt: new Date(),
+      updatedAt: new Date(),
+    } });
+    console.log(`${c.embedId} (@${c.owner || '?'}) → ${approving ? 'ready' : 'rejected'}`);
+    if (approving) console.log('  it can serve as soon as its flight is paid and inside its dates.');
+    return;
+  }
+
   if (cmd === 'approve') return decide(db, arg, 'approved');
   if (cmd === 'reject') return decide(db, arg, 'rejected');
 
