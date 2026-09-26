@@ -127,4 +127,64 @@ async function fetchTagsV2Batch(db, keys) {
   return map;
 }
 
-module.exports = { getTranscriptionTags, splitTags, fetchTagsV2Batch };
+/**
+ * Which of these videos the pipeline flagged as AI-generated — for feed cards,
+ * which address a video by EITHER pair: the hive author/permlink (most feeds) or
+ * the owner + ASSET permlink (shorts rails). So each key is tried both ways: as a
+ * direct `subtitles-tags` key, and through `embed-video`'s hive→asset mapping.
+ * Two queries for the whole batch, whatever its size.
+ *
+ * Only an explicit `ai_generated_v2: true` counts (never-checked rows are absent).
+ *
+ * @param {Array<{author:string, permlink:string}>} keys
+ * @returns {Promise<string[]>} the flagged keys, as "author/permlink" in the
+ *   caller's own spelling (author lowercased)
+ */
+async function fetchAiFlagsBatch(db, keys) {
+  const wanted = new Map(); // "author/permlink" -> {author, permlink}
+  for (const k of keys || []) {
+    if (!k || !k.author || !k.permlink) continue;
+    const author = String(k.author).trim().toLowerCase().replace(/^@/, '');
+    const permlink = String(k.permlink).trim();
+    if (author && permlink) wanted.set(`${author}/${permlink}`, { author, permlink });
+  }
+  if (!wanted.size) return [];
+  const pairs = [...wanted.values()];
+
+  // hive pair -> asset pair, for embed videos.
+  const evs = await db.collection('embed-video')
+    .find(
+      { $or: pairs.map((p) => ({ hive_author: p.author, hive_permlink: p.permlink })) },
+      { projection: { owner: 1, permlink: 1, hive_author: 1, hive_permlink: 1 } }
+    )
+    .toArray();
+  const assetToCaller = new Map(); // "owner/asset" -> [caller keys]
+  const link = (asset, caller) => {
+    const list = assetToCaller.get(asset) || [];
+    if (!list.includes(caller)) list.push(caller);
+    assetToCaller.set(asset, list);
+  };
+  for (const id of wanted.keys()) link(id, id);
+  for (const ev of evs) {
+    if (!ev.owner || !ev.permlink) continue;
+    link(`${String(ev.owner).toLowerCase()}/${ev.permlink}`, `${String(ev.hive_author).toLowerCase()}/${ev.hive_permlink}`);
+  }
+
+  const orConds = [...assetToCaller.keys()].map((id) => {
+    const i = id.indexOf('/');
+    return { author: id.slice(0, i), permlink: id.slice(i + 1) };
+  });
+  const docs = await db.collection('subtitles-tags')
+    .find({ $or: orConds, ai_generated_v2: true }, { projection: { author: 1, permlink: 1 } })
+    .toArray();
+
+  const out = new Set();
+  for (const d of docs) {
+    for (const caller of assetToCaller.get(`${String(d.author).toLowerCase()}/${d.permlink}`) || []) {
+      if (wanted.has(caller)) out.add(caller);
+    }
+  }
+  return [...out];
+}
+
+module.exports = { getTranscriptionTags, splitTags, fetchTagsV2Batch, fetchAiFlagsBatch };
