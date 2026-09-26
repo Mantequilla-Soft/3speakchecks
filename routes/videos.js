@@ -11,7 +11,7 @@ const { getCachedViews, setCachedViews } = require('../utils/cache');
 const { validateApiKey } = require('../utils/middleware');
 const { ENABLE_MONGO_WRITES, RETENTION_FOLLOW_HALFLIFE_H } = require('../utils/config');
 const { rankFeed } = require('../utils/feedRank');
-const { getTranscriptionTags } = require('../utils/transcriptionTags');
+const { getTranscriptionTags, fetchAiFlagsBatch } = require('../utils/transcriptionTags');
 const { buildFollowFeed } = require('../utils/followFeed');
 
 // Cache whether hive_tags_lower has been backfilled
@@ -907,6 +907,30 @@ router.get('/transcription-tags/:author/:permlink', async (req, res) => {
         res.json({ success: true, author, permlink, ...r });
     } catch (error) {
         console.error('Error fetching transcription tags:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+/**
+ * POST /transcription-tags/ai-batch   { keys: ["author/permlink", ...] }  (max 200)
+ *
+ * Which of these videos were flagged AI-generated — one call per screenful of feed
+ * cards, for the card badge and the "Hide AI-generated" setting. A key may be the
+ * hive pair or the owner + asset pair; see fetchAiFlagsBatch.
+ * -> { success, flagged: ["author/permlink", ...] }  (authors lowercased)
+ */
+router.post('/transcription-tags/ai-batch', async (req, res) => {
+    try {
+        const raw = Array.isArray(req.body?.keys) ? req.body.keys.slice(0, 200) : [];
+        const keys = raw.map((k) => {
+            const s = String(k || '');
+            const i = s.indexOf('/');
+            return i > 0 ? { author: s.slice(0, i), permlink: s.slice(i + 1) } : null;
+        }).filter(Boolean);
+        const flagged = await fetchAiFlagsBatch(getDb(), keys);
+        res.json({ success: true, flagged });
+    } catch (error) {
+        console.error('Error fetching AI flags:', error);
         res.status(500).json({ success: false, error: 'Internal server error' });
     }
 });
