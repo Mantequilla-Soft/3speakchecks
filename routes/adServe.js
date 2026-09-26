@@ -330,6 +330,49 @@ function selfPromoAllowedOn(owner) {
 /** The candidate-query fragment that enforces it. */
 const selfPromoFilter = (owner) => (selfPromoAllowedOn(owner) ? {} : { selfPromo: { $ne: true } });
 
+/**
+ * The campaigns this viewer has actually SEEN inside the cap windows.
+ *
+ * 🚨 Counts IMPRESSIONS, not sessions. A session row is written the moment a
+ * placement is chosen, before a byte of the ad is fetched, so capping on sessions
+ * burned a campaign for every page load that left before the break or the banner:
+ * a viewer hopping between videos used up the whole pool on ads they never saw and
+ * was then served `no_eligible_campaign` on videos that should have carried one.
+ * The pre-upload gate hit the same bug first (see the cap there). Sessions are still
+ * where the viewer lives, so they are read for the sids and the impressions decide.
+ *
+ * Also caps the BANNER placement, which reading `campaignId` alone never did: a
+ * banner rides the same session under `banner.campaignId`.
+ *
+ * Returns { recent, recentBanner } as sets of campaign id strings. The banner window
+ * is the shorter one, so its set is read out of the same rows.
+ */
+async function seenCampaigns(db, capKey, { withBanner = true } = {}) {
+  const recent = new Set();
+  const recentBanner = new Set();
+  if (!capKey) return { recent, recentBanner };
+  const since = new Date(Date.now() - AD_FREQUENCY_CAP_MINUTES * 60 * 1000);
+  const bannerSince = Date.now() - AD_BANNER_FREQUENCY_CAP_MINUTES * 60 * 1000;
+  const rows = await db.collection(SESSIONS)
+    .find({ ...capKey, startedAt: { $gte: since } },
+      { projection: { sid: 1, campaignId: 1, 'banner.campaignId': 1, startedAt: 1 } })
+    .toArray();
+  if (!rows.length) return { recent, recentBanner };
+  const shown = new Set((await db.collection(AD_IMPRESSIONS_COLLECTION)
+    .find({ sid: { $in: rows.map((r) => r.sid) } }, { projection: { sid: 1, campaignId: 1 } })
+    .toArray()).map((i) => `${i.sid}:${String(i.campaignId)}`));
+  for (const r of rows) {
+    const inBannerWindow = new Date(r.startedAt).getTime() >= bannerSince;
+    const ids = [r.campaignId, withBanner ? r.banner?.campaignId : null].filter(Boolean).map(String);
+    for (const id of ids) {
+      if (!shown.has(`${r.sid}:${id}`)) continue;
+      recent.add(id);
+      if (inBannerWindow) recentBanner.add(id);
+    }
+  }
+  return { recent, recentBanner };
+}
+
 function trimOf(creative) {
   const n = Number(creative && creative.trimToSeconds);
   return Number.isFinite(n) && n > 0 ? n : null;
@@ -931,10 +974,8 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       let recent2 = new Set();
       const capKey2 = viewer ? { viewer } : (capId ? { capId } : null);
       if (capKey2 && !AD_SHORTS_IGNORE_REPEAT_CAP) {
-        const since2 = new Date(Date.now() - AD_FREQUENCY_CAP_MINUTES * 60 * 1000);
-        const rows2 = await db2.collection(SESSIONS)
-          .find({ ...capKey2, startedAt: { $gte: since2 } }, { projection: { campaignId: 1 } }).toArray();
-        recent2 = new Set(rows2.map((r) => String(r.campaignId)));
+        // Only rolls that actually played count; see seenCampaigns().
+        ({ recent: recent2 } = await seenCampaigns(db2, capKey2, { withBanner: false }));
       }
       const claimedKeys2 = AD_SHORTS_IGNORE_REPEAT_CAP ? new Set() : claimedAdKeys(b);
 
@@ -1063,22 +1104,9 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // Two windows, one query. A banner is cheaper to sit through than a roll — it
     // shares the picture for a few seconds and never takes the viewer's time — so the
     // window that stops a roll burning an audience is longer than a banner needs.
-    let recent = new Set();
-    let recentBanner = new Set();
+    // Only ads that were actually delivered count; see seenCampaigns().
     const capKey = viewer ? { viewer } : (capId ? { capId } : null);
-    if (capKey) {
-      const since = new Date(Date.now() - AD_FREQUENCY_CAP_MINUTES * 60 * 1000);
-      const bannerSince = Date.now() - AD_BANNER_FREQUENCY_CAP_MINUTES * 60 * 1000;
-      const rows = await db.collection(SESSIONS)
-        .find({ ...capKey, startedAt: { $gte: since } }, { projection: { campaignId: 1, startedAt: 1 } }).toArray();
-      for (const r of rows) {
-        const id = String(r.campaignId);
-        recent.add(id);
-        // The banner window is the SHORTER of the two, so its set is a subset of the
-        // rows already fetched. Reading it back out of them costs nothing.
-        if (new Date(r.startedAt).getTime() >= bannerSince) recentBanner.add(id);
-      }
-    }
+    const { recent, recentBanner } = await seenCampaigns(db, capKey);
 
     // A forged list can only cost a client ads, never earn it any, so it is trusted
     // exactly as far as it can do harm — which is not at all.
