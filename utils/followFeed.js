@@ -10,6 +10,7 @@
  * and both get the identical recency-decay + comment-boost + rankFeed treatment.
  */
 const { getDb } = require('./db');
+const { followingOf } = require('./incubationHosted');
 const { feedAgeMatch } = require('./feedAge');
 const { unavailableMatch } = require('./unavailable');
 const { hiddenFromFeedMatch } = require('./hiddenFromFeed');
@@ -51,10 +52,9 @@ async function buildFollowFeed(req, username, { allowFallback = true, chronologi
     // site, in a page they asked to be about the people they follow. Their
     // picks are real, they are simply kept somewhere else until graduation.
     if (!followingList || followingList.length === 0) {
-        const offChain = await db.collection('incubation_follows')
-            .find({ handle: username, state: 'following' }, { projection: { following: 1 } })
-            .limit(1000).toArray();
-        if (offChain.length) followingList = offChain.map(r => r.following);
+        // Kept by Butter Auth's hosted incubation service, not in this database.
+        const offChain = await followingOf(username);
+        if (offChain.length) followingList = offChain;
     }
 
     // No recipients → no feed. See `allowFallback` above.
