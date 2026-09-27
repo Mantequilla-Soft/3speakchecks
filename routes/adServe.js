@@ -1068,8 +1068,13 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // rather than taken from the request: the client could otherwise claim any
     // duration and place itself inside a window the advertiser paid to exclude.
     // `{ permlink, owner }` is a unique index, so this is a point read.
+    // Legacy uploads (the old uploader, HiveSuite) have no embed-video row at all,
+    // only one in `videos`, which carries the duration too. Without this fallback
+    // every length-targeted campaign skipped them as "unknown length".
     const video = await db.collection('embed-video')
-      .findOne({ permlink, owner }, { projection: { duration: 1, short: 1 } });
+      .findOne({ permlink, owner }, { projection: { duration: 1, short: 1 } })
+      || await db.collection('videos')
+        .findOne({ permlink, owner }, { projection: { duration: 1 } });
     const videoSeconds = Number(video && video.duration) || null;
 
     // 🚨 NO WATCH-SURFACE ADS ON A SHORT, whatever its length.
