@@ -48,6 +48,7 @@ const { getPremiumSet, applyPremiumBoost } = require('../utils/premiumBoost');
 const { getEngagementAffinity, applyEngagementBoost } = require('../utils/engagementBoost');
 const { getSuggestedCreators } = require('../utils/suggestedCreators');
 const { attachTopicTags } = require('../utils/topicTag');
+const { getCached } = require('../utils/feedCache');
 const { SUGGEST_MAX_LIMIT } = require('../utils/config');
 const { getPool, hydrate } = require('../utils/discoverPool');
 const { getInterestPool } = require('../utils/interestPool');
@@ -1641,6 +1642,107 @@ router.get('/community/:id/top', async (req, res) => {
         });
     } catch (error) {
         console.error('Error fetching community top feed:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+// ─── Community directory activity ──────────────────────────────────────────
+// What the /communities directory shows on each card: videos posted today and
+// this week, plus the newest few as a thumbnail strip. One pass over the last
+// 30 days for EVERY community, cached whole: the directory lists ~100 cards,
+// and asking per card would be ~100 Mongo round trips at 110-390ms each (see
+// utils/feedCache.js). ~1.1k videos a month, projected down, is small to hold.
+//
+// NSFW is always excluded (a directory thumbnail is shown to everyone, before
+// anyone has opted into anything), as are hidden/unavailable videos.
+const ACTIVITY_WINDOW_DAYS = 30;
+const ACTIVITY_LATEST = 3;
+const ACTIVITY_TTL_MS = 10 * 60 * 1000;
+const COMMUNITY_RE = /^hive-\d+$/;
+const STRICT_NSFW_REQ = { query: {}, headers: {} };
+
+async function loadCommunityActivity() {
+    const db = getDb();
+    const since = new Date(Date.now() - ACTIVITY_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    const hidden = [...HIDDEN_AUTHORS, ...hiddenListSync()];
+
+    const [legacy, embeds] = await Promise.all([
+        db.collection('videos').find({
+            ...unavailableMatch(), ...hiddenFromFeedMatch(),
+            status: 'published',
+            publishFailed: { $ne: true },
+            owner: { $nin: hidden },
+            community: COMMUNITY_RE,
+            created: { $gte: since },
+            ...nsfwFilterTags(STRICT_NSFW_REQ),
+        }, { projection: { owner: 1, permlink: 1, title: 1, created: 1, community: 1, thumbnail: 1, thumbUrl: 1, images: 1 } }).toArray(),
+        db.collection('embed-video').find({
+            ...unavailableMatch(), ...hiddenFromFeedMatch(),
+            status: 'published',
+            short: false,
+            listed_on_3speak: true,
+            hive_author: { $nin: [null, ...hidden] },
+            hive_permlink: { $ne: null },
+            createdAt: { $gte: since },
+            ...nsfwFilterHiveTags(STRICT_NSFW_REQ),
+            $or: [{ category: COMMUNITY_RE }, { hive_tags: COMMUNITY_RE }],
+        }, { projection: { owner: 1, hive_author: 1, hive_permlink: 1, hive_title: 1, permlink: 1, createdAt: 1, category: 1, hive_tags: 1, thumbnail_url: 1 } }).toArray(),
+    ]);
+
+    const rows = [
+        ...legacy.map((v) => ({
+            community: v.community,
+            video: { author: v.owner, owner: v.owner, permlink: v.permlink, title: v.title || '', created: v.created, thumbnail: v.thumbnail, thumbUrl: v.thumbUrl, images: v.images },
+        })),
+        ...embeds.map((ev) => {
+            // Same membership rule as the community feeds: the post's category,
+            // else a community id some clients put in the tags.
+            const community = COMMUNITY_RE.test(ev.category || '')
+                ? ev.category
+                : (ev.hive_tags || []).find((t) => COMMUNITY_RE.test(t));
+            const v = transformEmbedVideoToLegacy(ev);
+            return { community, video: { author: v.author, owner: v.owner, permlink: v.permlink, title: v.title, created: v.created, images: v.images } };
+        }),
+    ].filter((r) => r.community && r.video.permlink);
+
+    const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const out = {};
+    const seen = new Set();
+    rows.sort((a, b) => new Date(b.video.created) - new Date(a.video.created));
+    for (const { community, video } of rows) {
+        const key = `${video.author}/${video.permlink}`;
+        if (seen.has(key)) continue; // the same post indexed in both collections
+        seen.add(key);
+        const c = out[community] || (out[community] = { today: 0, week: 0, month: 0, latest: [] });
+        const t = new Date(video.created).getTime();
+        c.month += 1;
+        if (t >= weekAgo) c.week += 1;
+        if (t >= dayAgo) c.today += 1;
+        (c._all || (c._all = [])).push(video);
+    }
+    // The strip is a glimpse of the community, so it prefers different creators:
+    // newest video of each creator first, then more by the same ones if needed.
+    for (const c of Object.values(out)) {
+        const firsts = [];
+        const rest = [];
+        const authors = new Set();
+        for (const v of c._all) {
+            (authors.has(v.author) ? rest : firsts).push(v);
+            authors.add(v.author);
+        }
+        c.latest = [...firsts, ...rest].slice(0, ACTIVITY_LATEST);
+        delete c._all;
+    }
+    return out;
+}
+
+router.get('/communities/activity', async (req, res) => {
+    try {
+        const communities = await getCached('communities:activity', ACTIVITY_TTL_MS, loadCommunityActivity, {});
+        res.json({ success: true, windowDays: ACTIVITY_WINDOW_DAYS, communities });
+    } catch (error) {
+        console.error('Error building community activity:', error);
         res.status(500).json({ success: false, error: 'Internal server error' });
     }
 });
