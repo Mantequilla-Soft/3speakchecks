@@ -92,7 +92,9 @@ async function syncDurations() {
                 filter: { _id: d._id, $or: UNKNOWN_DURATION },
                 update: {
                     $set: {
-                        duration: Math.round(secs),
+                        // Never 0: a sub-second clip rounded down would still read as
+                        // "unknown" (UNKNOWN_DURATION) and be refetched forever.
+                        duration: Math.max(1, Math.round(secs)),
                         // Provenance. The field is otherwise unaudited — anyone looking
                         // at a duration later can tell ours from the uploader's.
                         duration_source: 'manifest',
@@ -129,4 +131,95 @@ async function syncDurations() {
     return { scanned: docs.length, updated, unreadable };
 }
 
-module.exports = { syncDurations };
+// The legacy `videos` collection (old uploader, HiveSuite) has the same hole: ~960
+// published rows with no duration, and those uploads have no embed-video row at all,
+// so adServe falls back to this collection for their length. Their manifest lives in
+// `video_v2` as `ipfs://<cid>/manifest.m3u8`.
+//
+// Run on every LEGACY_EVERY-th cycle only. The candidate query walks the
+// {status, created} index across ~138k published rows once the backlog is drained,
+// and legacy uploads are a trickle (~20 a month), so hourly is plenty.
+const LEGACY_EVERY = 6;
+const LEGACY_MANIFEST = /^ipfs:\/\/([^/]+)\/manifest\.m3u8$/;
+let cycle = 0;
+
+async function syncLegacyDurations() {
+    const db = getDb();
+    const v = db.collection('videos');
+    const now = Date.now();
+    const freshCutoff = new Date(now - DURATION_SYNC_FRESH_DAYS * 24 * 60 * 60 * 1000);
+    const retryFresh = new Date(now - DURATION_SYNC_FRESH_RECHECK_MIN * 60 * 1000);
+    const retryOld = new Date(now - DURATION_SYNC_RECHECK_DAYS * 24 * 60 * 60 * 1000);
+
+    const docs = await v.find({
+        status: 'published',
+        video_v2: LEGACY_MANIFEST,
+        $and: [
+            { $or: UNKNOWN_DURATION },
+            {
+                $or: [
+                    { duration_sync_checked_at: { $exists: false } },
+                    { created: { $gte: freshCutoff }, duration_sync_checked_at: { $lt: retryFresh } },
+                    { created: { $lt: freshCutoff }, duration_sync_checked_at: { $lt: retryOld } },
+                ],
+            },
+        ],
+    })
+        .project({ video_v2: 1 })
+        .sort({ created: -1 })
+        .limit(DURATION_SYNC_BATCH)
+        .toArray();
+
+    if (docs.length === 0) return { scanned: 0, updated: 0, unreadable: 0 };
+
+    const seconds = await pooled(docs, DURATION_SYNC_CONCURRENCY,
+        (d) => durationFromManifest(String(d.video_v2).match(LEGACY_MANIFEST)[1]).catch(() => null));
+
+    const fillOps = [];
+    const stampOps = [];
+    docs.forEach((d, i) => {
+        const secs = seconds[i];
+        if (!secs) {
+            stampOps.push({ updateOne: { filter: { _id: d._id }, update: { $set: { duration_sync_checked_at: new Date() } } } });
+            return;
+        }
+        fillOps.push({
+            updateOne: {
+                filter: { _id: d._id, $or: UNKNOWN_DURATION },
+                update: {
+                    $set: {
+                        // Unrounded, like the legacy uploader's own values (181.649705).
+                        duration: secs,
+                        duration_source: 'manifest',
+                        duration_backfilled_at: new Date(),
+                        duration_sync_checked_at: new Date(),
+                    },
+                },
+            },
+        });
+    });
+
+    let updated = 0;
+    let unreadable = 0;
+    if (ENABLE_MONGO_WRITES) {
+        try {
+            if (fillOps.length) updated += (await v.bulkWrite(fillOps, { ordered: false })).modifiedCount || 0;
+            if (stampOps.length) unreadable += (await v.bulkWrite(stampOps, { ordered: false })).modifiedCount || 0;
+        } catch (err) {
+            console.error('[durationSync:legacy] bulkWrite error:', err.message);
+        }
+    }
+    if (updated || unreadable) {
+        console.log(`[durationSync:legacy] ${docs.length} video(s) checked: ${updated} length(s) recovered, ${unreadable} with no readable manifest`);
+    }
+    return { scanned: docs.length, updated, unreadable };
+}
+
+/** One scheduled cycle: embed-video every time, legacy videos every LEGACY_EVERY-th. */
+async function syncAllDurations() {
+    const embed = await syncDurations();
+    const legacy = (cycle++ % LEGACY_EVERY === 0) ? await syncLegacyDurations() : null;
+    return { embed, legacy };
+}
+
+module.exports = { syncDurations, syncLegacyDurations, syncAllDurations };

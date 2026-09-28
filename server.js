@@ -14,7 +14,7 @@ const { syncAudioHiveLinks } = require('./services/audioHiveSync');
 const { syncEmbedCategories } = require('./services/embedCategorySync');
 const { syncThumbnails } = require('./services/thumbnailSync');
 const { syncVideoHiveLinks } = require('./services/videoHiveSync');
-const { syncDurations } = require('./services/durationSync');
+const { syncAllDurations } = require('./services/durationSync');
 const { syncPremiumFromSubs } = require('./services/premiumSubsSync');
 const { schedule: scheduleCollectSubs } = require('./services/collectSubscriptions');
 const { schedule: scheduleVerifiedFollow } = require('./services/verifiedFollow');
@@ -304,10 +304,10 @@ async function startServer() {
     if (DURATION_SYNC_ENABLED) {
         const durIntervalMs = DURATION_SYNC_INTERVAL_MIN * 60 * 1000;
         setTimeout(() => {
-            syncDurations().catch(err => console.error('Duration sync error:', err));
+            syncAllDurations().catch(err => console.error('Duration sync error:', err));
             setInterval(() => {
                 if (syncRunning) return;
-                syncDurations().catch(err => console.error('Duration sync error:', err));
+                syncAllDurations().catch(err => console.error('Duration sync error:', err));
             }, durIntervalMs);
         }, 120 * 1000);
         console.log(`Duration sync scheduled every ${DURATION_SYNC_INTERVAL_MIN}min (first run in 2min)`);
