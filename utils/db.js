@@ -117,6 +117,9 @@ async function connectToMongo() {
                 ['stream-boosts', { streamId: 1 }],
                 ['stream-boosts', { host: 1 }],
                 ['stream-boosts', { sender: 1 }],
+                // Community "Top" (routes/feeds.js /community/:id/top): all-time
+                // most-viewed in a community scanned ~123k legacy videos without it.
+                ['videos', { community: 1, views: -1 }],
             ];
             for (const [coll, key] of wanted) {
                 try { await db.collection(coll).createIndex(key, { background: true }); }

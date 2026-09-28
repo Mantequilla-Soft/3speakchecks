@@ -70,6 +70,7 @@ async function ensureIndex() {
   const db = getDb();
   try { await db.collection(COLLECTION).createIndex({ owner: 1, created: -1 }); } catch (_) { /* best effort */ }
   try { await db.collection(COLLECTION).createIndex({ created: -1 }); } catch (_) { /* feed order */ }
+  try { await db.collection(COLLECTION).createIndex({ community: 1, created: -1 }, { sparse: true }); } catch (_) { /* community tab */ }
   try { await db.collection(INTERACT_COLLECTION).createIndex({ user: 1 }); } catch (_) { /* per-user lookup */ }
   try { await db.collection(HIDDEN_COLLECTION).createIndex({ user: 1 }); } catch (_) { /* per-user lookup */ }
 }
@@ -129,6 +130,9 @@ router.post('/snaps', async (req, res) => {
       tags: Array.isArray(meta.tags) ? meta.tags.filter((t) => typeof t === 'string').slice(0, 12) : [],
       image: Array.isArray(meta.image) && meta.image[0] ? String(meta.image[0]) : null,
       nsfw: Array.isArray(meta.tags) && meta.tags.includes('nsfw'),
+      // Filed under a Hive community's Discussion tab. Read from OUR chain fetch,
+      // like everything else here, so the client cannot file it anywhere else.
+      community: /^hive-\d+$/.test(String(meta.community || '')) ? String(meta.community) : null,
       parentAuthor: post.parent_author || null,
       parentPermlink: post.parent_permlink || null,
       // Hive timestamps are UTC without a zone suffix.
@@ -140,6 +144,33 @@ router.post('/snaps', async (req, res) => {
     res.json({ success: true, snap: { _id, ...doc } });
   } catch (err) {
     console.error('POST /snaps failed:', err);
+    res.status(500).json({ success: false, error: 'internal error' });
+  }
+});
+
+/**
+ * GET /snaps/community/:id?page=&limit=  — snaps filed under one Hive community
+ * (the community page's Discussion tab), newest first, from every author.
+ */
+router.get('/snaps/community/:id', async (req, res) => {
+  try {
+    const community = String(req.params.id || '').trim();
+    if (!/^hive-\d+$/.test(community)) {
+      return res.status(400).json({ success: false, error: 'community id must look like "hive-<digits>"' });
+    }
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const skip = (page - 1) * limit;
+
+    await ensureIndex();
+    const col = getDb().collection(COLLECTION);
+    const [snaps, total] = await Promise.all([
+      col.find({ community }).sort({ created: -1 }).skip(skip).limit(limit).toArray(),
+      col.countDocuments({ community }),
+    ]);
+    res.json({ success: true, snaps, page, limit, total, hasMore: skip + snaps.length < total });
+  } catch (err) {
+    console.error('GET /snaps/community/:id failed:', err);
     res.status(500).json({ success: false, error: 'internal error' });
   }
 });

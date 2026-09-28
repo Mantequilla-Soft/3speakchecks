@@ -1561,6 +1561,90 @@ router.get('/community/:id/trending', async (req, res) => {
     }
 });
 
+// "Top" = the community's most-viewed videos over a chosen window, ranked by
+// views and nothing else. Trending already covers "what is hot for YOU" (it runs
+// the interest/retention pipeline and can hide what you have seen); Top is the
+// objective leaderboard, so a best-of-the-year video stays findable after it
+// drops out of the 30-day trending window. Dismissals still apply, like /new.
+const COMMUNITY_TOP_WINDOWS = { '7d': 7, '30d': 30, '365d': 365, all: null };
+
+router.get('/community/:id/top', async (req, res) => {
+    try {
+        const communityId = String(req.params.id || '').trim();
+        if (!validateCommunityId(communityId)) {
+            return res.status(400).json({ success: false, error: 'community id must look like "hive-<digits>"' });
+        }
+        const windowKey = String(req.query.window || '30d');
+        if (!(windowKey in COMMUNITY_TOP_WINDOWS)) {
+            return res.status(400).json({ success: false, error: `window must be one of ${Object.keys(COMMUNITY_TOP_WINDOWS).join(', ')}` });
+        }
+
+        const db = getDb();
+        const page = Math.max(parseInt(req.query.page) || 1, 1);
+        const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 100);
+        const skip = (page - 1) * limit;
+        // Each collection is sorted by views on its own, so taking skip+limit from
+        // both is enough to rank any page correctly after the merge.
+        const take = Math.min(skip + limit, 500);
+
+        const days = COMMUNITY_TOP_WINDOWS[windowKey];
+        const windowStart = days ? new Date(Date.now() - days * 24 * 60 * 60 * 1000) : null;
+
+        const [legacyVideos, embedVideosRaw] = await Promise.all([
+            db.collection('videos').find({
+                ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
+                status: 'published',
+                owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
+                publishFailed: { $ne: true },
+                community: communityId,
+                ...(windowStart ? { created: { $gte: windowStart } } : {}),
+                ...nsfwFilterTags(req),
+            }).sort({ views: -1 }).limit(take).toArray(),
+            db.collection('embed-video').find({
+                ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
+                status: 'published',
+                short: false,
+                listed_on_3speak: true,
+                hive_author: { $nin: [null, ...HIDDEN_AUTHORS, ...hiddenListSync()] },
+                hive_permlink: { $ne: null },
+                ...(windowStart ? { createdAt: { $gte: windowStart } } : {}),
+                ...nsfwFilterHiveTags(req),
+                ...communityMatchClause(communityId),
+            }).sort({ views: -1 }).limit(take).toArray(),
+        ]);
+
+        const legacyKeys = new Set(legacyVideos.map(v => `${v.author || v.owner}/${v.permlink}`));
+        const uniqueEmbed = embedVideosRaw.map(transformEmbedVideoToLegacy)
+            .filter(ev => !legacyKeys.has(`${ev.author}/${ev.permlink}`));
+
+        const merged = [...legacyVideos, ...uniqueEmbed]
+            .map(v => ({ ...v, views: v.views || 0 }))
+            .sort((a, b) => b.views - a.views);
+        const allVideos = await filterForUser(db, req, merged);
+
+        const videos = allVideos.slice(skip, skip + limit);
+        await attachTopicTags(
+            db,
+            videos,
+            (v) => ({ author: v.owner, permlink: v.video_id || v._embedPermlink }),
+            (v) => ({ author: v.author || v.owner, permlink: v.permlink }),
+        );
+        videos.forEach(v => { delete v._sortDate; delete v._source; delete v._embedPermlink; });
+
+        res.json({
+            success: true,
+            feed: 'community-top',
+            community: communityId,
+            window: windowKey,
+            page, limit,
+            videos,
+        });
+    } catch (error) {
+        console.error('Error fetching community top feed:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
 // Exposed for scripts/test-gated-feed-flag.js. The card mappers drop any field
 // they do not name explicitly, which is exactly the kind of regression a test
 // should catch rather than a reviewer.
