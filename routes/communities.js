@@ -76,6 +76,50 @@ router.post('/community/created', async (req, res) => {
     }
 });
 
+// ─── Directory search ─────────────────────────────────────────────────────────
+// GET /communities/search?q=&limit=  — substring search over EVERY community.
+//
+// Hive's bridge.list_communities `query` matches whole words only, so a search
+// box fed by it goes blank on a half-typed word ("gamin" and "gaming ph" both
+// return nothing while "gaming" returns 100). The community sync already keeps
+// all ~4.2k communities in `hivecommunities`, so the whole set (slimmed) is held
+// in memory and matched here: every typed word must appear in the title,
+// hive-id or about line, in any order. Title matches rank first, then by size.
+const { getCached } = require('../utils/feedCache');
+const SEARCH_TTL_MS = 30 * 60 * 1000;
+const SEARCH_MAX = 100;
+
+const loadSearchIndex = () => getCached('communities:search-index', SEARCH_TTL_MS, async () => {
+    const rows = await getDb().collection('hivecommunities').find({}, {
+        projection: { _id: 0, name: 1, title: 1, about: 1, subscribers: 1, num_authors: 1, sum_pending: 1, image: 1, is_nsfw: 1 },
+    }).toArray();
+    return rows
+        .filter((r) => r && r.name)
+        .map((r) => ({ ...r, _title: String(r.title || '').toLowerCase(), _hay: `${r.title || ''} ${r.name} ${r.about || ''}`.toLowerCase() }));
+}, []);
+
+router.get('/communities/search', async (req, res) => {
+    try {
+        const words = String(req.query.q || '').toLowerCase().split(/\s+/).filter(Boolean).slice(0, 8);
+        if (!words.length) return res.json({ success: true, communities: [] });
+        const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || SEARCH_MAX, 1), SEARCH_MAX);
+
+        const index = await loadSearchIndex();
+        const hits = index.filter((c) => words.every((w) => c._hay.includes(w)));
+        const inTitle = (c) => words.every((w) => c._title.includes(w));
+        hits.sort((a, b) => (inTitle(b) - inTitle(a)) || ((b.subscribers || 0) - (a.subscribers || 0)));
+
+        res.json({
+            success: true,
+            total: hits.length,
+            communities: hits.slice(0, limit).map(({ _title, _hay, ...c }) => c),
+        });
+    } catch (error) {
+        console.error('Community search failed:', error.message);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
 router.get('/community/:name', async (req, res) => {
     try {
         const name = String(req.params.name || '').trim().toLowerCase();
