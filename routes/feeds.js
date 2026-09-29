@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
-const { feedAgeMatch } = require('../utils/feedAge');
+const { feedAgeMatch, recommendAgeMatch } = require('../utils/feedAge');
 const { unavailableMatch } = require('../utils/unavailable');
 const { hiddenFromFeedMatch } = require('../utils/hiddenFromFeed');
 const { nsfwFilterTags, nsfwFilterHiveTags } = require('../utils/filters');
@@ -41,7 +41,10 @@ const {
     RELATED_CREATOR_POOL, RELATED_JITTER,
 } = require('../utils/config');
 const { jitter, interleaveExploration, interleaveByAge, interleaveByInterest, freshness, ageHours } = require('../utils/discoverScore');
-const { DISCOVER_AGE_STRATIFY, DISCOVER_AGE_WEIGHTS, DISCOVER_INTEREST_SHARE } = require('../utils/config');
+const {
+    DISCOVER_AGE_STRATIFY, DISCOVER_AGE_WEIGHTS, DISCOVER_INTEREST_SHARE,
+    DISCOVER_FRONT_TILT, DISCOVER_FRONT_HALFLIFE_SLOTS,
+} = require('../utils/config');
 const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
 const { getFollowSetForReq, applyFollowBoost } = require('../utils/followBoost');
 const { getPremiumSet, applyPremiumBoost } = require('../utils/premiumBoost');
@@ -436,10 +439,13 @@ router.get('/discover', async (req, res) => {
         // within each band). This REPLACES the old head+explore interleave, which
         // couldn't hit an arbitrary target because its head slots were ~100% <30d.
         // interleaveExploration is kept for the legacy path / when stratify is off.
+        // The front tilt makes the upper pages fresher than that mix (see config).
         const composed = chrono
             ? visible
             : (DISCOVER_AGE_STRATIFY
-                ? interleaveByAge(visible, DISCOVER_AGE_WEIGHTS)
+                ? interleaveByAge(visible, DISCOVER_AGE_WEIGHTS, Date.now(), {
+                    tilt: DISCOVER_FRONT_TILT, halfLifeSlots: DISCOVER_FRONT_HALFLIFE_SLOTS,
+                })
                 : interleaveExploration(visible, rng, { weightOf: (e) => e.discover_score }));
 
         // Then guarantee interest matches a SHARE of every prefix. The score boost
@@ -552,14 +558,15 @@ router.get('/related/:author/:permlink', async (req, res) => {
         // 3. Supplement with the creator's most-recent videos (they may sit outside
         //    the discover pool). Newest first → recency flows into the score via
         //    freshness below. Shaped like pool entries so hydrate() can render them.
+        //    Same 1-year recommendation bound as the pool.
         if (author) {
             const [recentEmbed, recentLegacy] = await Promise.all([
                 db.collection('embed-video').find(
-                    { ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(), owner: author, status: 'published', short: false, listed_on_3speak: true, hive_permlink: { $ne: null } },
+                    { ...recommendAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(), owner: author, status: 'published', short: false, listed_on_3speak: true, hive_permlink: { $ne: null } },
                     { projection: { owner: 1, permlink: 1, hive_permlink: 1, createdAt: 1, isNsfwContent: 1 } }
                 ).sort({ createdAt: -1 }).limit(RELATED_CREATOR_POOL).toArray(),
                 db.collection('videos').find(
-                    { ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch(), owner: author, status: 'published', publishFailed: { $ne: true } },
+                    { ...recommendAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch(), owner: author, status: 'published', publishFailed: { $ne: true } },
                     { projection: { owner: 1, permlink: 1, created: 1, isNsfwContent: 1 } }
                 ).sort({ created: -1 }).limit(RELATED_CREATOR_POOL).toArray(),
             ]);

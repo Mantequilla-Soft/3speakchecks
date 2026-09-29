@@ -27,6 +27,9 @@ const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 // The first band is the ultra-fresh window (default 10h) so brand-new uploads get
 // their own guaranteed, front-loaded share of the page — see the weights in config.
 const AGE_BAND_DAYS = [(DISCOVER_ULTRAFRESH_HOURS || 10) / 24, 7, 30, 182.5, 365, 730, Infinity];
+// How much of DISCOVER_FRONT_TILT each band gets (1:1 with AGE_BAND_DAYS): full for
+// under a week, half for 7-30d, none for older.
+const AGE_BAND_TILT_SHARE = AGE_BAND_DAYS.map((d) => (d <= 7 ? 1 : d <= 30 ? 0.5 : 0));
 const DAY_MS = 86400000;
 
 /** Which age band a `created` date falls in. Unknown/invalid date → the oldest band. */
@@ -227,12 +230,22 @@ function interleaveExploration(ranked, rng, opts = {}) {
  * discover_score (via jitter), so the within-band order breathes per seed and the
  * scheduler is a pure function of that order.
  */
-function interleaveByAge(ranked, weights, now = Date.now()) {
+function interleaveByAge(ranked, weights, now = Date.now(), { tilt = 0, halfLifeSlots = 60 } = {}) {
   if (!Array.isArray(ranked) || ranked.length < 2 || !Array.isArray(weights) || !weights.length) {
     return ranked;
   }
   const nb = weights.length;
-  const w = weights.map((x) => Math.max(Number(x) || 0, 0));
+  const base = weights.map((x) => Math.max(Number(x) || 0, 0));
+  // Depth tilt (DISCOVER_FRONT_TILT): fresh bands weigh more near the top and fade
+  // back to `weights` with depth, so the upper pages lead with new videos. With
+  // tilt 0 this is the flat mix described above.
+  const tiltOn = tilt > 0 && halfLifeSlots > 0;
+  const w = base.slice();
+  const setDepth = (slot) => {
+    if (!tiltOn) return;
+    const f = tilt * Math.pow(0.5, slot / halfLifeSlots);
+    for (let i = 0; i < nb; i += 1) w[i] = base[i] * (1 + f * (AGE_BAND_TILT_SHARE[i] || 0));
+  };
   const bands = Array.from({ length: nb }, () => []);
   for (const v of ranked) {
     // Clamp the band index into the weight vector in case someone configures fewer
@@ -246,6 +259,7 @@ function interleaveByAge(ranked, weights, now = Date.now()) {
 
   const out = [];
   while (out.length < ranked.length) {
+    setDepth(out.length);
     let pick = -1;
     for (let i = 0; i < nb; i += 1) {
       if (pos[i] >= bands[i].length) continue;       // band drained
@@ -305,5 +319,5 @@ function interleaveByInterest(ranked, share, isMatch) {
 module.exports = {
   ageHours, freshness, newBoost, recencyBoost, jitter, shuffle, weightedOrder,
   interleaveExploration, interleaveByAge, interleaveByInterest,
-  ageBandIndex, AGE_BAND_DAYS, clamp,
+  ageBandIndex, AGE_BAND_DAYS, AGE_BAND_TILT_SHARE, clamp,
 };

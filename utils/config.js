@@ -167,13 +167,20 @@ module.exports = {
     INTEREST_RECENCY_DAYS: parseFloat(process.env.INTEREST_RECENCY_DAYS ?? '21'),
 
     // ─── Shorts candidate window (/shortssorted) ──────────────────────────────
-    // The default 14-day window is sized for the GLOBAL pool, where two weeks is
-    // already hundreds of shorts. A follow feed (?followedby=) draws from one
-    // user's following list, so the same window can leave a handful or none — the
-    // rails then can't fill a row and silently don't render. Give the follow feed
-    // a much longer window so the pool is a real feed rather than a remainder.
-    SHORTS_WINDOW_DAYS: parseFloat(process.env.SHORTS_WINDOW_DAYS ?? '14'),
+    // The default 30-day window (was 14 until 2026-09-29, when heavy viewers were
+    // getting close to watching the whole feed) is sized for the GLOBAL pool. A
+    // follow feed (?followedby=) draws from one user's following list, so the same
+    // window can leave a handful or none — the rails then can't fill a row and
+    // silently don't render. Give the follow feed a much longer window so the pool
+    // is a real feed rather than a remainder.
+    SHORTS_WINDOW_DAYS: parseFloat(process.env.SHORTS_WINDOW_DAYS ?? '30'),
     SHORTS_FOLLOW_WINDOW_DAYS: parseFloat(process.env.SHORTS_FOLLOW_WINDOW_DAYS ?? '60'),
+    // Continuous "newer ranks higher" multiplier on the shorts sort score, same curve
+    // as DISCOVER_RECENCY_BOOST: × (1 + BOOST · 0.5^(hours / HALFLIFE_H)). The additive
+    // 2-day recency bucket alone was swamped by the curation / interest / follow /
+    // retention multipliers, so page 1 could be older than page 3. 0 = off.
+    SHORTS_RECENCY_BOOST: parseFloat(process.env.SHORTS_RECENCY_BOOST ?? '2'),
+    SHORTS_RECENCY_HALFLIFE_H: parseFloat(process.env.SHORTS_RECENCY_HALFLIFE_H ?? '24'),
 
     // ─── Discover feed (/feeds/discover) ──────────────────────────────────────
     // Deliberately BLIND to votes, views and rewards — it exists to surface what
@@ -298,6 +305,14 @@ module.exports = {
     // ⚠️ MUST stay aligned 1:1 with AGE_BAND_DAYS in utils/discoverScore.js.
     DISCOVER_AGE_WEIGHTS: (process.env.DISCOVER_AGE_WEIGHTS || '0.16, 0.40, 0.22, 0.11, 0.06, 0.03, 0.02')
       .split(',').map((s) => parseFloat(s.trim())).filter((n) => Number.isFinite(n)),
+    // Depth tilt: the weights above hold at EVERY page depth, so on their own page 1
+    // is no fresher than page 20. This lifts the fresh bands near the TOP of the feed
+    // and fades back to the plain weights further down:
+    //   w'(band, slot) = w(band) × (1 + TILT × share(band) × 0.5^(slot / HALFLIFE_SLOTS))
+    // share = 1 for the <10h and 10h-7d bands, 0.5 for 7-30d, 0 for older (see
+    // AGE_BAND_TILT_SHARE). 0 = off (every page carries the same mix again).
+    DISCOVER_FRONT_TILT: parseFloat(process.env.DISCOVER_FRONT_TILT ?? '4'),
+    DISCOVER_FRONT_HALFLIFE_SLOTS: parseFloat(process.env.DISCOVER_FRONT_HALFLIFE_SLOTS ?? '90'),
 
     // ─── Curation signals: the MANUAL votes (utils/curation.js) ───────────────
     // Three deliberate human acts, as opposed to the passive signals (views, watch

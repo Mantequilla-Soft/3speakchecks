@@ -16,7 +16,7 @@
  * Same shape as the discover pool, so discoverPool.hydrate() renders these too.
  */
 const { INTEREST_POOL_COLLECTION, DISCOVER_POOL_CACHE_MS } = require('./config');
-const { feedAgeMatch } = require('./feedAge');
+const { recommendAgeMatch } = require('./feedAge');
 const { unavailableMatch } = require('./unavailable');
 const { hiddenFromFeedMatch } = require('./hiddenFromFeed');
 const { filterHiddenDocs } = require('./hiddenCreators');
@@ -29,7 +29,8 @@ async function getInterestPool(db, { force = false } = {}) {
   if (force || !cache.docs.length || Date.now() - cache.at >= DISCOVER_POOL_CACHE_MS) {
     try {
       docs = await db.collection(INTEREST_POOL_COLLECTION)
-        .find({ ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch() }, {
+        // Recommendation age bound (1 year), same as the discover pool.
+        .find({ ...recommendAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch() }, {
           projection: {
             owner: 1, author: 1, permlink: 1, assetPermlink: 1, source: 1, src: 1,
             created: 1, tags: 1, winnerTag: 1, nsfw: 1, relQ: 1,

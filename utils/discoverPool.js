@@ -8,7 +8,7 @@
  * costs one watch_history lookup and one hydration query for the page slice.
  */
 const { DISCOVER_POOL_COLLECTION, DISCOVER_POOL_CACHE_MS } = require('./config');
-const { feedAgeMatch } = require('./feedAge');
+const { recommendAgeMatch } = require('./feedAge');
 const { unavailableMatch } = require('./unavailable');
 const { hiddenFromFeedMatch, isHiddenFromFeed } = require('./hiddenFromFeed');
 const { filterHiddenDocs } = require('./hiddenCreators');
@@ -22,9 +22,10 @@ async function getPool(db, { force = false } = {}) {
   let docs = cache.docs;
   if (force || !cache.docs.length || Date.now() - cache.at >= DISCOVER_POOL_CACHE_MS) {
     try {
-      // Drop pool entries past the global age cutoff (very old legacy videos often
-      // no longer resolve). Filtered on read, so changing FEED_MAX_AGE_YEARS takes
-      // effect on the next pool refresh without rebuilding the pool.
+      // Drop pool entries past the recommendation age cutoff (RECOMMEND_MAX_AGE_DAYS,
+      // 1 year, or the global FEED_MAX_AGE_YEARS if that's stricter). Filtered on
+      // read, so changing either takes effect on the next pool refresh without
+      // rebuilding the pool. Only discover + related read this pool.
       //
       // seasonalMatch() is on the read side for the same reason, and one more: the
       // pool only rebuilds hourly, but the calendar turns over at midnight. Filtering
@@ -33,7 +34,7 @@ async function getPool(db, { force = false } = {}) {
       // field existed have no `seasonal` key and pass straight through ($nin).
       docs = await db.collection(DISCOVER_POOL_COLLECTION)
         .find({
-          ...feedAgeMatch('created'),
+          ...recommendAgeMatch('created'),
           ...unavailableMatch(),
           ...hiddenFromFeedMatch(),
           ...seasonalMatch(),

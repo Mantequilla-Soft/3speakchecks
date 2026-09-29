@@ -6,7 +6,8 @@ const { unavailableMatch } = require('../utils/unavailable');
 const { hiddenFromFeedMatch } = require('../utils/hiddenFromFeed');
 const { nsfwFilterHiveTags } = require('../utils/filters');
 const { hiddenListSync } = require('../utils/hiddenCreators');
-const { HIDDEN_AUTHORS, SHORT_SORT_INTERVAL, REWARD_WEIGHT, RESHARE_WEIGHT, ENABLE_MONGO_WRITES, RELATED_TOPIC_MULT, SHORTS_WINDOW_DAYS, SHORTS_FOLLOW_WINDOW_DAYS } = require('../utils/config');
+const { HIDDEN_AUTHORS, SHORT_SORT_INTERVAL, REWARD_WEIGHT, RESHARE_WEIGHT, ENABLE_MONGO_WRITES, RELATED_TOPIC_MULT, SHORTS_WINDOW_DAYS, SHORTS_FOLLOW_WINDOW_DAYS, SHORTS_RECENCY_BOOST, SHORTS_RECENCY_HALFLIFE_H } = require('../utils/config');
+const { recencyBoost, ageHours } = require('../utils/discoverScore');
 const { fetchHiveRewards, fetchLivePageData, fetchFollowerCounts, hiveReputationToScore, mulberry32, getFollowingList, reputationCache } = require('../utils/hive');
 const { sortedShortsCache, SORTED_SHORTS_CACHE_TTL, getCachedViews, setCachedViews } = require('../utils/cache');
 const { INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTags, tagsMatchInterests } = require('../utils/interests');
@@ -643,6 +644,11 @@ router.get('/shortssorted', async (req, res) => {
                 // they're already in the additive term above (RESHARE_WEIGHT), and
                 // paying for the same act twice would double-dip.
                 short.sort_score *= curationBoost(curationOf(short), { reshareWeight: 0 });
+
+                // Continuous recency premium (SHORTS_RECENCY_BOOST): the bucket bonus
+                // above is additive and gets swamped by the multipliers around it, so
+                // new shorts need a multiplier of their own to lead the upper pages.
+                short.sort_score *= recencyBoost(ageHours(short.createdAt), SHORTS_RECENCY_BOOST, SHORTS_RECENCY_HALFLIFE_H);
 
                 // Boost shorts whose single winning topic matches the interests.
                 if (interestSet.size || topic) {
