@@ -14,7 +14,7 @@ const { syncAudioHiveLinks } = require('./services/audioHiveSync');
 const { syncEmbedCategories } = require('./services/embedCategorySync');
 const { syncThumbnails } = require('./services/thumbnailSync');
 const { syncVideoHiveLinks } = require('./services/videoHiveSync');
-const { syncDurations } = require('./services/durationSync');
+const { syncAllDurations } = require('./services/durationSync');
 const { syncPremiumFromSubs } = require('./services/premiumSubsSync');
 const { schedule: scheduleCollectSubs } = require('./services/collectSubscriptions');
 const { schedule: scheduleVerifiedFollow } = require('./services/verifiedFollow');
@@ -24,6 +24,7 @@ const { schedule: scheduleScheduledPosts } = require('./services/scheduledPosts'
 const { schedule: scheduleWatchRetention } = require('./services/watchRetention');
 const { scheduleRetention } = require('./services/retention');
 const adInventory = require('./services/adInventory');
+const susScan = require('./services/susScan');
 const adPayouts = require('./services/adPayouts');
 const adCreativeSync = require('./services/adCreativeSync');
 const adSettings = require('./utils/adSettings');
@@ -304,10 +305,10 @@ async function startServer() {
     if (DURATION_SYNC_ENABLED) {
         const durIntervalMs = DURATION_SYNC_INTERVAL_MIN * 60 * 1000;
         setTimeout(() => {
-            syncDurations().catch(err => console.error('Duration sync error:', err));
+            syncAllDurations().catch(err => console.error('Duration sync error:', err));
             setInterval(() => {
                 if (syncRunning) return;
-                syncDurations().catch(err => console.error('Duration sync error:', err));
+                syncAllDurations().catch(err => console.error('Duration sync error:', err));
             }, durIntervalMs);
         }, 120 * 1000);
         console.log(`Duration sync scheduled every ${DURATION_SYNC_INTERVAL_MIN}min (first run in 2min)`);
@@ -386,6 +387,17 @@ async function startServer() {
         console.log(`Ad inventory forecast scheduled every ${AD_INVENTORY_INTERVAL_H}h (first run in 2 min)`);
     } else {
         console.log('Ad inventory forecast disabled (AD_INVENTORY_ENABLED=false)');
+    }
+
+    // Suspicious views / ad impressions scanner: read-only aggregations, posts new
+    // findings to SUS_ALERT_WEBHOOK_URL. Main thread, like the inventory forecast.
+    if (String(process.env.SUS_SCAN_ENABLED || 'true').toLowerCase() !== 'false') {
+        const susIntervalMs = Math.max(10, parseInt(process.env.SUS_SCAN_INTERVAL_MIN, 10) || 120) * 60 * 1000;
+        setTimeout(() => {
+            susScan.runOnce();
+            setInterval(() => susScan.runOnce(), susIntervalMs);
+        }, 10 * 60 * 1000);   // 10 min after boot, clear of the startup jobs
+        console.log(`Suspicious activity scan scheduled every ${susIntervalMs / 60000} min (first run in 10 min)`);
     }
 
     // Platform rate defaults live in Mongo so a price can change without a restart.

@@ -357,6 +357,7 @@ router.get('/shorts/:username', async (req, res) => {
                     hive_title: rewardData.title || short.embed_title || '',
                     hive_body: rewardData.body || '',
                     hive_tags: rewardData.tags || [],
+                    hive_sound: rewardData.sound || null,
                     hive_votes: live.votes,
                     hive_comments: live.comments,
                     hive_author_reputation: live.author_reputation,
@@ -544,6 +545,7 @@ router.get('/shortssorted', async (req, res) => {
                     short.hive_title = hiveData.title;
                     short.hive_body = hiveData.body;
                     short.hive_tags = hiveData.tags;
+                    short.hive_sound = hiveData.sound || null;
                     // Filter out authors with reputation <= 15 (spam/low-quality)
                     const cachedRep = reputationCache.get(parts[0]);
                     if (cachedRep && cachedRep.reputation <= 15) continue;
@@ -708,6 +710,7 @@ router.get('/shortssorted', async (req, res) => {
                         hive_title: short.hive_title || '',
                         hive_body: short.hive_body || '',
                         hive_tags: short.hive_tags || [],
+                        hive_sound: short.hive_sound || null,
                         reshare_count: short.reshare_count || 0,
                         saves: short.saves || 0,
                         viewer_tags: short.viewer_tags || 0,
@@ -803,6 +806,7 @@ router.get('/shortssorted', async (req, res) => {
                     hive_title: short.hive_title || '',
                     hive_body: short.hive_body || '',
                     hive_tags: short.hive_tags || [],
+                    hive_sound: short.hive_sound || null,
                     hive_votes: data.votes,
                     hive_comments: data.comments,
                     hive_author_reputation: data.author_reputation,

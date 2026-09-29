@@ -51,6 +51,7 @@ const {
 const { knownShape, warmShape, differs, conformedSegment } = require('../services/adConform');
 const { formatOf } = require('../utils/adFormats');
 const { burnSegment } = require('../services/adBurner');
+const { isDatacenterIp } = require('../utils/datacenterIp');
 
 const SESSIONS = process.env.AD_SESSIONS_COLLECTION || 'ad_sessions';
 const FETCH_TIMEOUT_MS = parseInt(process.env.AD_FETCH_TIMEOUT_MS, 10) || 6000;
@@ -67,7 +68,9 @@ const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
  *
  * Deliberately generous. Offices, schools and mobile carriers put hundreds of real
  * people behind one address, so this is sized to stop a script in a loop, not to
- * ration a household. Anything subtler than a loop is the settlement check's job.
+ * ration a household. Subtler farming is what the datacenter check and the
+ * one-ad-per-address-per-video-per-day rule below are for; payout itself has NO
+ * fraud check (services/adPayouts.js pays every completed impression).
  */
 const rateBuckets = new Map();
 function overRateLimit(ip) {
@@ -108,6 +111,66 @@ function claimedAdKeys(body) {
       .filter((k) => typeof k === 'string' && /^[0-9a-f]{12}$/.test(k))
       .slice(0, 40),
   );
+}
+
+/**
+ * One ad per address per video per day.
+ *
+ * Without it an anonymous viewer's cap resets on every page load (capId is per
+ * load by design), so reloading a video in a loop earns its creator one paid
+ * impression per reload. The pool per period is fixed, so that does not raise
+ * what we pay out: it moves money from honest creators to whoever runs the loop,
+ * and bills advertisers for a script. A person rewatching the same video the
+ * same day simply gets it without an ad.
+ *
+ * Same deal as the rate limiter: the key is a hash in a Map with an expiry,
+ * never a document or a log line. A restart forgets it, which costs at most one
+ * extra ad per pair.
+ *
+ * Marked only when an ad was actually PLAYED, not when one was handed out: a
+ * session only parks its key under its sid (pendingRepeat), and recordDelivery
+ * marks it the first time that session's impression is counted, which is the
+ * same "delivered" that billing and payout use. Someone who leaves before the ad
+ * plays has not used up the day's ad.
+ */
+const REPEAT_WINDOW_MS = 24 * 60 * 60 * 1000;
+const PENDING_REPEAT_MS = 2 * 60 * 60 * 1000;
+const repeatSeen = new Map();
+const pendingRepeat = new Map();   // sid -> { key, exp }
+function parkRepeat(sid, key) {
+  if (!sid || !key) return;
+  const now = Date.now();
+  if (pendingRepeat.size > 50000) {
+    for (const [s, p] of pendingRepeat) if (p.exp <= now) pendingRepeat.delete(s);
+  }
+  pendingRepeat.set(sid, { key, exp: now + PENDING_REPEAT_MS });
+}
+/** Called on a session's first counted delivery. */
+function repeatPlayed(sid) {
+  const p = pendingRepeat.get(sid);
+  if (!p) return;
+  pendingRepeat.delete(sid);
+  if (p.exp > Date.now()) markRepeat(p.key);
+}
+function repeatKeyOf(ip, owner, permlink) {
+  if (!ip) return null;
+  return crypto.createHash('sha256').update(`${ip}|${owner}/${permlink}`).digest('base64').slice(0, 22);
+}
+function seenRepeat(key) {
+  if (!key) return false;
+  const exp = repeatSeen.get(key);
+  if (exp && exp > Date.now()) return true;
+  if (exp) repeatSeen.delete(key);
+  return false;
+}
+function markRepeat(key) {
+  if (!key) return;
+  const now = Date.now();
+  // Opportunistic prune, as overRateLimit does.
+  if (repeatSeen.size > 50000) {
+    for (const [k, exp] of repeatSeen) if (exp <= now) repeatSeen.delete(k);
+  }
+  repeatSeen.set(key, now + REPEAT_WINDOW_MS);
 }
 
 /** The caller's address, for rate limiting only. Never stored, never returned. */
@@ -242,14 +305,23 @@ async function ensureSessionIndexes() {
  * that module for a host at the moment it needs one.
  */
 const {
-  isBrowserSafe, browserAssetUrl, gatewaySiblings, sameContentScope, creativeManifestUrl,
+  isBrowserSafe, isRedirectSafe, browserAssetUrl, gatewaySiblings, sameContentScope, creativeManifestUrl,
+  markGatewayDown, urlsHealthFirst, startGatewayProbe,
 } = require('../utils/adGateways');
+const { relayedSegment } = require('../services/adSegmentRelay');
+
+// Only the serving process watches the Bunny zones; scripts that require the
+// gateway module do not start a timer.
+startGatewayProbe();
 
 async function fetchOnce(url) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
   try {
     const r = await fetch(url, { redirect: 'follow', signal: ac.signal });
+    // 403 is Bunny's "Domain suspended" page, for every CID: stop trying that zone
+    // first for a while (see markGatewayDown).
+    if (r.status === 403) markGatewayDown(url);
     if (!r.ok) throw new Error(`status ${r.status}`);
     const text = await r.text();
     if (!/#EXTM3U/.test(text)) throw new Error('not a manifest');
@@ -261,7 +333,7 @@ async function fetchOnce(url) {
 
 async function fetchText(url) {
   let firstErr = null;
-  for (const candidate of [url, ...gatewaySiblings(url)]) {
+  for (const candidate of urlsHealthFirst([url, ...gatewaySiblings(url)])) {
     try {
       return await fetchOnce(candidate);
     } catch (err) {
@@ -726,6 +798,9 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // a candidate query. Answers 'no ad' rather than an error — a rate-limited
     // viewer must still get their video.
     if (overRateLimit(callerIp(req))) return res.json({ ad: null, reason: 'rate_limited' });
+    // Hosting ranges (clouds, VPS, datacenter VPNs): no real viewer browses from
+    // one, a script does. Same offline list as ButrAuth's signup gate; fails open.
+    if (isDatacenterIp(callerIp(req))) return res.json({ ad: null, reason: 'datacenter' });
     await ensureSessionIndexes();
 
     const b = req.body || {};
@@ -772,6 +847,22 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // neither is asked for one.
     if (surface === 'watch' && !/^https:\/\//i.test(contentManifestUrl)) {
       return res.status(400).json({ error: 'manifestUrl must be an https URL' });
+    }
+    /* One ad per address per video per day (see repeatKeyOf). Not the upload gate:
+     * it has no video yet and its own per-account cap. A response that places
+     * anything (roll, banner or shorts spot) carries its session's `/m/<sid>` urls;
+     * the key is parked under that sid and only becomes a "seen" once the ad is
+     * actually delivered (repeatPlayed, from recordDelivery). Wrapping res.json
+     * covers every one of the many return paths below without touching them. */
+    if (surface !== 'upload') {
+      const repeatKey = repeatKeyOf(callerIp(req), owner, permlink);
+      if (seenRepeat(repeatKey)) return res.json({ ad: null, reason: 'repeat_viewer' });
+      const sendJson = res.json.bind(res);
+      res.json = (body) => {
+        const m = body ? /\/m\/([0-9a-f]{32})[./]/.exec(JSON.stringify(body)) : null;
+        if (m) parkRepeat(m[1], repeatKey);
+        return sendJson(body);
+      };
     }
     /* ── THE PRE-UPLOAD GATE ───────────────────────────────────────────────────
      *
@@ -1068,8 +1159,13 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // rather than taken from the request: the client could otherwise claim any
     // duration and place itself inside a window the advertiser paid to exclude.
     // `{ permlink, owner }` is a unique index, so this is a point read.
+    // Legacy uploads (the old uploader, HiveSuite) have no embed-video row at all,
+    // only one in `videos`, which carries the duration too. Without this fallback
+    // every length-targeted campaign skipped them as "unknown length".
     const video = await db.collection('embed-video')
-      .findOne({ permlink, owner }, { projection: { duration: 1, short: 1 } });
+      .findOne({ permlink, owner }, { projection: { duration: 1, short: 1 } })
+      || await db.collection('videos')
+        .findOne({ permlink, owner }, { projection: { duration: 1 } });
     const videoSeconds = Number(video && video.duration) || null;
 
     // 🚨 NO WATCH-SURFACE ADS ON A SHORT, whatever its length.
@@ -1303,9 +1399,12 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
           // Resolved for a PAGE, which gets one attempt and no fallback. The image
           // is an absolute url from somewhere else entirely and is only rewritten in
           // the case where it does sit on a gateway of ours.
-          imageUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO ? null : browserAssetUrl(bannerCreative.imageUrl),
+          // For the page asking, so a gateway that answers only some pages is used
+          // for those pages (ipfs.3speak.tv on 3speak.tv while Bunny is down).
+          imageUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO
+            ? null : browserAssetUrl(bannerCreative.imageUrl, { origin: str(req.headers.origin, 200) || null }),
           videoUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO
-            ? creativeManifestUrl(bannerCreative, { browser: true }) : null,
+            ? creativeManifestUrl(bannerCreative, { browser: true, origin: str(req.headers.origin, 200) || null }) : null,
           // Required disclosure. Burned banners carry it in the pixels; an overlay has
           // to draw its own, and it is not optional in either case.
           label: AD_BANNER_LABEL || 'Ad',
@@ -1388,8 +1487,14 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
     // to a browser, so if the gateway that answered will not send CORS headers there is
     // no playlist we can build that the viewer can play. Bail to the fail-open path
     // rather than emit one that is guaranteed to error.
-    if (!isBrowserSafe(content.url)) {
-      throw new Error(`gateway ${new URL(content.url).hostname} sends no CORS headers`);
+    //
+    // Judged for the page ASKING (its Origin): ipfs.3speak.tv answers 3speak.tv and
+    // the embed, which is what keeps ads playing there while the Bunny zones are down.
+    // Content segments are listed directly (no redirect), so the page's own Origin is
+    // what the gateway sees.
+    const pageOrigin = str(req.headers.origin, 200) || null;
+    if (!isBrowserSafe(content.url, pageOrigin)) {
+      throw new Error(`gateway ${new URL(content.url).hostname} sends no CORS headers for ${pageOrigin || 'this page'}`);
     }
     const publicBase = publicBaseOf(req);
     res.set('Content-Type', 'application/vnd.apple.mpegurl');
@@ -1471,6 +1576,12 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
     // A banner-only playback has no roll to splice: the playlist is already correct.
     if (session.adManifestUrl) {
       const adSegments = await loadAdSegments(session.adManifestUrl, session.adTrimSeconds);
+      // Segments that will have to be relayed (see sendSegment) are fetched now, in
+      // the background, so the viewer does not wait on a cold gateway fetch the
+      // moment the spot starts. Cached after the first viewer; never blocks this reply.
+      for (const s of adSegments) {
+        if (!isRedirectSafe(s.url)) relayedSegment(s.url).catch(() => {});
+      }
 
       /* 🚨 DOES THIS SPOT'S AUDIO MATCH THE VIDEO IT IS GOING INTO?
        *
@@ -1686,6 +1797,9 @@ async function recordDelivery({ db, sid, campaignId, facts, completed, maxFacts,
       await impressions.updateOne(key, { $max: maxFacts }).catch(() => {});
     }
     if (first) {
+      // The ad has now really played for this session: from here on this address
+      // gets no further ad on this video today.
+      repeatPlayed(sid);
       await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
         { _id: campaignId },
         { $inc: { deliveredImpressions: 1 }, $set: { status: STATES.RUNNING, updatedAt: new Date() } },
@@ -2273,6 +2387,16 @@ async function sendSegment(res, seg, session) {
     if (file) {
       res.type('video/mp2t');
       return res.sendFile(file);
+    }
+  }
+  // A browser follows our 302 with `Origin: null`, which only the Bunny zones accept.
+  // On any other gateway (ipfs.3speak.tv while Bunny is down) serve the bytes from
+  // here instead; if even that fails, the redirect is no worse than before.
+  if (!isRedirectSafe(seg.url)) {
+    const relayed = await relayedSegment(seg.url).catch(() => null);
+    if (relayed) {
+      res.type('video/mp2t');
+      return res.sendFile(relayed);
     }
   }
   return res.redirect(302, seg.url);

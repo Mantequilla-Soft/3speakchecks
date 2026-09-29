@@ -14,6 +14,17 @@ const HEALTH_CACHE_MS = 8000;
 const HEALTH_PING_TIMEOUT_MS = 1500;
 let healthCache = { ts: 0, ok: true, mongo: 'unknown' };
 
+// Only an OUTAGE takes the site down, not a blip. One failed ping used to flip every
+// page load to the maintenance screen: on 2026-09-29 a ~30s network drop to the Mongo
+// primary blanked 3speak.tv for everyone loading in that window, while the database
+// itself never went down. Now a failure starts a streak, and ok:false is reported only
+// once the streak has lasted HEALTH_DOWN_AFTER_MS AND seen HEALTH_DOWN_MIN_FAILS failed
+// pings. Until then the answer is ok:true with mongo:'degraded', so monitoring still
+// sees it. Any successful ping ends the streak.
+const HEALTH_DOWN_AFTER_MS = parseInt(process.env.HEALTH_DOWN_AFTER_MS, 10) || 30000;
+const HEALTH_DOWN_MIN_FAILS = parseInt(process.env.HEALTH_DOWN_MIN_FAILS, 10) || 3;
+let failStreak = { since: 0, count: 0 };
+
 async function pingMongo() {
     const db = getDb(); // throws if we never connected
     await Promise.race([
@@ -43,15 +54,18 @@ router.get('/healthz', async (req, res) => {
         });
     }
 
-    let ok = false;
-    let mongo = 'down';
+    let ok = true;
+    let mongo = 'up';
     try {
         await pingMongo();
-        ok = true;
-        mongo = 'up';
+        failStreak = { since: 0, count: 0 };
     } catch (_) {
-        ok = false;
-        mongo = 'down';
+        if (!failStreak.count) failStreak.since = now;
+        failStreak.count += 1;
+        const sustained = failStreak.count >= HEALTH_DOWN_MIN_FAILS
+            && now - failStreak.since >= HEALTH_DOWN_AFTER_MS;
+        ok = !sustained;
+        mongo = sustained ? 'down' : 'degraded';
     }
     healthCache = { ts: now, ok, mongo };
     res.json({ ok, maintenance: false, mongo, cached: false, ts: now });

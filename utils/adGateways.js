@@ -54,6 +54,96 @@ const CORS_HOSTS = ['ipfs-3speak.b-cdn.net', 'hotipfs-3speak-1.b-cdn.net'];
 const COLD_CAPABLE_HOSTS = ['ipfs-3speak.b-cdn.net', 'ipfs.3speak.tv'];
 
 /**
+ * Gateways that send CORS headers to SOME pages only. ipfs.3speak.tv (not our box)
+ * echoes Access-Control-Allow-Origin for exactly these two and nothing else: not www,
+ * not preview, not a third-party site, and not `Origin: null`. That is enough to keep
+ * ads running on 3speak.tv and the embed when both Bunny zones are down, which
+ * happens from time to time (403 "Domain suspended", 2026-09-08 and 2026-09-29).
+ *
+ * 🚨 `null` is never in any list. A browser sends `Origin: null` after a cross-origin
+ * REDIRECT, so a 302 from checker.3speak.tv to one of these hosts fails CORS even for
+ * a page listed here. That is why ad segments on such a host are relayed, not
+ * redirected (see isRedirectSafe and services/adSegmentRelay.js).
+ */
+const ORIGIN_CORS_HOSTS = {
+  'ipfs.3speak.tv': ['https://3speak.tv', 'https://play.3speak.tv'],
+};
+
+/**
+ * Gateways seen answering 403 recently. Bunny's suspension page is a 403 for every
+ * CID, so one is enough to stop sending first attempts there for a while; a 5xx is
+ * NOT, because hotipfs answers 500 for cold content on a perfectly healthy day.
+ * In memory, per process: a restart simply retries everything once.
+ */
+const GATEWAY_DOWN_MS = 5 * 60 * 1000;
+const downUntil = new Map();
+function markGatewayDown(url) {
+  try {
+    const host = new URL(url).hostname;
+    if (GATEWAY_HOSTS.includes(host)) downUntil.set(host, Date.now() + GATEWAY_DOWN_MS);
+  } catch (_) { /* not a url, nothing to mark */ }
+}
+function isGatewayDown(host) {
+  const until = downUntil.get(host);
+  if (!until) return false;
+  if (until > Date.now()) return true;
+  downUntil.delete(host);
+  return false;
+}
+/** Healthy hosts keep their order; hosts marked down go to the back, never away. */
+const healthFirst = (hosts) => [
+  ...hosts.filter((h) => !isGatewayDown(h)),
+  ...hosts.filter((h) => isGatewayDown(h)),
+];
+const hostOf = (url) => { try { return new URL(url).hostname; } catch (_) { return ''; } };
+/** Same list of urls, the ones on a host marked down moved to the back. */
+const urlsHealthFirst = (urls) => [
+  ...urls.filter((u) => !isGatewayDown(hostOf(u))),
+  ...urls.filter((u) => isGatewayDown(hostOf(u))),
+];
+
+/**
+ * Keep the down-marks honest without waiting for a viewer to hit a dead zone.
+ *
+ * Every 2 minutes, ask each Bunny zone for a manifest: a 403 marks it down, any other
+ * answer (200, 404 for an unpinned CID, even a 5xx for cold content) clears the mark,
+ * because only the suspension page is a 403 for everything. So a fresh process knows
+ * within seconds, and recovery is picked up within minutes rather than after the
+ * 5-minute mark lapses on its own. One tiny request per zone, never on a viewer's path.
+ */
+const PROBE_EVERY_MS = 2 * 60 * 1000;
+const PROBE_CID = process.env.AD_GATEWAY_PROBE_CID || 'QmRTYhAotD5onwzi3HEZD8bptmb7cccUiuaEZhjqJcz1Ra';
+let probeTimer = null;
+async function probeGateways() {
+  await Promise.all(CORS_HOSTS.map(async (host) => {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 8000);
+    try {
+      const r = await fetch(`https://${host}/ipfs/${PROBE_CID}/manifest.m3u8`, { signal: ac.signal });
+      if (r.status === 403) downUntil.set(host, Date.now() + GATEWAY_DOWN_MS);
+      else downUntil.delete(host);
+    } catch (_) {
+      // Unreachable is not "suspended"; leave whatever the last real answer said.
+    } finally {
+      clearTimeout(t);
+    }
+  }));
+}
+function startGatewayProbe() {
+  if (probeTimer) return;
+  probeGateways().catch(() => {});
+  probeTimer = setInterval(() => probeGateways().catch(() => {}), PROBE_EVERY_MS);
+  probeTimer.unref();
+}
+
+/** May a page on `origin` read this host? */
+function corsAllows(host, origin) {
+  if (CORS_HOSTS.includes(host)) return true;
+  const allowed = ORIGIN_CORS_HOSTS[host];
+  return !!(allowed && origin && allowed.includes(origin));
+}
+
+/**
  * An operator escape hatch, for the next time a gateway dies at an inconvenient hour.
  * Accepts a bare hostname or a full url, and goes to the front of the preference.
  *
@@ -74,8 +164,10 @@ const ENV_HOST = (() => {
  * The host to USE. Server-side callers need one that can pull cold content; page-
  * facing ones need that AND readable CORS, because they have no second attempt.
  */
-function preferredHost({ browser = false } = {}) {
-  const usable = COLD_CAPABLE_HOSTS.filter((h) => !browser || CORS_HOSTS.includes(h));
+function preferredHost({ browser = false, origin = null } = {}) {
+  // `origin` is the page asking, when we know it: a host that only answers some
+  // pages is usable for those pages. Hosts seen down go last, not away.
+  const usable = healthFirst(COLD_CAPABLE_HOSTS.filter((h) => !browser || corsAllows(h, origin)));
   const ordered = ENV_HOST ? [ENV_HOST, ...usable] : usable;
   // GATEWAY_HOSTS[0] is the backstop: a filter that removed everything would
   // otherwise return undefined and build "https://undefined/ipfs/...".
@@ -118,20 +210,28 @@ function creativeIsEncoded(creative) {
   return !!(creative && (creative.manifestCid || creative.manifestUrl));
 }
 
-/** Can a browser read this url at all? CORS only. See CORS_HOSTS. */
-const isBrowserSafe = (url) => {
-  try { return CORS_HOSTS.includes(new URL(url).hostname); } catch (_) { return false; }
-};
+/**
+ * Can a page on `origin` read this url directly? CORS only, see CORS_HOSTS and
+ * ORIGIN_CORS_HOSTS. Without an origin only the hosts that answer everyone count.
+ */
+const isBrowserSafe = (url, origin = null) => corsAllows(hostOf(url), origin);
+
+/**
+ * Can a browser follow a 302 from us to this url? Stricter than isBrowserSafe: after
+ * a cross-origin redirect the browser sends `Origin: null`, which only the hosts that
+ * answer everyone accept.
+ */
+const isRedirectSafe = (url) => CORS_HOSTS.includes(hostOf(url));
 
 /**
  * The same object, on a host we would choose ourselves. Non-gateway urls (an
  * advertiser's own image host, images.3speak.tv) are returned untouched.
  */
-function browserAssetUrl(url) {
+function browserAssetUrl(url, { origin = null } = {}) {
   try {
     const u = new URL(url);
     if (!GATEWAY_HOSTS.includes(u.hostname)) return url;
-    u.hostname = preferredHost({ browser: true });
+    u.hostname = preferredHost({ browser: true, origin });
     return u.href;
   } catch (_) {
     return url;
@@ -175,7 +275,13 @@ module.exports = {
   creativeManifestUrl,
   creativeIsEncoded,
   isBrowserSafe,
+  isRedirectSafe,
   browserAssetUrl,
   gatewaySiblings,
   sameContentScope,
+  ORIGIN_CORS_HOSTS,
+  markGatewayDown,
+  isGatewayDown,
+  urlsHealthFirst,
+  startGatewayProbe,
 };

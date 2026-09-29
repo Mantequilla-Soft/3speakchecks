@@ -1150,7 +1150,9 @@ module.exports = {
     // the IP is used and dropped inside the request, exactly as watchTracking.js
     // already does for country lookup. Set high enough that shared connections
     // (offices, schools, mobile carriers) are never the ones who hit it.
-    AD_SESSION_RATE_PER_MIN: parseInt(process.env.AD_SESSION_RATE_PER_MIN) || 40,
+    // Was 40 until 2026-09-29. The whole platform makes ~3k ad sessions a WEEK, so
+    // 10 a minute from one address is still far above any real shared connection.
+    AD_SESSION_RATE_PER_MIN: parseInt(process.env.AD_SESSION_RATE_PER_MIN) || 10,
 
     // How many advertisers may hold the SAME position over overlapping flights.
     //

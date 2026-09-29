@@ -91,6 +91,22 @@ function hiveReputationToScore(rawReputation) {
     return Math.round(score * 10) / 10;
 }
 
+// The song a short uses (editor music library), from json_metadata.video.sound;
+// the shorts soundtrack ticker shows it instead of "Original Audio". Only short
+// strings are passed on, the frontend cleans them again.
+function pickSound(s) {
+    if (!s || typeof s !== 'object' || typeof s.title !== 'string' || !s.title) return null;
+    const str = (v, max) => (typeof v === 'string' && v ? v.slice(0, max) : undefined);
+    return {
+        title: str(s.title, 100),
+        artist: str(s.artist, 100),
+        account: str(s.account, 16),
+        source: str(s.source, 60),
+        url: str(s.url, 300),
+        license: str(s.license, 40),
+    };
+}
+
 // Fetch Hive reward + content data for sorting — caches reward, title, body, tags (15min TTL)
 async function fetchHiveRewards(authorPerms) {
     const results = new Map();
@@ -100,7 +116,7 @@ async function fetchHiveRewards(authorPerms) {
         const key = `${author}/${permlink}`;
         const cached = rewardCache.get(key);
         if (cached && Date.now() - cached.timestamp < REWARD_CACHE_TTL) {
-            results.set(key, { reward: cached.reward, title: cached.title || '', body: cached.body || '', tags: cached.tags || [] });
+            results.set(key, { reward: cached.reward, title: cached.title || '', body: cached.body || '', tags: cached.tags || [], sound: cached.sound || null });
         } else {
             toFetch.push({ author, permlink, key });
         }
@@ -136,13 +152,15 @@ async function fetchHiveRewards(authorPerms) {
             const title = post.title || '';
             const body = post.body || '';
             let tags = [];
+            let sound = null;
             try {
                 const metadata = JSON.parse(post.json_metadata || '{}');
                 tags = Array.isArray(metadata.tags) ? metadata.tags : [];
+                sound = pickSound(metadata.video && metadata.video.sound);
             } catch (e) { /* ignore */ }
 
-            results.set(postKey, { reward, title, body, tags });
-            rewardCache.set(postKey, { reward, title, body, tags, timestamp: Date.now() });
+            results.set(postKey, { reward, title, body, tags, sound });
+            rewardCache.set(postKey, { reward, title, body, tags, sound, timestamp: Date.now() });
 
             if (!reputationCache.has(post.author) || Date.now() - (reputationCache.get(post.author)?.timestamp || 0) >= REPUTATION_CACHE_TTL) {
                 reputationCache.set(post.author, { reputation: hiveReputationToScore(post.author_reputation), timestamp: Date.now() });
