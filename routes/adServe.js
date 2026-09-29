@@ -51,6 +51,7 @@ const {
 const { knownShape, warmShape, differs, conformedSegment } = require('../services/adConform');
 const { formatOf } = require('../utils/adFormats');
 const { burnSegment } = require('../services/adBurner');
+const { isDatacenterIp } = require('../utils/datacenterIp');
 
 const SESSIONS = process.env.AD_SESSIONS_COLLECTION || 'ad_sessions';
 const FETCH_TIMEOUT_MS = parseInt(process.env.AD_FETCH_TIMEOUT_MS, 10) || 6000;
@@ -67,7 +68,9 @@ const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
  *
  * Deliberately generous. Offices, schools and mobile carriers put hundreds of real
  * people behind one address, so this is sized to stop a script in a loop, not to
- * ration a household. Anything subtler than a loop is the settlement check's job.
+ * ration a household. Subtler farming is what the datacenter check and the
+ * one-ad-per-address-per-video-per-day rule below are for; payout itself has NO
+ * fraud check (services/adPayouts.js pays every completed impression).
  */
 const rateBuckets = new Map();
 function overRateLimit(ip) {
@@ -108,6 +111,43 @@ function claimedAdKeys(body) {
       .filter((k) => typeof k === 'string' && /^[0-9a-f]{12}$/.test(k))
       .slice(0, 40),
   );
+}
+
+/**
+ * One ad per address per video per day.
+ *
+ * Without it an anonymous viewer's cap resets on every page load (capId is per
+ * load by design), so reloading a video in a loop earns its creator one paid
+ * impression per reload. The pool per period is fixed, so that does not raise
+ * what we pay out: it moves money from honest creators to whoever runs the loop,
+ * and bills advertisers for a script. A person rewatching the same video the
+ * same day simply gets it without an ad.
+ *
+ * Same deal as the rate limiter: the key is a hash in a Map with an expiry,
+ * never a document or a log line, and it only holds pairs that got an ad in the
+ * last 24h. A restart forgets it, which costs at most one extra ad per pair.
+ */
+const REPEAT_WINDOW_MS = 24 * 60 * 60 * 1000;
+const repeatSeen = new Map();
+function repeatKeyOf(ip, owner, permlink) {
+  if (!ip) return null;
+  return crypto.createHash('sha256').update(`${ip}|${owner}/${permlink}`).digest('base64').slice(0, 22);
+}
+function seenRepeat(key) {
+  if (!key) return false;
+  const exp = repeatSeen.get(key);
+  if (exp && exp > Date.now()) return true;
+  if (exp) repeatSeen.delete(key);
+  return false;
+}
+function markRepeat(key) {
+  if (!key) return;
+  const now = Date.now();
+  // Opportunistic prune, as overRateLimit does.
+  if (repeatSeen.size > 50000) {
+    for (const [k, exp] of repeatSeen) if (exp <= now) repeatSeen.delete(k);
+  }
+  repeatSeen.set(key, now + REPEAT_WINDOW_MS);
 }
 
 /** The caller's address, for rate limiting only. Never stored, never returned. */
@@ -726,6 +766,9 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // a candidate query. Answers 'no ad' rather than an error — a rate-limited
     // viewer must still get their video.
     if (overRateLimit(callerIp(req))) return res.json({ ad: null, reason: 'rate_limited' });
+    // Hosting ranges (clouds, VPS, datacenter VPNs): no real viewer browses from
+    // one, a script does. Same offline list as ButrAuth's signup gate; fails open.
+    if (isDatacenterIp(callerIp(req))) return res.json({ ad: null, reason: 'datacenter' });
     await ensureSessionIndexes();
 
     const b = req.body || {};
@@ -772,6 +815,20 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // neither is asked for one.
     if (surface === 'watch' && !/^https:\/\//i.test(contentManifestUrl)) {
       return res.status(400).json({ error: 'manifestUrl must be an https URL' });
+    }
+    /* One ad per address per video per day (see repeatKeyOf). Not the upload gate:
+     * it has no video yet and its own per-account cap. The pair is remembered only
+     * when this response actually carries an ad or a banner, so a request that got
+     * nothing does not use up the day's ad. Wrapping res.json covers every one of
+     * the many return paths below without touching them. */
+    if (surface !== 'upload') {
+      const repeatKey = repeatKeyOf(callerIp(req), owner, permlink);
+      if (seenRepeat(repeatKey)) return res.json({ ad: null, reason: 'repeat_viewer' });
+      const sendJson = res.json.bind(res);
+      res.json = (body) => {
+        if (body && (body.ad || body.banner)) markRepeat(repeatKey);
+        return sendJson(body);
+      };
     }
     /* ── THE PRE-UPLOAD GATE ───────────────────────────────────────────────────
      *
