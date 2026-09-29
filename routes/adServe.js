@@ -124,11 +124,34 @@ function claimedAdKeys(body) {
  * same day simply gets it without an ad.
  *
  * Same deal as the rate limiter: the key is a hash in a Map with an expiry,
- * never a document or a log line, and it only holds pairs that got an ad in the
- * last 24h. A restart forgets it, which costs at most one extra ad per pair.
+ * never a document or a log line. A restart forgets it, which costs at most one
+ * extra ad per pair.
+ *
+ * Marked only when an ad was actually PLAYED, not when one was handed out: a
+ * session only parks its key under its sid (pendingRepeat), and recordDelivery
+ * marks it the first time that session's impression is counted, which is the
+ * same "delivered" that billing and payout use. Someone who leaves before the ad
+ * plays has not used up the day's ad.
  */
 const REPEAT_WINDOW_MS = 24 * 60 * 60 * 1000;
+const PENDING_REPEAT_MS = 2 * 60 * 60 * 1000;
 const repeatSeen = new Map();
+const pendingRepeat = new Map();   // sid -> { key, exp }
+function parkRepeat(sid, key) {
+  if (!sid || !key) return;
+  const now = Date.now();
+  if (pendingRepeat.size > 50000) {
+    for (const [s, p] of pendingRepeat) if (p.exp <= now) pendingRepeat.delete(s);
+  }
+  pendingRepeat.set(sid, { key, exp: now + PENDING_REPEAT_MS });
+}
+/** Called on a session's first counted delivery. */
+function repeatPlayed(sid) {
+  const p = pendingRepeat.get(sid);
+  if (!p) return;
+  pendingRepeat.delete(sid);
+  if (p.exp > Date.now()) markRepeat(p.key);
+}
 function repeatKeyOf(ip, owner, permlink) {
   if (!ip) return null;
   return crypto.createHash('sha256').update(`${ip}|${owner}/${permlink}`).digest('base64').slice(0, 22);
@@ -817,16 +840,18 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       return res.status(400).json({ error: 'manifestUrl must be an https URL' });
     }
     /* One ad per address per video per day (see repeatKeyOf). Not the upload gate:
-     * it has no video yet and its own per-account cap. The pair is remembered only
-     * when this response actually carries an ad or a banner, so a request that got
-     * nothing does not use up the day's ad. Wrapping res.json covers every one of
-     * the many return paths below without touching them. */
+     * it has no video yet and its own per-account cap. A response that places
+     * anything (roll, banner or shorts spot) carries its session's `/m/<sid>` urls;
+     * the key is parked under that sid and only becomes a "seen" once the ad is
+     * actually delivered (repeatPlayed, from recordDelivery). Wrapping res.json
+     * covers every one of the many return paths below without touching them. */
     if (surface !== 'upload') {
       const repeatKey = repeatKeyOf(callerIp(req), owner, permlink);
       if (seenRepeat(repeatKey)) return res.json({ ad: null, reason: 'repeat_viewer' });
       const sendJson = res.json.bind(res);
       res.json = (body) => {
-        if (body && (body.ad || body.banner)) markRepeat(repeatKey);
+        const m = body ? /\/m\/([0-9a-f]{32})[./]/.exec(JSON.stringify(body)) : null;
+        if (m) parkRepeat(m[1], repeatKey);
         return sendJson(body);
       };
     }
@@ -1748,6 +1773,9 @@ async function recordDelivery({ db, sid, campaignId, facts, completed, maxFacts,
       await impressions.updateOne(key, { $max: maxFacts }).catch(() => {});
     }
     if (first) {
+      // The ad has now really played for this session: from here on this address
+      // gets no further ad on this video today.
+      repeatPlayed(sid);
       await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
         { _id: campaignId },
         { $inc: { deliveredImpressions: 1 }, $set: { status: STATES.RUNNING, updatedAt: new Date() } },
