@@ -305,14 +305,23 @@ async function ensureSessionIndexes() {
  * that module for a host at the moment it needs one.
  */
 const {
-  isBrowserSafe, browserAssetUrl, gatewaySiblings, sameContentScope, creativeManifestUrl,
+  isBrowserSafe, isRedirectSafe, browserAssetUrl, gatewaySiblings, sameContentScope, creativeManifestUrl,
+  markGatewayDown, urlsHealthFirst, startGatewayProbe,
 } = require('../utils/adGateways');
+const { relayedSegment } = require('../services/adSegmentRelay');
+
+// Only the serving process watches the Bunny zones; scripts that require the
+// gateway module do not start a timer.
+startGatewayProbe();
 
 async function fetchOnce(url) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
   try {
     const r = await fetch(url, { redirect: 'follow', signal: ac.signal });
+    // 403 is Bunny's "Domain suspended" page, for every CID: stop trying that zone
+    // first for a while (see markGatewayDown).
+    if (r.status === 403) markGatewayDown(url);
     if (!r.ok) throw new Error(`status ${r.status}`);
     const text = await r.text();
     if (!/#EXTM3U/.test(text)) throw new Error('not a manifest');
@@ -324,7 +333,7 @@ async function fetchOnce(url) {
 
 async function fetchText(url) {
   let firstErr = null;
-  for (const candidate of [url, ...gatewaySiblings(url)]) {
+  for (const candidate of urlsHealthFirst([url, ...gatewaySiblings(url)])) {
     try {
       return await fetchOnce(candidate);
     } catch (err) {
@@ -1390,9 +1399,12 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
           // Resolved for a PAGE, which gets one attempt and no fallback. The image
           // is an absolute url from somewhere else entirely and is only rewritten in
           // the case where it does sit on a gateway of ours.
-          imageUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO ? null : browserAssetUrl(bannerCreative.imageUrl),
+          // For the page asking, so a gateway that answers only some pages is used
+          // for those pages (ipfs.3speak.tv on 3speak.tv while Bunny is down).
+          imageUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO
+            ? null : browserAssetUrl(bannerCreative.imageUrl, { origin: str(req.headers.origin, 200) || null }),
           videoUrl: bannerCreative.kind === CREATIVE_KINDS.VIDEO
-            ? creativeManifestUrl(bannerCreative, { browser: true }) : null,
+            ? creativeManifestUrl(bannerCreative, { browser: true, origin: str(req.headers.origin, 200) || null }) : null,
           // Required disclosure. Burned banners carry it in the pixels; an overlay has
           // to draw its own, and it is not optional in either case.
           label: AD_BANNER_LABEL || 'Ad',
@@ -1475,8 +1487,14 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
     // to a browser, so if the gateway that answered will not send CORS headers there is
     // no playlist we can build that the viewer can play. Bail to the fail-open path
     // rather than emit one that is guaranteed to error.
-    if (!isBrowserSafe(content.url)) {
-      throw new Error(`gateway ${new URL(content.url).hostname} sends no CORS headers`);
+    //
+    // Judged for the page ASKING (its Origin): ipfs.3speak.tv answers 3speak.tv and
+    // the embed, which is what keeps ads playing there while the Bunny zones are down.
+    // Content segments are listed directly (no redirect), so the page's own Origin is
+    // what the gateway sees.
+    const pageOrigin = str(req.headers.origin, 200) || null;
+    if (!isBrowserSafe(content.url, pageOrigin)) {
+      throw new Error(`gateway ${new URL(content.url).hostname} sends no CORS headers for ${pageOrigin || 'this page'}`);
     }
     const publicBase = publicBaseOf(req);
     res.set('Content-Type', 'application/vnd.apple.mpegurl');
@@ -1558,6 +1576,12 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
     // A banner-only playback has no roll to splice: the playlist is already correct.
     if (session.adManifestUrl) {
       const adSegments = await loadAdSegments(session.adManifestUrl, session.adTrimSeconds);
+      // Segments that will have to be relayed (see sendSegment) are fetched now, in
+      // the background, so the viewer does not wait on a cold gateway fetch the
+      // moment the spot starts. Cached after the first viewer; never blocks this reply.
+      for (const s of adSegments) {
+        if (!isRedirectSafe(s.url)) relayedSegment(s.url).catch(() => {});
+      }
 
       /* 🚨 DOES THIS SPOT'S AUDIO MATCH THE VIDEO IT IS GOING INTO?
        *
@@ -2363,6 +2387,16 @@ async function sendSegment(res, seg, session) {
     if (file) {
       res.type('video/mp2t');
       return res.sendFile(file);
+    }
+  }
+  // A browser follows our 302 with `Origin: null`, which only the Bunny zones accept.
+  // On any other gateway (ipfs.3speak.tv while Bunny is down) serve the bytes from
+  // here instead; if even that fails, the redirect is no worse than before.
+  if (!isRedirectSafe(seg.url)) {
+    const relayed = await relayedSegment(seg.url).catch(() => null);
+    if (relayed) {
+      res.type('video/mp2t');
+      return res.sendFile(relayed);
     }
   }
   return res.redirect(302, seg.url);
