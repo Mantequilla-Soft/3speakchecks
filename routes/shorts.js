@@ -508,9 +508,16 @@ router.get('/shortssorted', async (req, res) => {
                 console.log(`Fetching sorted shorts for app: ${appFilter}`);
             }
 
-            // Fetch recent shorts sorted by newest first
+            // Fetch recent shorts sorted by newest first. Projected to the fields this
+            // pipeline reads: the window is weeks of shorts and the full docs carry a
+            // lot this route never looks at. (hive_* are filled from Hive below.)
             const shortsData = await embedVideoCollection
-                .find(query)
+                .find(query, {
+                    projection: {
+                        owner: 1, author: 1, permlink: 1, embed_url: 1, thumbnail_url: 1,
+                        embed_title: 1, frontend_app: 1, createdAt: 1, views: 1,
+                    },
+                })
                 .sort({ createdAt: -1 })
                 .toArray();
 
@@ -737,18 +744,26 @@ router.get('/shortssorted', async (req, res) => {
             //
             // Frozen here, the list a user pages through stays put for their session
             // (the cache key includes the user and their seed, which is now stable per
-            // page load): shorts watched in EARLIER sessions stay hidden, while ones
-            // watched right now keep their slot — so swiping back works.
+            // page load): shorts watched in EARLIER sessions sit behind every unwatched
+            // one, while ones watched right now keep their slot — so swiping back works.
+            //
+            // Watched shorts are moved to the END rather than dropped, least recently
+            // watched first, so a viewer who has seen the whole window replays those
+            // instead of hitting a dead end (the Discover shorts feed has no fallback
+            // of its own). Unwatched shorts always come first.
             if (hideWatched) {
                 const watchHistoryCollection = db.collection('watch_history');
-                const idsToCheck = sortedShorts.map(s => `${currentuser}:${s.owner}:${getHivePermlink(s)}`);
+                const idOf = (s) => `${currentuser}:${s.owner}:${getHivePermlink(s)}`;
                 const watchedEntries = await watchHistoryCollection
-                    .find({ _id: { $in: idsToCheck } }, { projection: { _id: 1 } })
+                    .find({ _id: { $in: sortedShorts.map(idOf) } }, { projection: { _id: 1, last_watched_at: 1, watched_at: 1 } })
                     .toArray();
-                const watchedSet = new Set(watchedEntries.map(w => w._id));
-                sortedShorts = sortedShorts.filter(
-                    (s) => !watchedSet.has(`${currentuser}:${s.owner}:${getHivePermlink(s)}`)
-                );
+                const watchedAt = new Map(watchedEntries.map((w) => [
+                    w._id, new Date(w.last_watched_at || w.watched_at || 0).getTime() || 0,
+                ]));
+                const unwatched = sortedShorts.filter((s) => !watchedAt.has(idOf(s)));
+                const replay = sortedShorts.filter((s) => watchedAt.has(idOf(s)))
+                    .sort((a, b) => watchedAt.get(idOf(a)) - watchedAt.get(idOf(b)));
+                sortedShorts = [...unwatched, ...replay];
             }
 
             // Cache the sorted list (evict expired entries if cache grows too large)
