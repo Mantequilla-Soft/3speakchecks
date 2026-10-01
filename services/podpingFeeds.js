@@ -19,8 +19,10 @@
  * An item is remembered only after hivepinger accepted it, so an outage of the
  * pinger is retried on the next run. Hivepinger also dedups per URL on its side.
  *
- * Off unless PODPING_URL is set: until the posting key is installed there is no
- * pinger to call, and this does nothing at all.
+ * Idle until hivepinger is up: each run first asks its /health, and while that
+ * fails (no posting key yet, so podping-hivepinger.service never started it, or
+ * the container is down) the run does nothing and logs nothing. Set
+ * PODPING_ENABLED=false to switch the job off entirely.
  *
  * Windows are `_id` ranges (ObjectId carries the upload time, and _id is always
  * indexed). A video linked to Hive more than PODPING_WINDOW_H after its upload is
@@ -30,7 +32,7 @@ const { ObjectId } = require('mongodb');
 const { getDb } = require('../utils/db');
 const { ENABLE_MONGO_WRITES } = require('../utils/config');
 
-const PODPING_URL = (process.env.PODPING_URL || '').replace(/\/$/, '');
+const PODPING_URL = (process.env.PODPING_URL || 'http://127.0.0.1:1820').replace(/\/$/, '');
 const FEED_BASE = (process.env.PODPING_FEED_BASE || 'https://3speak.tv').replace(/\/$/, '');
 const WINDOW_H = Math.max(1, parseInt(process.env.PODPING_WINDOW_H, 10) || 48);
 const INTERVAL_MIN = Math.max(1, parseInt(process.env.PODPING_INTERVAL_MIN, 10) || 5);
@@ -42,9 +44,24 @@ const SENT_COLLECTION = 'podping_sent';
 
 let running = false;
 let indexed = false;
+let pingerUp = null;   // last /health outcome, so a change is logged once, not every run
 
 function enabled() {
-    return !!PODPING_URL;
+    return String(process.env.PODPING_ENABLED || 'true').toLowerCase() !== 'false';
+}
+
+// hivepinger answers /health with a non-2xx while its key is missing or invalid.
+async function pingerHealthy() {
+    let ok = false;
+    try {
+        const res = await fetch(`${PODPING_URL}/health`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+        ok = res.ok;
+    } catch { /* not running: the normal state until the posting key is installed */ }
+    if (pingerUp !== null && ok !== pingerUp) {
+        console.log(`[podping] hivepinger at ${PODPING_URL} is ${ok ? 'up, pinging resumes' : 'down, pings paused'}`);
+    }
+    pingerUp = ok;
+    return ok;
 }
 
 // Same item conditions as routes/rss.js, so a ping means the feed really changed.
@@ -81,6 +98,7 @@ async function runOnce() {
     if (!enabled() || running) return;
     running = true;
     try {
+        if (!(await pingerHealthy())) return;
         const db = getDb();
         const sentCol = db.collection(SENT_COLLECTION);
         if (!indexed && ENABLE_MONGO_WRITES) {

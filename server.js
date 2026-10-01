@@ -402,7 +402,7 @@ async function startServer() {
     }
 
     // Podping: announce channel feeds that gained an episode, via the local
-    // podping-hivepinger. Off until PODPING_URL points at one.
+    // podping-hivepinger. Each run is a no-op while hivepinger is not up.
     if (podpingFeeds.enabled()) {
         const podpingIntervalMs = podpingFeeds.INTERVAL_MIN * 60 * 1000;
         setTimeout(() => {
@@ -411,7 +411,7 @@ async function startServer() {
         }, 3 * 60 * 1000);   // 3 min after boot, clear of the startup jobs
         console.log(`Podping scheduled every ${podpingFeeds.INTERVAL_MIN} min (first run in 3 min)`);
     } else {
-        console.log('Podping disabled (no PODPING_URL)');
+        console.log('Podping disabled (PODPING_ENABLED=false)');
     }
 
     // Platform rate defaults live in Mongo so a price can change without a restart.
