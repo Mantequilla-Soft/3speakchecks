@@ -900,14 +900,14 @@ module.exports = {
     AD_TICKER_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_TICKER_FREQUENCY_CAP_MINUTES) || 5,
     // Long enough for a sentence and a call to action, short enough to read while it moves.
     AD_TICKER_MAX_CHARS: parseInt(process.env.AD_TICKER_MAX_CHARS) || 140,
-    /* WHOSE CONTENT tickers may appear on while the format is in beta. Same contract as
-     * AD_SELFPROMO_ALLOWED_OWNERS: EMPTY MEANS NO RESTRICTION, so guard on `.length`.
-     * Unset defaults to badadib, the test channel. */
-    AD_TICKER_ALLOWED_OWNERS: String(process.env.AD_TICKER_ALLOWED_OWNERS ?? 'badadib')
+    /* WHOSE CONTENT tickers may appear on. Same contract as AD_SELFPROMO_ALLOWED_OWNERS:
+     * EMPTY MEANS NO RESTRICTION, so guard on `.length`. Public since 2026-10-01 (was
+     * badadib during the beta); set a list here to narrow it again. */
+    AD_TICKER_ALLOWED_OWNERS: String(process.env.AD_TICKER_ALLOWED_OWNERS ?? '')
         .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
-    /* Who may BOOK a ticker while it is in beta. True = only ADS_BETA_USERS. Flip to
-     * false when the format opens to every advertiser. */
-    AD_TICKER_BETA_ONLY: parseBool(process.env.AD_TICKER_BETA_ONLY, true),
+    /* Who may BOOK a ticker. True = only ADS_BETA_USERS. Public (false) since
+     * 2026-10-01; set true to put it back behind the beta. */
+    AD_TICKER_BETA_ONLY: parseBool(process.env.AD_TICKER_BETA_ONLY, false),
     // The pre-upload spot. Priced ABOVE a roll: it is unskippable, it is the only
     // thing on screen, and the audience is creators rather than passers-by, which is
     // the most valuable audience on the platform to anyone selling to creators.

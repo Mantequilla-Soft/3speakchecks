@@ -6,6 +6,10 @@
 // End-to-end test of the ticker format against a THROWAWAY database.
 // Never the live one: this fakes a paid flight, and the live payout run would pay it.
 process.env.DATABASE_NAME = 'threespeak_tickertest';
+// The format is public by default now. The beta gates still exist as settings, so they
+// are switched ON here to keep testing that they hold.
+process.env.AD_TICKER_BETA_ONLY = 'true';
+process.env.AD_TICKER_ALLOWED_OWNERS = 'badadib';
 const ROOT = '/mnt/HC_Volume_103240961/prodops/services/3speakchecks';
 process.chdir(ROOT);
 require(`${ROOT}/node_modules/dotenv`).config({ path: `${ROOT}/.env` });
