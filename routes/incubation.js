@@ -269,6 +269,18 @@ router.post('/internal/claim-assets', internalOnly, async (req, res) => {
         if (!HANDLE_RE.test(handle) || !HIVE_RE.test(hiveUsername)) {
             return res.status(400).json({ error: 'handle and hiveUsername are required' });
         }
+        /* An ADVERTISER graduating: link their private contact record to the new Hive
+         * account. Only advertisers have one (the contact goal is theirs alone), so
+         * this is what lets the site recognise the account as an advertiser on any
+         * device, before they have registered a product. Done first, because the
+         * same-name early return below would otherwise skip it. The record stays
+         * private; only the yes/no is ever public (/advertise/has-product). */
+        const userId = String(req.body?.userId || '');
+        const linkQuery = USER_ID_RE.test(userId) ? { userId } : { handle };
+        await getDb().collection(CONTACTS).updateMany(
+            linkQuery,
+            { $set: { hiveAccount: hiveUsername, graduatedAt: new Date() } },
+        );
         // Same string: a no-op that would also sweep in anything uploaded after
         // graduation.
         if (handle === hiveUsername) return res.json({ claimed: 0, reason: 'same_name' });
