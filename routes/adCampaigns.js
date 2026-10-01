@@ -21,6 +21,7 @@
  *     POST /advertise/campaigns/:id/claim         verify payment, schedule the flight
  */
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const { ObjectId } = require('mongodb');
 const { getDb } = require('../utils/db');
@@ -32,7 +33,7 @@ const {
   AD_PAYMENTS_COLLECTION, AD_PAYMENT_ACCOUNT,
   AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_SLOT_PERCENTS, AD_LENGTH_SECONDS,
   AD_PRODUCTION_FEE_HBD, ADS_STAGE, AD_SLOT_MAX_SHARES, AD_SLOT_HOLD_HOURS, AD_DAY_CURVE_K,
-  AD_BOOKING_EXPIRY_DAYS,
+  AD_BOOKING_EXPIRY_DAYS, AD_TICKER_MAX_CHARS,
 } = require('../utils/config');
 const {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, DAY_MS, ensureAdIndexes, priceForDays, ratePerDayFor,
@@ -42,7 +43,7 @@ const { getSnapshot, forecastPerDay } = require('../services/adInventory');
 const { videoShapeFromManifest } = require('../utils/videoDuration');
 const {
   DEFAULT_FORMAT, FORMAT_KEYS, formatOf, isBookableFormat, rateFor, defaultRateFor, rateCard, formatAccepts,
-  creativeSpecError, acceptedKinds,
+  creativeSpecError, acceptedKinds, bookableBy,
 } = require('../utils/adFormats');
 const { findSlotConflict, slotAvailability, slotHolders } = require('../utils/adSlots');
 const { balanceOf, ledgerOf } = require('../utils/adBalance');
@@ -134,6 +135,72 @@ const CAP_REFUSAL = {
   error: `You can attach up to ${PENDING_CREATIVE_MAX} files while your application is being reviewed.`,
 };
 
+/**
+ * A ticker's text and link, cleaned, or an error sentence for the advertiser.
+ *
+ * The message is drawn as plain text in a single line, so line breaks and control
+ * characters are folded into spaces rather than refused: someone pasting from a
+ * document should not be told off for a newline. The link must be https, because the
+ * click is a redirect from our own origin and we will not send viewers to plain http.
+ */
+function tickerText(b) {
+  const message = String(b.message || '')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!message) return { error: 'Write the message the ticker should show.' };
+  if ([...message].length > AD_TICKER_MAX_CHARS) {
+    return { error: `Keep the message to ${AD_TICKER_MAX_CHARS} characters. It is ${[...message].length}.` };
+  }
+  const raw = str(b.clickUrl, 500);
+  let url = null;
+  try { url = new URL(raw); } catch { url = null; }
+  if (!url || url.protocol !== 'https:') {
+    return { error: 'The link has to be a full https:// address.' };
+  }
+  return { message, clickUrl: url.toString() };
+}
+
+/**
+ * Store a ticker's text as a creative, in review, and return its key.
+ *
+ * Keyed on the advertiser AND the content, so saving the same text twice is the same
+ * creative (and keeps its review decision), while editing a word is a new one that a
+ * human has to look at again. Exactly the rule the image path follows by keying on
+ * the image url.
+ */
+function tickerKey(advertiser, { message, clickUrl }) {
+  return `txt:${crypto.createHash('sha1')
+    .update(`${advertiser.reference}\n${message}\n${clickUrl}`).digest('hex').slice(0, 24)}`;
+}
+
+async function saveTickerCreative(advertiser, { message, clickUrl }) {
+  const key = tickerKey(advertiser, { message, clickUrl });
+  const db = getDb();
+  const prior = await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: key });
+  const settled = prior
+    && (prior.status === CREATIVE_STATES.READY || prior.status === CREATIVE_STATES.REJECTED);
+  await db.collection(AD_CREATIVES_COLLECTION).updateOne(
+    { embedId: key },
+    {
+      $set: {
+        advertiserRef: advertiser.reference,
+        kind: CREATIVE_KINDS.TEXT,
+        message,
+        clickUrl,
+        owner: advertiser.hiveAccount,
+        durationSeconds: 0,
+        manifestCid: null,
+        status: settled ? prior.status : CREATIVE_STATES.REVIEW,
+        updatedAt: new Date(),
+      },
+      $setOnInsert: { embedId: key, campaignId: null, reviewNote: null, createdAt: new Date() },
+    },
+    { upsert: true },
+  );
+  return key;
+}
+
 /** What an advertiser sees about one of their spots. */
 function publicCreative(cr) {
   if (!cr) return null;
@@ -141,6 +208,9 @@ function publicCreative(cr) {
     embedId: cr.embedId,
     kind: cr.kind || CREATIVE_KINDS.VIDEO,
     imageUrl: cr.imageUrl || null,
+    // A ticker's text and where it links. Null on every other kind.
+    message: cr.message || null,
+    clickUrl: cr.clickUrl || null,
     // So the page can show what a banner actually is when offering it, and check it
     // against the format's spec before sending anything.
     imageWidth: cr.imageWidth ?? null,
@@ -259,7 +329,9 @@ router.get('/pricing', featureVisible, async (req, res) => {
     // more, and a client that only understands one product still gets the right
     // number for the product it understands.
     const pricePerSecondDayHbd = rateFor(advertiser, DEFAULT_FORMAT);
-    res.set('Cache-Control', reference ? 'no-store' : 'public, max-age=300');
+    // A beta rate card is never cached either: it is the one still being tuned, and a
+    // five-minute copy in a tester's browser showed a superseded ticker price.
+    res.set('Cache-Control', (reference || req.query.beta === '1') ? 'no-store' : 'public, max-age=300');
 
     res.json({
       success: true,
@@ -271,7 +343,8 @@ router.get('/pricing', featureVisible, async (req, res) => {
       // Every bookable product, each with its own rate, its own maximum length and
       // its own asset requirement. Derived from the registry so a format added later
       // appears here without this route being touched.
-      formats: rateCard(advertiser),
+      // `?beta=1` is only a request to SEE beta formats; booking one is gated separately.
+      formats: rateCard(advertiser, { includeBeta: req.query.beta === '1' }),
       // Any whole number of seconds up to the cap. A fixed list of lengths made
       // people round up to the next option and pay for seconds they did not want.
       minSpotSeconds: 1,
@@ -397,6 +470,11 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
       });
     }
     const fmt = formatOf({ format: formatKey });
+    // A format still in beta is bookable only by ADS_BETA_USERS. The page hides it from
+    // everyone else, but the page is not the gate.
+    if (!bookableBy(formatKey, advertiser.hiveAccount)) {
+      return res.status(403).json({ success: false, error: `The ${fmt.label.toLowerCase()} is not open for booking yet.` });
+    }
 
     const name = str(b.name, 120) || `${advertiser.projectName} campaign`;
     const days = Number(b.days);
@@ -728,6 +806,39 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
 
     const fmt = formatOf(campaign);
 
+    /* A TICKER: text, not a file. Sent either as the key of a text creative already on
+     * record (the picker on an existing flight) or as the text itself. Handled first,
+     * because the image/video reasoning below has nothing to say about it. */
+    const sentKey = str(b.embedId, 64);
+    const sentText = sentKey.startsWith('txt:') || b.message !== undefined;
+    if (sentText || formatAccepts(fmt, CREATIVE_KINDS.TEXT)) {
+      if (!sentText || !formatAccepts(fmt, CREATIVE_KINDS.TEXT)) {
+        return res.status(400).json({
+          success: false,
+          error: formatAccepts(fmt, CREATIVE_KINDS.TEXT)
+            ? 'A ticker runs a message and a link. Send those, or the key of a saved ticker.'
+            : `A ${fmt.label.toLowerCase()} needs a file, not a ticker message.`,
+        });
+      }
+      let key = sentKey.startsWith('txt:') ? sentKey : null;
+      if (key) {
+        const own = await db.collection(AD_CREATIVES_COLLECTION)
+          .findOne({ embedId: key, advertiserRef: advertiser.reference, kind: CREATIVE_KINDS.TEXT });
+        if (!own) return res.status(404).json({ success: false, error: 'That ticker was not found' });
+      } else {
+        const t = tickerText(b);
+        if (t.error) return res.status(400).json({ success: false, error: t.error });
+        key = await saveTickerCreative(advertiser, t);
+      }
+      await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
+        { _id: id },
+        { $set: { creativeEmbedId: key, updatedAt: new Date() } },
+      );
+      const creative = await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: key });
+      const fresh = await db.collection(AD_CAMPAIGNS_COLLECTION).findOne({ _id: id });
+      return res.json({ success: true, campaign: publicCampaign(fresh, creative) });
+    }
+
     /* Which path this attach takes is decided by WHAT WAS SENT, not by the format.
      *
      * A banner accepts a still or a video, and they arrive by completely different
@@ -973,6 +1084,16 @@ router.post('/creatives', featureVisible, express.json({ limit: '16kb' }), async
     if (!advertiser) return res.status(403).json({ success: false, error: 'No advertiser application for that reference' });
 
     const db = getDb();
+
+    // A TICKER message. Stored and reviewed like any creative, before any flight exists.
+    if (b.message !== undefined) {
+      const t = tickerText(b);
+      if (t.error) return res.status(400).json({ success: false, error: t.error });
+      if (!(await underPendingCap(advertiser, tickerKey(advertiser, t)))) return res.status(429).json(CAP_REFUSAL);
+      const key = await saveTickerCreative(advertiser, t);
+      const saved = await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: key });
+      return res.status(201).json({ success: true, creative: publicCreative(saved) });
+    }
 
     // An IMAGE asset: stored, reviewable, never servable on its own. The stitcher
     // splices HLS segments and a still is not something HLS can express, so an image

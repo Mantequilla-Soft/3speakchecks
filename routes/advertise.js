@@ -1203,7 +1203,9 @@ router.post('/admin/creatives/:id/decide', requireAdmin, express.json({ limit: '
           success: false,
           error: missing === 'creative_has_no_image'
             ? 'That banner has no image on record — nothing to show.'
-            : 'That spot has not finished encoding yet — there is nothing to play.',
+            : missing === 'creative_has_no_message'
+              ? 'That ticker has no message or link on record — nothing to show.'
+              : 'That spot has not finished encoding yet — there is nothing to play.',
         });
       }
     }

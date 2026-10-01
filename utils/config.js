@@ -884,6 +884,30 @@ module.exports = {
     // fifteen seconds of banner is a fraction of the imposition of fifteen seconds
     // of spot, and the price already scales with it.
     AD_BANNER_MAX_SECONDS: parseInt(process.env.AD_BANNER_MAX_SECONDS) || 20,
+    /* THE TICKER: a line of text crawling along the bottom of the player, with the
+     * advertiser's avatar, name and product. No creative file at all, which is the
+     * point: anybody can book one without making an image or a video.
+     *
+     * Priced as a SHARE of the banner (owner, 2026-10-01: half), and of the banner's
+     * LIVE platform rate, not its compiled one. So it follows the banner wherever it
+     * moves, launch discount included, with no second number to keep in step. A
+     * stored `set-rate video_ticker` still overrides it. */
+    AD_TICKER_RATE_OF_BANNER: parseFloat(process.env.AD_TICKER_RATE_OF_BANNER) || 0.5,
+    AD_TICKER_MAX_SECONDS: parseInt(process.env.AD_TICKER_MAX_SECONDS) || 20,
+    // How soon the same viewer may see the same ticker again. Shorter than the banner's
+    // window (owner, 2026-10-01): a line of text costs the viewer even less. Sent to the
+    // page with each ticker so the browser's own seen-list uses the same number.
+    AD_TICKER_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_TICKER_FREQUENCY_CAP_MINUTES) || 5,
+    // Long enough for a sentence and a call to action, short enough to read while it moves.
+    AD_TICKER_MAX_CHARS: parseInt(process.env.AD_TICKER_MAX_CHARS) || 140,
+    /* WHOSE CONTENT tickers may appear on while the format is in beta. Same contract as
+     * AD_SELFPROMO_ALLOWED_OWNERS: EMPTY MEANS NO RESTRICTION, so guard on `.length`.
+     * Unset defaults to badadib, the test channel. */
+    AD_TICKER_ALLOWED_OWNERS: String(process.env.AD_TICKER_ALLOWED_OWNERS ?? 'badadib')
+        .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+    /* Who may BOOK a ticker while it is in beta. True = only ADS_BETA_USERS. Flip to
+     * false when the format opens to every advertiser. */
+    AD_TICKER_BETA_ONLY: parseBool(process.env.AD_TICKER_BETA_ONLY, true),
     // The pre-upload spot. Priced ABOVE a roll: it is unskippable, it is the only
     // thing on screen, and the audience is creators rather than passers-by, which is
     // the most valuable audience on the platform to anyone selling to creators.

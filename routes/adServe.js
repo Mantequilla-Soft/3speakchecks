@@ -36,7 +36,7 @@ const { getDb } = require('../utils/db');
 const { adDecision, isPremiumViewer } = require('../utils/adEligibility');
 const {
   AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_IMPRESSIONS_COLLECTION, ADVERTISERS_COLLECTION,
-  AD_SELFPROMO_ALLOWED_OWNERS,
+  AD_SELFPROMO_ALLOWED_OWNERS, AD_TICKER_ALLOWED_OWNERS, AD_TICKER_FREQUENCY_CAP_MINUTES,
   AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, AD_SKIP_AFTER_SECONDS, AD_SKIP_MIN_SPOT_SECONDS,
   AD_BANNER_CLOSE_AFTER_SECONDS, AD_BANNER_FREQUENCY_CAP_MINUTES, AD_GATE_ALLOWED_UPLOADERS, ADS_STAGE,
   AD_COOLDOWN_MINUTES, AD_PACING_ENABLED, AD_PACING_MIN_FRACTION, AD_SESSION_RATE_PER_MIN,
@@ -399,6 +399,12 @@ function selfPromoAllowedOn(owner) {
   return AD_SELFPROMO_ALLOWED_OWNERS.includes(String(owner || '').toLowerCase());
 }
 
+/** May a ticker run on this owner's content? Same empty-means-everyone rule. */
+function tickerAllowedOn(owner) {
+  if (!AD_TICKER_ALLOWED_OWNERS.length) return true;
+  return AD_TICKER_ALLOWED_OWNERS.includes(String(owner || '').toLowerCase());
+}
+
 /** The candidate-query fragment that enforces it. */
 const selfPromoFilter = (owner) => (selfPromoAllowedOn(owner) ? {} : { selfPromo: { $ne: true } });
 
@@ -422,27 +428,33 @@ const selfPromoFilter = (owner) => (selfPromoAllowedOn(owner) ? {} : { selfPromo
 async function seenCampaigns(db, capKey, { withBanner = true } = {}) {
   const recent = new Set();
   const recentBanner = new Set();
-  if (!capKey) return { recent, recentBanner };
+  // The ticker's own window (AD_TICKER_FREQUENCY_CAP_MINUTES), the shortest of the three.
+  const recentTicker = new Set();
+  if (!capKey) return { recent, recentBanner, recentTicker };
   const since = new Date(Date.now() - AD_FREQUENCY_CAP_MINUTES * 60 * 1000);
   const bannerSince = Date.now() - AD_BANNER_FREQUENCY_CAP_MINUTES * 60 * 1000;
+  const tickerSince = Date.now() - AD_TICKER_FREQUENCY_CAP_MINUTES * 60 * 1000;
   const rows = await db.collection(SESSIONS)
     .find({ ...capKey, startedAt: { $gte: since } },
-      { projection: { sid: 1, campaignId: 1, 'banner.campaignId': 1, startedAt: 1 } })
+      { projection: { sid: 1, campaignId: 1, 'banner.campaignId': 1, 'ticker.campaignId': 1, startedAt: 1 } })
     .toArray();
-  if (!rows.length) return { recent, recentBanner };
+  if (!rows.length) return { recent, recentBanner, recentTicker };
   const shown = new Set((await db.collection(AD_IMPRESSIONS_COLLECTION)
     .find({ sid: { $in: rows.map((r) => r.sid) } }, { projection: { sid: 1, campaignId: 1 } })
     .toArray()).map((i) => `${i.sid}:${String(i.campaignId)}`));
   for (const r of rows) {
     const inBannerWindow = new Date(r.startedAt).getTime() >= bannerSince;
     const ids = [r.campaignId, withBanner ? r.banner?.campaignId : null].filter(Boolean).map(String);
+    // The ticker is capped on its own, shorter window and nowhere else.
+    const tid = r.ticker?.campaignId ? String(r.ticker.campaignId) : null;
+    if (tid && shown.has(`${r.sid}:${tid}`) && new Date(r.startedAt).getTime() >= tickerSince) recentTicker.add(tid);
     for (const id of ids) {
       if (!shown.has(`${r.sid}:${id}`)) continue;
       recent.add(id);
       if (inBannerWindow) recentBanner.add(id);
     }
   }
-  return { recent, recentBanner };
+  return { recent, recentBanner, recentTicker };
 }
 
 function trimOf(creative) {
@@ -821,6 +833,9 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // by the client because it is the only thing that knows what it can do; see
     // bannerMode below.
     const bannerOverlay = b.bannerOverlay === true || String(b.bannerOverlay) === 'true';
+    // Can this client DRAW a ticker? Only a page that can is ever handed one, so a
+    // player without the overlay never takes a placement it would silently drop.
+    const wantsTicker = b.ticker === true || String(b.ticker) === 'true';
     const rawSurface = str(b.surface, 16);
     const surface = rawSurface === 'shorts' ? 'shorts' : (rawSurface === 'upload' ? 'upload' : 'watch');
     /* WHICH APPLICATION is playing this, as opposed to `surface`, which is which
@@ -1202,7 +1217,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // window that stops a roll burning an audience is longer than a banner needs.
     // Only ads that were actually delivered count; see seenCampaigns().
     const capKey = viewer ? { viewer } : (capId ? { capId } : null);
-    const { recent, recentBanner } = await seenCampaigns(db, capKey);
+    const { recent, recentBanner, recentTicker } = await seenCampaigns(db, capKey);
 
     // A forged list can only cost a client ads, never earn it any, so it is trusted
     // exactly as far as it can do harm — which is not at all.
@@ -1228,8 +1243,12 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       if (!c.advertiserRef || !approvedRefs.has(c.advertiserRef)) return false;
       const creative = byCampaign.get(String(c._id));
       if (servableReason(c, creative)) return false;
+      // A format only a page can draw goes only to a page that asked for it, and a
+      // ticker only onto content its beta list allows.
+      if (formatOf(c).overlayOnly && (!wantsTicker || !tickerAllowedOn(owner))) return false;
       // Each format against its own window.
-      const cap = formatOf(c).key === 'video_banner' ? recentBanner : recent;
+      const key = formatOf(c).key;
+      const cap = key === 'video_ticker' ? recentTicker : (key === 'video_banner' ? recentBanner : recent);
       if (cap.has(String(c._id)) || claimedKeys.has(adKeyOf(c._id))) return false;
       if (c.markets && c.markets.length && country && !c.markets.includes(country)) return false;
 
@@ -1260,16 +1279,18 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     const pickFor = (key) => eligible.find((c) => formatOf(c).key === key) || null;
     const campaign = pickFor('video_roll');
     const bannerCampaign = pickFor('video_banner');
-    if (!campaign && !bannerCampaign) return res.json({ ad: null, reason: 'no_eligible_campaign' });
+    const tickerCampaign = pickFor('video_ticker');
+    if (!campaign && !bannerCampaign && !tickerCampaign) return res.json({ ad: null, reason: 'no_eligible_campaign' });
 
     const creative = campaign ? byCampaign.get(String(campaign._id)) : null;
     const bannerCreative = bannerCampaign ? byCampaign.get(String(bannerCampaign._id)) : null;
+    const tickerCreative = tickerCampaign ? byCampaign.get(String(tickerCampaign._id)) : null;
 
     // Who each ad is from, for the disclosure. Read from the product rather than
     // copied onto the campaign at booking, so updating a logo fixes every booking at
     // once. `reference` is a unique index, so these are point reads, and only for
     // placements that were actually chosen.
-    const refs = [campaign?.advertiserRef, bannerCampaign?.advertiserRef].filter(Boolean);
+    const refs = [campaign?.advertiserRef, bannerCampaign?.advertiserRef, tickerCampaign?.advertiserRef].filter(Boolean);
     const brands = new Map(
       (await db.collection(ADVERTISERS_COLLECTION).find(
         { reference: { $in: refs } },
@@ -1278,6 +1299,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     );
     const brandDoc = campaign ? brands.get(campaign.advertiserRef) : null;
     const bannerBrand = bannerCampaign ? brands.get(bannerCampaign.advertiserRef) : null;
+    const tickerBrand = tickerCampaign ? brands.get(tickerCampaign.advertiserRef) : null;
     const websiteOf = (d) => (d && /^https?:\/\//i.test(String(d.website || '')) ? String(d.website) : null);
 
     const publicBase = publicBaseOf(req);
@@ -1330,6 +1352,17 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         slotPosition: bannerCampaign.slotPosition ?? null,
         seconds: Number(bannerCampaign.spotSeconds) || 0,
         clickUrl: websiteOf(bannerBrand),
+      } : null,
+
+      /* The TICKER placement. Drawn by the page, so nothing here touches the playlist.
+       * Its link is the one a human approved WITH the message, not the advertiser's
+       * website: the text and where it sends people were reviewed as one thing. */
+      ticker: tickerCampaign && tickerCreative ? {
+        campaignId: tickerCampaign._id,
+        creativeId: tickerCreative._id,
+        slotPercent: tickerCampaign.slotPercent ?? null,
+        seconds: Number(tickerCampaign.spotSeconds) || 0,
+        clickUrl: tickerCreative.clickUrl || null,
       } : null,
 
       owner,
@@ -1428,6 +1461,24 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
         // covers the box, which is never larger than the banner's own footprint
         // plus a little dead space either side of a narrow creative.
         placement: bannerPlacement(bannerCreative),
+      } : null,
+
+      /* Everything the page needs to draw the ticker. No manifest: nothing is spliced
+       * or burned, so a ticker-only playback plays the creator's own video untouched.
+       * Where it runs is a percentage of the CONTENT, which the page knows the length
+       * of; there is no segment boundary for the server to report back. */
+      ticker: tickerCampaign && tickerCreative ? {
+        message: tickerCreative.message,
+        account: (tickerBrand && tickerBrand.hiveAccount) || null,
+        productName: (tickerBrand && tickerBrand.projectName) || tickerCampaign.projectName || null,
+        clickUrl: tickerCreative.clickUrl ? `${publicBase}/m/${sid}/tc` : null,
+        shownUrl: `${publicBase}/m/${sid}/ticker-shown`,
+        positionPercent: tickerCampaign.slotPercent ?? 0,
+        durationSeconds: Number(tickerCampaign.spotSeconds) || 0,
+        adKey: adKeyOf(tickerCampaign._id),
+        // How long the page should keep this ticker in its seen-list. One number, here.
+        capMinutes: AD_TICKER_FREQUENCY_CAP_MINUTES,
+        label: AD_BANNER_LABEL || 'Ad',
       } : null,
 
       reason: null,
@@ -1992,6 +2043,84 @@ router.get('/:sid/bc', servingVisible, async (req, res) => {
   } catch (err) {
     console.error('[ad-serve] banner click failed:', err && err.message);
     return res.status(502).send('unavailable');
+  }
+});
+
+/* ─── GET /m/:sid/tc — the ticker's click-through ─────────────────────── */
+// Same contract as /bc: counted once per session, destination from the session (the
+// link a human approved with the message), never from the request.
+router.get('/:sid/tc', servingVisible, async (req, res) => {
+  try {
+    const sid = str(req.params.sid, 64);
+    if (!/^[0-9a-f]{32}$/.test(sid)) return res.status(400).send('bad session');
+    const db = getDb();
+    const session = await db.collection(SESSIONS).findOne({ sid });
+    if (!session || !session.ticker || !session.ticker.clickUrl) return res.status(404).send('not found');
+    try {
+      const r = await db.collection(AD_IMPRESSIONS_COLLECTION).updateOne(
+        { sid, campaignId: session.ticker.campaignId, clicked: { $ne: true } },
+        {
+          $set: {
+            campaignId: session.ticker.campaignId,
+            owner: session.owner,
+            permlink: session.permlink,
+            clicked: true,
+            clickedAt: new Date(),
+          },
+          $setOnInsert: { at: new Date(), started: true, payoutId: null, app: session.app },
+        },
+        { upsert: true },
+      );
+      if (r.upsertedCount === 1 || r.modifiedCount === 1) {
+        await db.collection(AD_CAMPAIGNS_COLLECTION)
+          .updateOne({ _id: session.ticker.campaignId }, { $inc: { clicks: 1 } });
+      }
+    } catch (e) {
+      if (e?.code !== 11000) console.error('[ad-serve] ticker click write failed:', e && e.message);
+    }
+    res.set('Cache-Control', 'no-store');
+    return res.redirect(302, session.ticker.clickUrl);
+  } catch (err) {
+    console.error('[ad-serve] ticker click failed:', err && err.message);
+    return res.status(502).send('unavailable');
+  }
+});
+
+/* ─── POST /m/:sid/ticker-shown — the page drew the ticker for its run ── */
+// The overlay banner's rule exactly: the page is the only witness, so the claim is
+// refused until the booked seconds could have elapsed since the session was handed
+// over, and counted once per session.
+router.post('/:sid/ticker-shown', servingVisible, express.json({ limit: '1kb' }), async (req, res) => {
+  try {
+    const sid = str(req.params.sid, 64);
+    if (!/^[0-9a-f]{32}$/.test(sid)) return res.status(400).json({ ok: false });
+    const db = getDb();
+    const session = await db.collection(SESSIONS).findOne({ sid });
+    if (!session || !session.ticker) return res.json({ ok: false, reason: 'no_ticker' });
+
+    const booked = Number(session.ticker.seconds) || 0;
+    const elapsed = (Date.now() - new Date(session.startedAt).getTime()) / 1000;
+    if (booked > 0 && elapsed < booked * AD_PACING_MIN_FRACTION) {
+      return res.json({ ok: false, reason: 'too_soon', elapsed: Math.round(elapsed) });
+    }
+    await recordDelivery({
+      db,
+      sid,
+      app: session.app,
+      campaignId: session.ticker.campaignId,
+      facts: {
+        campaignId: session.ticker.campaignId,
+        owner: session.owner,
+        permlink: session.permlink,
+        country: session.country || null,
+        ticker: true,
+      },
+      completed: true,
+    });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[ad-serve] ticker record failed:', err && err.message);
+    return res.json({ ok: false });
   }
 });
 

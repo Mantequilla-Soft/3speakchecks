@@ -201,6 +201,9 @@ function missingAssetFor(creative) {
   if (creative.kind === CREATIVE_KINDS.IMAGE) {
     return creative.imageUrl ? null : 'creative_has_no_image';
   }
+  if (creative.kind === CREATIVE_KINDS.TEXT) {
+    return creative.message && creative.clickUrl ? null : 'creative_has_no_message';
+  }
   return creativeIsEncoded(creative) ? null : 'creative_not_encoded';
 }
 
@@ -246,6 +249,7 @@ function servableReason(campaign, creative, now = Date.now()) {
   // Membership, not equality: a banner takes a still OR a video, and asking the
   // format rather than comparing to its single `creativeKind` is what lets it.
   if (!formatAccepts(fmt, creativeKind)) {
+    if (creativeKind === CREATIVE_KINDS.TEXT) return 'creative_is_a_ticker';
     return creativeKind === CREATIVE_KINDS.IMAGE ? 'creative_is_an_image' : 'creative_is_a_video';
   }
   if (creative.status !== CREATIVE_STATES.READY) return `creative_${creative.status}`;
