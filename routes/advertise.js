@@ -36,7 +36,7 @@ const crypto = require('crypto');
 const router = express.Router();
 const { ObjectId } = require('mongodb');
 const { getDb } = require('../utils/db');
-const { verifyHiveSignedMessage, verifyHiveAuthority } = require('../utils/hiveAuth');
+const { verifyHiveSignedMessage, verifyHiveAuthority, verifyDelegateVouch } = require('../utils/hiveAuth');
 const { hiveRpcBatch } = require('../utils/hive');
 const { getSnapshot, runOnce } = require('../services/adInventory');
 const { ObjectId: AdObjectId } = require('mongodb');
@@ -266,6 +266,9 @@ const applyMessage = (hiveAccount, timestamp) => ['3speak-ads', 'apply', hiveAcc
 // all three, and scoped by name so a signature made to list an account's records
 // can never be replayed against a route that changes something.
 const mineMessage = (hiveAccount, timestamp) => ['3speak-ads', 'mine', hiveAccount, String(timestamp)].join('|');
+// 3Speak's API vouching for a session it verified. Its own action word, so a vouch and
+// a user's signature can never stand in for each other. Must match the API exactly.
+const mineVouchMessage = (hiveAccount, timestamp) => ['3speak-ads', 'mine-vouch', hiveAccount, String(timestamp)].join('|');
 // The community share is IN the signed message on purpose. It decides where money
 // goes, so a signature captured for one split must not authorise another — the same
 // reason the on/off state is in there rather than trusted from the request body.
@@ -669,6 +672,12 @@ router.get('/application/:reference', featureVisible, async (req, res) => {
  * delegate path is what makes this work at all for HiveSigner and Butter Auth
  * sessions, which hold no key in the browser.
  *
+ * Or `vouched: true`: 3Speak's API signed mineVouchMessage with its own key after
+ * verifying a real login session (Butter Auth, HiveSigner, or a wallet login). That
+ * needs no posting grant, which is what lets a returning advertiser see their own
+ * products on arrival with no wallet prompt. It is a read of what the account already
+ * owns, the same trust the API's session already carries. (Owner's call, 2026-10-03.)
+ *
  * It returns the references themselves, which is the point: the caller can then use
  * the ordinary per-reference endpoints, and can remember them so the next visit
  * costs no signature at all.
@@ -695,12 +704,18 @@ router.post('/mine', featureVisible, express.json({ limit: '8kb' }), async (req,
       if (tsErr) return res.status(401).json({ success: false, error: tsErr });
       let verdict = { ok: false };
       try {
-        verdict = await verifyHiveAuthority({
-          message: mineMessage(name, timestamp),
-          signature,
-          username: name,
-          allowedDelegates: AD_SIGNING_DELEGATES,
-        });
+        verdict = b.vouched === true
+          ? await verifyDelegateVouch({
+            message: mineVouchMessage(name, timestamp),
+            signature,
+            delegates: AD_SIGNING_DELEGATES,
+          })
+          : await verifyHiveAuthority({
+            message: mineMessage(name, timestamp),
+            signature,
+            username: name,
+            allowedDelegates: AD_SIGNING_DELEGATES,
+          });
       } catch (err) {
         if (err && err.code === 'HIVE_ACCOUNT_NOT_FOUND') {
           return res.status(404).json({ success: false, error: 'Hive account not found' });
