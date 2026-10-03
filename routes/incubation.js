@@ -173,6 +173,88 @@ router.get('/internal/watch/:handle', internalOnly, async (req, res) => {
     }
 });
 
+/* ─── Advertiser business contact (warm-up accounts) ─────────────────────────
+ *
+ * 🚨 PRIVATE, OFF-CHAIN, FOREVER. An advertiser in warm-up gives us an email (required)
+ * and optionally a postal address, so the team can reach the business behind an ad.
+ * This is the ONLY place they are kept: never in the incubation service's profile
+ * (which is shown to others and copied to the Hive account at graduation), never in a
+ * Hive operation, never in a log line. Internal-only routes, reached by 3Speak's API
+ * on behalf of the signed-in user, keyed by that user's id.
+ */
+const CONTACTS = 'incubation_contacts';
+const USER_ID_RE = /^[A-Za-z0-9_-]{6,64}$/;
+const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/;
+const ADDRESS_FIELDS = ['line1', 'line2', 'postalCode', 'city', 'region', 'country'];
+
+const clean = (v, max) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, max) : '');
+
+/** An address counts once street, city and country are there. The rest is optional. */
+function addressComplete(a) {
+    return !!(a && a.line1 && a.city && a.country);
+}
+
+// GET /incubation/internal/contact/:userId — what this user has given us, or nulls.
+router.get('/internal/contact/:userId', internalOnly, async (req, res) => {
+    try {
+        const userId = String(req.params.userId || '');
+        if (!USER_ID_RE.test(userId)) return res.status(400).json({ error: 'Invalid user id' });
+        const row = await getDb().collection(CONTACTS).findOne({ userId }, { projection: { _id: 0, email: 1, address: 1, updatedAt: 1 } });
+        res.json({
+            email: row?.email || null,
+            address: row?.address || null,
+            addressComplete: addressComplete(row?.address),
+            updatedAt: row?.updatedAt || null,
+        });
+    } catch (err) {
+        console.error('[incubation] internal contact read:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// GET /incubation/internal/contact-by-handle/:handle — the same row, found by the
+// warm-up handle, for 3Speak's ADMIN view of an advertiser's page. 3Speak's API only
+// calls this after ButrAuth confirmed the caller may manage the app.
+router.get('/internal/contact-by-handle/:handle', internalOnly, async (req, res) => {
+    try {
+        const handle = String(req.params.handle || '').toLowerCase();
+        if (!HANDLE_RE.test(handle)) return res.status(400).json({ error: 'Invalid handle' });
+        const row = await getDb().collection(CONTACTS).findOne(
+            { handle },
+            { sort: { updatedAt: -1 }, projection: { _id: 0, userId: 1, email: 1, address: 1, createdAt: 1, updatedAt: 1 } },
+        );
+        if (!row) return res.json({ found: false });
+        res.json({ found: true, ...row, addressComplete: addressComplete(row.address) });
+    } catch (err) {
+        console.error('[incubation] internal contact by handle:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// PUT /incubation/internal/contact/:userId { handle, email, address{...} } — save it.
+router.put('/internal/contact/:userId', internalOnly, async (req, res) => {
+    try {
+        const userId = String(req.params.userId || '');
+        if (!USER_ID_RE.test(userId)) return res.status(400).json({ error: 'Invalid user id' });
+        const b = req.body || {};
+        const email = clean(b.email, 254).toLowerCase();
+        if (!EMAIL_RE.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+        const address = {};
+        for (const f of ADDRESS_FIELDS) address[f] = clean(b.address?.[f], 120) || null;
+        const handle = clean(b.handle, 64).toLowerCase() || null;
+        await getDb().collection(CONTACTS).updateOne(
+            { userId },
+            { $set: { userId, handle, email, address, updatedAt: new Date() }, $setOnInsert: { createdAt: new Date() } },
+            { upsert: true },
+        );
+        res.json({ ok: true, email, address, addressComplete: addressComplete(address) });
+    } catch (err) {
+        // Never the body: it is somebody's email and home address.
+        console.error('[incubation] internal contact write:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
 // POST /incubation/internal/claim-assets { handle, hiveUsername } — move the
 // uploads made under a warm-up handle onto the Hive account it graduated to.
 //
@@ -187,6 +269,18 @@ router.post('/internal/claim-assets', internalOnly, async (req, res) => {
         if (!HANDLE_RE.test(handle) || !HIVE_RE.test(hiveUsername)) {
             return res.status(400).json({ error: 'handle and hiveUsername are required' });
         }
+        /* An ADVERTISER graduating: link their private contact record to the new Hive
+         * account. Only advertisers have one (the contact goal is theirs alone), so
+         * this is what lets the site recognise the account as an advertiser on any
+         * device, before they have registered a product. Done first, because the
+         * same-name early return below would otherwise skip it. The record stays
+         * private; only the yes/no is ever public (/advertise/has-product). */
+        const userId = String(req.body?.userId || '');
+        const linkQuery = USER_ID_RE.test(userId) ? { userId } : { handle };
+        await getDb().collection(CONTACTS).updateMany(
+            linkQuery,
+            { $set: { hiveAccount: hiveUsername, graduatedAt: new Date() } },
+        );
         // Same string: a no-op that would also sweep in anything uploaded after
         // graduation.
         if (handle === hiveUsername) return res.json({ claimed: 0, reason: 'same_name' });

@@ -342,6 +342,29 @@ router.get('/access/:account', async (req, res) => {
   });
 });
 
+/* ─── GET /advertise/has-product/:account ─────────────────────────────── */
+// Is this Hive account an advertiser? Yes when it has an advertiser product on file
+// (pending or approved; discarded ones are deleted), OR it graduated from the
+// advertiser warm-up (its private contact record was linked to it at graduation,
+// routes/incubation.js claim-assets). A yes/no for the site's nav to show an
+// "Advertise" button; nothing about the product or the contact is ever returned.
+router.get('/has-product/:account', async (req, res) => {
+  try {
+    const name = account(req.params.account);
+    if (!HIVE_ACCOUNT_RE.test(name)) return res.status(400).json({ success: false, error: 'Invalid account' });
+    const db = getDb();
+    const [product, graduated] = await Promise.all([
+      db.collection(ADVERTISERS_COLLECTION).findOne({ hiveAccount: name }, { projection: { _id: 1 } }),
+      db.collection('incubation_contacts').findOne({ hiveAccount: name }, { projection: { _id: 1 } }),
+    ]);
+    res.set('Cache-Control', 'public, max-age=300');
+    return res.json({ success: true, account: name, hasProduct: !!product, isAdvertiser: !!(product || graduated) });
+  } catch (err) {
+    console.error('[advertise] has-product failed:', err && err.message);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
 /* ─── GET /advertise/inventory ────────────────────────────────────────── */
 // What a prospective advertiser is allowed to see: the cleaned audience and the
 // deliverable slots. Deliberately NOT the excluded-account list — naming the
@@ -1203,7 +1226,9 @@ router.post('/admin/creatives/:id/decide', requireAdmin, express.json({ limit: '
           success: false,
           error: missing === 'creative_has_no_image'
             ? 'That banner has no image on record — nothing to show.'
-            : 'That spot has not finished encoding yet — there is nothing to play.',
+            : missing === 'creative_has_no_message'
+              ? 'That ticker has no message or link on record — nothing to show.'
+              : 'That spot has not finished encoding yet — there is nothing to play.',
         });
       }
     }

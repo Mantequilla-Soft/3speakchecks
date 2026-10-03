@@ -6,10 +6,11 @@
  *
  * The pool is the UNION of three sources (deduped by owner/assetPermlink):
  *   (a) recent    — everything published in the last DISCOVER_WINDOW_DAYS
- *   (b) random    — DISCOVER_RANDOM_OLD_COUNT videos sampled from ALL TIME that
- *                   have at least one transcription tag. Re-sampled every run, so
- *                   a different slice of the back catalogue gets a shot each hour.
- *                   This is what makes Discover an actual discovery surface.
+ *   (b) random    — DISCOVER_RANDOM_OLD_COUNT videos sampled from the last
+ *                   RECOMMEND_MAX_AGE_DAYS (1 year) that have at least one
+ *                   transcription tag. Re-sampled every run, so a different slice
+ *                   of the back catalogue gets a shot each hour. This is what
+ *                   makes Discover an actual discovery surface.
  *   (c) retention — anything with watch-duration rows in the last
  *                   DISCOVER_RETENTION_ACTIVE_DAYS (i.e. people are still watching it).
  *
@@ -47,6 +48,7 @@ const { pickWinner } = require('../utils/effectiveTags');
 const { INTEREST_TAGS } = require('../utils/interestTags');
 const { getHiddenSet } = require('../utils/hiddenCreators');
 const { seasonalKeys } = require('../utils/seasonal');
+const { recommendAgeCutoff } = require('../utils/feedAge');
 
 const WATCH_LOG = process.env.WATCH_LOG_COLLECTION || 'view-durations';
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -72,6 +74,54 @@ async function findChunked(coll, conds, projection, size = 200) {
 const isNsfw = (doc, tags) =>
   doc.isNsfwContent === true || tags.has('nsfw');
 
+/** Up to `n` random items of `arr` (partial Fisher-Yates on a copy), like $sample. */
+function sampleN(arr, n) {
+  const a = arr.slice();
+  const k = Math.min(n, a.length);
+  for (let i = 0; i < k; i += 1) {
+    const j = i + Math.floor(Math.random() * (a.length - i));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a.slice(0, k);
+}
+
+/**
+ * Sources (b) and (d) restricted to videos published after `cutoff`.
+ *
+ * subtitles-tags carries no publish date, so a $sample over it can't be bounded.
+ * Sampling the whole catalogue and dropping the old ones afterwards would leave
+ * ~12% of the slice (most tagged videos are older than a year). Instead: load the
+ * in-window video keys (a few thousand embeds + ~12k legacy), keep the tagged
+ * docs among them, and sample those in memory.
+ */
+async function sampleTaggedSince(db, subtitleDocs, cutoff) {
+  const [embeds, legacy] = await Promise.all([
+    db.collection('embed-video').find(
+      { status: 'published', short: false, listed_on_3speak: true, createdAt: { $gte: cutoff } },
+      { projection: { _id: 0, owner: 1, permlink: 1 } },
+    ).toArray(),
+    db.collection('videos').find(
+      { status: 'published', created: { $gte: cutoff } },
+      { projection: { _id: 0, owner: 1, permlink: 1 } },
+    ).toArray(),
+  ]);
+  const inWindow = new Set([...embeds, ...legacy].map((d) => `${d.owner}/${d.permlink}`));
+  const tagged = subtitleDocs.filter((d) =>
+    d.tags != null && d.tags !== '' && inWindow.has(`${d.author}/${d.permlink}`));
+
+  // `tags` is a single normalised topic string for the per-topic sample, so an
+  // equality match is exact (same as the unbounded $match below).
+  const byTag = new Map();
+  for (const d of tagged) {
+    if (!byTag.has(d.tags)) byTag.set(d.tags, []);
+    byTag.get(d.tags).push(d);
+  }
+  return {
+    randomTagged: sampleN(tagged, DISCOVER_RANDOM_OLD_COUNT),
+    topicSampled: INTEREST_TAGS.flatMap((tag) => sampleN(byTag.get(tag) || [], INTEREST_POOL_PER_TAG)),
+  };
+}
+
 async function run() {
   const client = new MongoClient(MONGODB_URI, {
     maxPoolSize: 4, minPoolSize: 0, waitQueueTimeoutMS: 20000,
@@ -85,6 +135,14 @@ async function run() {
 
     const recentCutoff = new Date(now - DISCOVER_WINDOW_DAYS * DAY_MS);
     const activeCutoff = new Date(now - DISCOVER_RETENTION_ACTIVE_DAYS * DAY_MS);
+    // Nothing older than this enters either pool (1 year, see utils/feedAge.js).
+    const ageCutoff = recommendAgeCutoff();
+
+    // Transcription tags for the whole catalogue: the bounded sampler needs them
+    // up front, and step 3 reuses the same array.
+    const subtitleDocs = await db.collection('subtitles-tags')
+      .find({}, { projection: { author: 1, permlink: 1, tags: 1 } }).toArray();
+    const bounded = ageCutoff ? await sampleTaggedSince(db, subtitleDocs, ageCutoff) : null;
 
     // Hidden (moderation) creators — loaded fresh for this run (worker is a new
     // thread each time). Their videos never enter the precomputed pool. Same
@@ -120,9 +178,10 @@ async function run() {
       }, { projection: { owner: 1, permlink: 1 } })
         .sort({ created: -1 }).limit(DISCOVER_CANDIDATE_LIMIT).toArray(),
 
-      // (b) random slice of the back catalogue — anything ever transcribed.
+      // (b) random slice of the back catalogue — anything transcribed inside the
+      // age window (or ever, when the bound is disabled).
       // Re-sampled every run: this is the "bump old videos" engine.
-      db.collection('subtitles-tags').aggregate([
+      bounded ? bounded.randomTagged : db.collection('subtitles-tags').aggregate([
         { $match: { tags: { $exists: true, $nin: [null, ''] } } },
         { $sample: { size: DISCOVER_RANDOM_OLD_COUNT } },
         { $project: { author: 1, permlink: 1 } },
@@ -140,7 +199,7 @@ async function run() {
       // catalogue and niche topics stay starved (science surfaced 29 of its 785
       // videos). Sampling per topic gives every topic real depth. `subtitles-tags.tags`
       // is a single normalised topic string, so an equality match is exact.
-      Promise.all(INTEREST_TAGS.map((tag) =>
+      bounded ? bounded.topicSampled : Promise.all(INTEREST_TAGS.map((tag) =>
         db.collection('subtitles-tags').aggregate([
           { $match: { tags: tag } },
           { $sample: { size: INTEREST_POOL_PER_TAG } },
@@ -193,8 +252,7 @@ async function run() {
     // All of these collections are small; load them whole rather than N lookups.
     // `curation` = distinct-actor counts of reshares + playlist saves + viewer tags,
     // self-curation already excluded (utils/curation.js).
-    const [subtitleDocs, curation, retentionDocs, viewerTagDocs, commentDocs] = await Promise.all([
-      db.collection('subtitles-tags').find({}, { projection: { author: 1, permlink: 1, tags: 1 } }).toArray(),
+    const [curation, retentionDocs, viewerTagDocs, commentDocs] = await Promise.all([
       // force: this worker is a fresh thread each run — take the live counts, not a
       // TTL-cached map that happens to be empty on a cold start.
       getCurationCounts(db, { force: true }),
@@ -254,6 +312,9 @@ async function run() {
       const source = ev ? 'embed' : 'legacy';
       const hivePermlink = ev ? ev.hive_permlink : lv.permlink;
       const created = ev ? ev.createdAt : lv.created;
+      // Past the recommendation age bound (mostly the retention source: an old
+      // video still being watched). Undated counts as too old, like the $gte reads.
+      if (ageCutoff && !(created && new Date(created) >= ageCutoff)) { skipped += 1; continue; }
       const rawOwnTags = ev ? ev.hive_tags : (lv.tags_v2 || lv.tags);
       const ownTags = normalizeTags(rawOwnTags);
       const trTags = transcriptionByKey.get(id) || new Set();

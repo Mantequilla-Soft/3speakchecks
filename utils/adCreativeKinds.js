@@ -15,6 +15,8 @@
  * the FORMAT, not about the file — a still is exactly what a banner is made of. Ask
  * adFormats.js what a campaign needs; ask this only what a file is.
  */
-const CREATIVE_KINDS = Object.freeze({ VIDEO: 'video', IMAGE: 'image' });
+// TEXT is a ticker message plus its link: no file at all. It still lives in the
+// creatives collection so it goes through the same human review as everything else.
+const CREATIVE_KINDS = Object.freeze({ VIDEO: 'video', IMAGE: 'image', TEXT: 'text' });
 
 module.exports = { CREATIVE_KINDS };

@@ -25,6 +25,7 @@ const { schedule: scheduleWatchRetention } = require('./services/watchRetention'
 const { scheduleRetention } = require('./services/retention');
 const adInventory = require('./services/adInventory');
 const susScan = require('./services/susScan');
+const podpingFeeds = require('./services/podpingFeeds');
 const adPayouts = require('./services/adPayouts');
 const adCreativeSync = require('./services/adCreativeSync');
 const adSettings = require('./utils/adSettings');
@@ -398,6 +399,19 @@ async function startServer() {
             setInterval(() => susScan.runOnce(), susIntervalMs);
         }, 10 * 60 * 1000);   // 10 min after boot, clear of the startup jobs
         console.log(`Suspicious activity scan scheduled every ${susIntervalMs / 60000} min (first run in 10 min)`);
+    }
+
+    // Podping: announce channel feeds that gained an episode, via the local
+    // podping-hivepinger. Each run is a no-op while hivepinger is not up.
+    if (podpingFeeds.enabled()) {
+        const podpingIntervalMs = podpingFeeds.INTERVAL_MIN * 60 * 1000;
+        setTimeout(() => {
+            podpingFeeds.runOnce();
+            setInterval(() => podpingFeeds.runOnce(), podpingIntervalMs);
+        }, 3 * 60 * 1000);   // 3 min after boot, clear of the startup jobs
+        console.log(`Podping scheduled every ${podpingFeeds.INTERVAL_MIN} min (first run in 3 min)`);
+    } else {
+        console.log('Podping disabled (PODPING_ENABLED=false)');
     }
 
     // Platform rate defaults live in Mongo so a price can change without a restart.

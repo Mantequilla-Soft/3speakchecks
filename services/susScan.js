@@ -20,7 +20,8 @@
  *   repeat_ip_views        one address replaying the same video (views.ipHash)
  *   ad_impression_spike    a creator's ad impressions far above their 7-day rate
  *   ads_without_watching   more ad impressions than watch sessions on a video
- *   self_view_ads          ad sessions where the viewer is the video's owner
+ *   self_view_ads          ads on the viewer's OWN video (not the pre-upload gate)
+ *   upload_gate_farming    many pre-upload ads, few actual uploads
  *
  * A finding is alerted ONCE per (detector, subject, UTC day), remembered in the
  * `sus_alerts` collection, so a pattern that persists does not repeat every run.
@@ -48,6 +49,7 @@ const T = {
   impSpikeMin: 30, impSpikeRatio: 4,
   noWatchMin: 20, noWatchRatio: 2,
   selfViewMin: 3,
+  gateMin: 5, gateUploadShare: 0.5,
 };
 
 const idAt = (date) => ObjectId.createFromTime(Math.floor(date.getTime() / 1000));
@@ -177,14 +179,36 @@ async function detect(db, now) {
   }
 
   // ── self_view_ads ──
-  const self = await db.collection(process.env.AD_SESSIONS_COLLECTION || 'ad_sessions').aggregate([
-    { $match: { _id: winId, viewer: { $ne: null }, $expr: { $eq: ['$viewer', '$owner'] } } },
+  // The PRE-UPLOAD gate is left out on purpose: there the uploader is recorded as
+  // the owner (they earn from their own gate), so viewer === owner is by design and
+  // flagged every creator who uploaded. Everywhere else adEligibility refuses an ad
+  // on your own video ('own_video'), so a hit here means that guard failed.
+  const sessions = db.collection(process.env.AD_SESSIONS_COLLECTION || 'ad_sessions');
+  const self = await sessions.aggregate([
+    { $match: { _id: winId, viewer: { $ne: null }, surface: { $ne: 'upload' }, $expr: { $eq: ['$viewer', '$owner'] } } },
     { $group: { _id: '$owner', n: { $sum: 1 }, vids: { $addToSet: '$permlink' } } },
     { $match: { n: { $gte: T.selfViewMin } } },
   ]).toArray();
   for (const r of self) {
     out.push({ type: 'self_view_ads', subject: r._id,
-      text: `@${r._id} requested **${r.n} ads on their own videos** (${r.vids.length} video(s)) in ${WINDOW_H}h.` });
+      text: `@${r._id} got **${r.n} ads on their own videos** (${r.vids.length} video(s)) in ${WINDOW_H}h. The own-video guard should make this impossible.` });
+  }
+
+  // ── upload_gate_farming ──
+  // The pre-upload spot pays the uploader, and watching it does not require posting
+  // (see the gate's own note in routes/adServe.js). Many gate ads with few actual
+  // uploads in the same window is the shape of someone opening the upload page to
+  // earn. Normal use is about one gate ad per upload.
+  const gates = await sessions.aggregate([
+    { $match: { _id: winId, surface: 'upload', owner: { $ne: null } } },
+    { $group: { _id: '$owner', n: { $sum: 1 } } },
+    { $match: { n: { $gte: T.gateMin } } },
+  ]).toArray();
+  for (const g of gates) {
+    const uploads = await db.collection('embed-video').countDocuments({ owner: g._id, createdAt: { $gte: from } });
+    if (uploads >= g.n * T.gateUploadShare) continue;
+    out.push({ type: 'upload_gate_farming', subject: g._id,
+      text: `@${g._id} got **${g.n} pre-upload ads** but made only ${uploads} upload(s) in ${WINDOW_H}h. The pre-upload spot pays the uploader even without posting.` });
   }
 
   return out;
@@ -230,6 +254,7 @@ const LABEL = {
   ad_impression_spike: '💸 Ad impression spike',
   ads_without_watching: '👻 Ads without watching',
   self_view_ads: '🪞 Ads on own videos',
+  upload_gate_farming: '🎟️ Pre-upload ads without uploads',
 };
 
 async function sendWebhook(findings, links, now) {
@@ -246,7 +271,7 @@ async function sendWebhook(findings, links, now) {
     embeds: [{
       title: `Suspicious activity: ${findings.length} new finding${findings.length === 1 ? '' : 's'}`,
       description: `Views and ad impressions in the last ${WINDOW_H}h. Nothing was changed; this is a pointer for a closer look.`,
-      color: findings.some((f) => /^ad_|ads_|self_view/.test(f.type)) ? 0xe03e3e : 0xf0a020,
+      color: findings.some((f) => /^ad_|ads_|self_view|upload_gate/.test(f.type)) ? 0xe03e3e : 0xf0a020,
       fields,
       footer: { text: 'checker.3speak.tv · services/susScan.js · one alert per pattern per day' },
       timestamp: now.toISOString(),

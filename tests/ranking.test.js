@@ -346,6 +346,35 @@ describe('age-stratified interleave — compose the page to a target distributio
     const one = [{ id: 'x', created: new Date() }];
     expect(interleaveByAge(one, WEIGHTS)).toEqual(one);
   });
+
+  describe('front tilt — the upper pages lead with new videos', () => {
+    const TILT = { tilt: 2, halfLifeSlots: 60 };
+    const under7d = (page) => { const m = bandMix(page); return m[0] + m[1]; };
+
+    test('page 1 is clearly fresher than the flat mix', () => {
+      const flat = interleaveByAge(makeList(200), WEIGHTS, now);
+      const tilted = interleaveByAge(makeList(200), WEIGHTS, now, TILT);
+      expect(under7d(tilted.slice(0, 30))).toBeGreaterThan(under7d(flat.slice(0, 30)) + 0.1);
+    });
+
+    test('freshness fades with depth back to the flat mix', () => {
+      const out = interleaveByAge(makeList(200), WEIGHTS, now, TILT);
+      const p1 = under7d(out.slice(0, 30));
+      const p3 = under7d(out.slice(60, 90));
+      const p12 = under7d(out.slice(330, 360));
+      expect(p1).toBeGreaterThan(p3);
+      expect(p3).toBeGreaterThan(p12);
+      expect(Math.abs(p12 - (WEIGHTS[0] + WEIGHTS[1]))).toBeLessThan(0.08);
+    });
+
+    test('still exactly-once, and within-band order is kept', () => {
+      const list = makeList(50);
+      const out = interleaveByAge(list, WEIGHTS, now, TILT);
+      expect(new Set(out.map((v) => v.id)).size).toBe(list.length);
+      const band1 = out.filter((v) => v.band === 1).map((v) => v.id);
+      expect(band1).toEqual(list.filter((v) => v.band === 1).map((v) => v.id));
+    });
+  });
 });
 
 describe('ageBandIndex', () => {

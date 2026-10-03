@@ -85,6 +85,8 @@ const {
   AD_BANNER_RECOMMENDED,
   AD_SHORTS_PRICE_PER_SECOND_DAY_HBD, AD_SHORTS_MAX_SECONDS,
   AD_SHORTS_MAX_ASPECT, AD_SHORTS_MIN_WIDTH, AD_SHORTS_RECOMMENDED,
+  AD_TICKER_RATE_OF_BANNER, AD_TICKER_MAX_SECONDS,
+  AD_TICKER_BASE_SECONDS, AD_TICKER_SECONDS_PER_WORD, AD_TICKER_MIN_SECONDS, AD_TICKER_MAX_CHARS, AD_TICKER_BETA_ONLY,
 } = require('./config');
 const { CREATIVE_KINDS } = require('./adCreativeKinds');
 const { platformRate } = require('./adSettings');
@@ -239,6 +241,44 @@ const FORMATS = Object.freeze({
       recommended: AD_SHORTS_RECOMMENDED,
     }),
   }),
+
+  /**
+   * A line of text crawling along the bottom of the player: the advertiser's avatar,
+   * @name and product, then their message. A click follows their link.
+   *
+   * 🚨 DRAWN BY THE PAGE, never burned and never spliced. Text that moves and can be
+   * clicked has to be an element, so `overlayOnly` says a client must ASK for it
+   * (`ticker: true` on /m/session). A player that cannot draw one, the embed today,
+   * never asks and is never handed a placement it would silently drop.
+   *
+   * Shares the watch pool for the same reason the banner does: the creator does not
+   * choose which format runs on their video.
+   */
+  video_ticker: Object.freeze({
+    key: 'video_ticker',
+    label: 'Ticker',
+    blurb: 'A line of text that crawls along the top of the video, with your avatar and product name. Clicking it opens your link.',
+    creativeKind: CREATIVE_KINDS.TEXT,
+    surface: 'watch',
+    creatorCredit: CREATOR_CREDIT.VIDEO_OWNER,
+    payoutPool: PAYOUT_POOLS.WATCH,
+    positioned: true,
+    burnsIn: false,
+    overlayOnly: true,
+    // Bookable only by ADS_BETA_USERS while true. See bookableBy().
+    beta: AD_TICKER_BETA_ONLY,
+    maxSeconds: AD_TICKER_MAX_SECONDS,
+    // Compiled fallback only. The real default follows the banner; see defaultRateFor().
+    ratePerSecondDayHbd: Math.round(AD_BANNER_PRICE_PER_SECOND_DAY_HBD * AD_TICKER_RATE_OF_BANNER * 1e6) / 1e6,
+    rateFollows: Object.freeze({ format: 'video_banner', factor: AD_TICKER_RATE_OF_BANNER }),
+    creativeSpec: Object.freeze({
+      maxChars: AD_TICKER_MAX_CHARS,
+      // 'crawl' crosses once; 'hold' slides in, stops in the middle, slides out.
+      styles: Object.freeze(['crawl', 'hold']),
+      // The readability scale, published so the page computes the same minimum.
+      minSeconds: Object.freeze({ base: AD_TICKER_BASE_SECONDS, perWord: AD_TICKER_SECONDS_PER_WORD, floor: AD_TICKER_MIN_SECONDS }),
+    }),
+  }),
 });
 
 /** The format every campaign booked before formats existed is on. */
@@ -287,6 +327,37 @@ function activePools() {
   return [...new Set(FORMAT_KEYS.map((k) => FORMATS[k].payoutPool))];
 }
 
+/** Words in a ticker message, the unit of the readability scale. */
+function tickerWords(message) {
+  const t = String(message || '').trim();
+  return t ? t.split(/\s+/).length : 0;
+}
+
+/**
+ * Seconds a ticker message needs on screen to be readable: base + perWord x words,
+ * rounded up, never under the floor. May exceed the format's maximum for a very long
+ * message; the caller says so rather than silently capping.
+ */
+function tickerMinSeconds(message) {
+  const words = tickerWords(message);
+  return Math.max(AD_TICKER_MIN_SECONDS, Math.ceil(AD_TICKER_BASE_SECONDS + AD_TICKER_SECONDS_PER_WORD * words));
+}
+
+/**
+ * May this Hive account book this format? False only for a beta format and an account
+ * outside the ads beta list. The booking route asks; the page hides the format too, but
+ * the page is not the gate.
+ */
+function bookableBy(key, account) {
+  const fmt = FORMATS[String(key || '').trim()];
+  if (!fmt) return false;
+  if (!fmt.beta) return true;
+  // Required here rather than at the top: config is already loaded by then, and this
+  // keeps the beta list out of the destructure above that every format reads.
+  const { ADS_BETA_USERS } = require('./config');
+  return ADS_BETA_USERS.includes(String(account || '').toLowerCase());
+}
+
 /** Is this a format that can be booked right now? Used to validate incoming bookings. */
 function isBookableFormat(key) {
   return Object.prototype.hasOwnProperty.call(FORMATS, String(key || '').trim());
@@ -321,7 +392,7 @@ function rateFor(advertiser, formatKey) {
     );
     if (Number.isFinite(legacy) && legacy > 0) return legacy;
   }
-  return platformRate(fmt.key, fmt.ratePerSecondDayHbd);
+  return defaultRateFor(fmt.key);
 }
 
 /**
@@ -333,6 +404,14 @@ function rateFor(advertiser, formatKey) {
  */
 function defaultRateFor(formatKey) {
   const fmt = FORMATS[String(formatKey || '').trim()] || FORMATS[DEFAULT_FORMAT];
+  /* A format priced as a share of another (the ticker: half the banner) takes that
+   * format's LIVE default times the factor, unless it has a stored override of its
+   * own. Rounded to the thousandth, the precision every other rate is quoted in. */
+  if (fmt.rateFollows) {
+    const base = defaultRateFor(fmt.rateFollows.format);
+    const derived = Math.round(base * fmt.rateFollows.factor * 1000) / 1000;
+    return platformRate(fmt.key, derived);
+  }
   return platformRate(fmt.key, fmt.ratePerSecondDayHbd);
 }
 
@@ -363,9 +442,14 @@ function snapshotRates() {
   return out;
 }
 
-/** The rate card: every bookable format with this advertiser's rate applied. */
-function rateCard(advertiser) {
-  return FORMAT_KEYS.map((key) => {
+/**
+ * The rate card: every bookable format with this advertiser's rate applied.
+ *
+ * Beta formats are left out unless asked for. A page that predates the beta flag
+ * cannot hide them itself, and prod ran such a page when the ticker was added.
+ */
+function rateCard(advertiser, { includeBeta = false } = {}) {
+  return FORMAT_KEYS.filter((key) => includeBeta || !FORMATS[key].beta).map((key) => {
     const f = FORMATS[key];
     const rate = rateFor(advertiser, key);
     const standard = defaultRateFor(key);
@@ -385,6 +469,10 @@ function rateCard(advertiser) {
       positioned: f.positioned,
       maxSeconds: f.maxSeconds,
       creativeSpec: f.creativeSpec || null,
+      // Drawn by the page, never burned or spliced.
+      overlayOnly: !!f.overlayOnly,
+      // Only ADS_BETA_USERS may book it for now. The page hides it from everyone else.
+      beta: !!f.beta,
       ratePerSecondDayHbd: rate,
       rateIsCustom: rate !== standard,
       creatorCredit: f.creatorCredit,
@@ -453,5 +541,5 @@ function creativeSpecError(formatKey, { width, height }) {
 module.exports = {
   FORMATS, FORMAT_KEYS, DEFAULT_FORMAT, CREATOR_CREDIT, PAYOUT_POOLS,
   formatOf, payoutPoolOf, activePools, isBookableFormat, rateFor, defaultRateFor, snapshotRates,
-  rateCard, creativeSpecError, acceptedKinds, formatAccepts,
+  rateCard, creativeSpecError, acceptedKinds, formatAccepts, bookableBy, tickerMinSeconds, tickerWords,
 };

@@ -181,7 +181,7 @@ withDb(async (db) => {
       spots.forEach((c) => {
         const what = c.kind === 'image'
           ? `image  ${c.imageUrl}`
-          : `video  ${c.durationSeconds || '?'}s  ${creativeIsEncoded(c) ? 'encoded' : 'still encoding'}`;
+          : c.kind === 'text' ? `ticker "${c.message}" -> ${c.clickUrl}` : `video  ${c.durationSeconds || '?'}s  ${creativeIsEncoded(c) ? 'encoded' : 'still encoding'}`;
         console.log(`    ${pad(c.status, 10)} ${what}`);
         if (c.kind !== 'image' && c.owner && c.permlink) {
           console.log(`               watch: https://3speak.tv/embed/${c.owner}/${c.permlink}`);
@@ -221,6 +221,8 @@ withDb(async (db) => {
       console.log(`${pad(c.embedId, 26)} ${pad(c.status, 9)} ${pad(c.kind || 'video', 6)} `
         + `${pad(c.selfPromo ? 'SELF-PROMO' : 'advertiser', 11)} ${pad(`@${c.owner || '?'}`, 18)} `
         + `${pad(c.trimToSeconds ? `first ${c.trimToSeconds}s` : `${c.durationSeconds || 0}s`, 14)} ${flights} flight(s)`);
+      // A ticker IS its text and link, so the reviewer reads them right here.
+      if (c.kind === 'text') console.log(`    "${c.message}"\n    -> ${c.clickUrl}`);
     }
     console.log(`\n${rows.length} creative(s). approve-creative <embedId> | reject-creative <embedId> [--note "…"]`);
     return;
@@ -240,6 +242,10 @@ withDb(async (db) => {
       // the record. Duplicated deliberately — this path must not be the lenient one.
       if ((c.kind || 'video') === 'video' && !creativeIsEncoded(c)) {
         console.error('That spot has not finished encoding yet — there is nothing to play.');
+        process.exitCode = 1; return;
+      }
+      if (c.kind === 'text' && !(c.message && c.clickUrl)) {
+        console.error('That ticker has no message or link on record — nothing to show.');
         process.exitCode = 1; return;
       }
       if ((c.kind || 'video') === 'image' && !c.imageUrl) {
