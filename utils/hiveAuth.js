@@ -123,6 +123,30 @@ async function verifyHiveAuthority({ message, signature, username, allowedDelega
   return hit ? { ok: true, signer: hit.account } : { ok: false, signer: null };
 }
 
+/**
+ * A message signed by one of OUR accounts (`delegates`, e.g. @threespeak) with its own
+ * posting key, as an attestation rather than as authority over somebody's account.
+ *
+ * Used where 3Speak's API vouches "this request comes from a session we verified for
+ * @x" (a Butter Auth, HiveSigner or wallet-login session). Unlike verifyHiveAuthority
+ * it does NOT need @x to have granted us posting authority, so it must only ever gate
+ * READING what @x already owns, never acting for them, and the message must be one
+ * the caller builds from the account name (with its own action word, so no
+ * user-signed message can ever be taken for a vouch).
+ */
+async function verifyDelegateVouch({ message, signature, delegates }) {
+  const sig = dhive.Signature.fromString(signature);
+  const recovered = sig.recover(dhive.cryptoUtils.sha256(Buffer.from(message, 'utf8'))).toString();
+  for (const acc of delegates || []) {
+    try {
+      if ((await getPostingPublicKeys(acc)).includes(recovered)) return { ok: true, signer: acc };
+    } catch (_) {
+      // An account we cannot read cannot vouch this time.
+    }
+  }
+  return { ok: false, signer: null };
+}
+
 // Build the canonical message-to-sign for a request. Bound to the action,
 // the hive_username, the specific link triplet, and a timestamp so a captured
 // signature can't be replayed for a different action/user/channel/time.
@@ -186,5 +210,5 @@ function requireHiveSignature(action) {
 
 module.exports = {
   requireHiveSignature, buildMessage, verifyHiveSignedMessage,
-  verifyHiveAuthority, getPostingAuthoritySigners,
+  verifyHiveAuthority, getPostingAuthoritySigners, verifyDelegateVouch,
 };
