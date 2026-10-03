@@ -900,6 +900,13 @@ module.exports = {
     AD_TICKER_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_TICKER_FREQUENCY_CAP_MINUTES) || 5,
     // Long enough for a sentence and a call to action, short enough to read while it moves.
     AD_TICKER_MAX_CHARS: parseInt(process.env.AD_TICKER_MAX_CHARS) || 140,
+    /* How long a ticker must be on screen to be READABLE: base + per word, never under
+     * the floor (community suggestion 2026-10-03, "a scale: 10 words, xx seconds").
+     * 10 words -> 9s, 20 -> 14s, 25 -> 17s. The rate card publishes these so the page
+     * shows the same scale, and attaching a message to a shorter booking is refused. */
+    AD_TICKER_BASE_SECONDS: parseFloat(process.env.AD_TICKER_BASE_SECONDS) || 4,
+    AD_TICKER_SECONDS_PER_WORD: parseFloat(process.env.AD_TICKER_SECONDS_PER_WORD) || 0.5,
+    AD_TICKER_MIN_SECONDS: parseFloat(process.env.AD_TICKER_MIN_SECONDS) || 5,
     /* WHOSE CONTENT tickers may appear on. Same contract as AD_SELFPROMO_ALLOWED_OWNERS:
      * EMPTY MEANS NO RESTRICTION, so guard on `.length`. Public since 2026-10-01 (was
      * badadib during the beta); set a list here to narrow it again. */

@@ -1469,6 +1469,8 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
        * of; there is no segment boundary for the server to report back. */
       ticker: tickerCampaign && tickerCreative ? {
         message: tickerCreative.message,
+        // How it moves: 'crawl' or 'hold' (slide in, pause in the middle, slide out).
+        style: tickerCreative.style === 'hold' ? 'hold' : 'crawl',
         account: (tickerBrand && tickerBrand.hiveAccount) || null,
         productName: (tickerBrand && tickerBrand.projectName) || tickerCampaign.projectName || null,
         clickUrl: tickerCreative.clickUrl ? `${publicBase}/m/${sid}/tc` : null,

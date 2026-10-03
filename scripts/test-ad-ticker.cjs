@@ -89,6 +89,19 @@ const ok = (label, cond, detail = '') => {
     ok('same text = same creative', again.data?.creative?.embedId === key);
 
     console.log('-- attach');
+    console.log('-- readability scale + style');
+    const tf2 = (await j('GET', '/advertise/pricing?reference=TICK-BETA&beta=1')).data?.formats?.find((f) => f.key === 'video_ticker');
+    ok('rate card publishes the scale + styles', tf2?.creativeSpec?.minSeconds?.perWord === 0.5 && tf2?.creativeSpec?.styles?.includes('hold'));
+    const twentyWords = 'word '.repeat(20).trim();
+    const tooLongForBooking = await j('POST', '/advertise/creatives', { reference: 'TICK-BETA', message: twentyWords, clickUrl: 'https://example.com/l' });
+    ok('20-word message saved, minSeconds 14', tooLongForBooking.data?.creative?.minSeconds === 14, String(tooLongForBooking.data?.creative?.minSeconds));
+    const refused = await j('POST', `/advertise/campaigns/${campId}/creative`, { reference: 'TICK-BETA', embedId: tooLongForBooking.data?.creative?.embedId });
+    ok('14s message refused on a 10s booking', refused.status === 400 && refused.data?.minSeconds === 14, refused.data?.error);
+    const unreadable = await j('POST', '/advertise/creatives', { reference: 'TICK-BETA', message: 'w '.repeat(40).trim(), clickUrl: 'https://example.com/u' });
+    ok('message longer than any booking can show: refused', unreadable.status === 400, unreadable.data?.error);
+    const held = await j('POST', '/advertise/creatives', { reference: 'TICK-BETA', message: 'Try Ticker Co today, it is great', clickUrl: 'https://example.com/go?x=1', style: 'hold' });
+    ok('hold style stored, and is a different creative', held.data?.creative?.tickerStyle === 'hold' && held.data?.creative?.embedId !== key);
+
     const att = await j('POST', `/advertise/campaigns/${campId}/creative`, { reference: 'TICK-BETA', embedId: key });
     ok('ticker attached to ticker flight', att.status === 200, `${att.status} ${att.data?.error || ''}`);
     const bad = await j('POST', `/advertise/campaigns/${rollId}/creative`, { reference: 'TICK-BETA', embedId: key });
@@ -123,6 +136,7 @@ const ok = (label, cond, detail = '') => {
     const t = s.data?.ticker;
     ok('badadib + flag: ticker served', !!t, s.data?.reason || '');
     ok('ticker carries message/account/product', t?.message === 'Try Ticker Co today, it is great' && t?.account === 'meno' && t?.productName === 'Ticker Co');
+    ok('style served (crawl by default)', t?.style === 'crawl', String(t?.style));
     ok('position + seconds from the booking', t?.positionPercent === slot && t?.durationSeconds === 10, `${t?.positionPercent} ${t?.durationSeconds}`);
     ok('no roll, no banner, no manifest', !s.data?.ad && !s.data?.banner);
     const sid = (t?.clickUrl || '').match(/\/m\/([0-9a-f]{32})\/tc/)?.[1];

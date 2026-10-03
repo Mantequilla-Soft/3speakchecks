@@ -33,7 +33,7 @@ const {
   AD_PAYMENTS_COLLECTION, AD_PAYMENT_ACCOUNT,
   AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_SLOT_PERCENTS, AD_LENGTH_SECONDS,
   AD_PRODUCTION_FEE_HBD, ADS_STAGE, AD_SLOT_MAX_SHARES, AD_SLOT_HOLD_HOURS, AD_DAY_CURVE_K,
-  AD_BOOKING_EXPIRY_DAYS, AD_TICKER_MAX_CHARS,
+  AD_BOOKING_EXPIRY_DAYS, AD_TICKER_MAX_CHARS, AD_TICKER_MAX_SECONDS,
 } = require('../utils/config');
 const {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, DAY_MS, ensureAdIndexes, priceForDays, ratePerDayFor,
@@ -43,7 +43,7 @@ const { getSnapshot, forecastPerDay } = require('../services/adInventory');
 const { videoShapeFromManifest } = require('../utils/videoDuration');
 const {
   DEFAULT_FORMAT, FORMAT_KEYS, formatOf, isBookableFormat, rateFor, defaultRateFor, rateCard, formatAccepts,
-  creativeSpecError, acceptedKinds, bookableBy,
+  creativeSpecError, acceptedKinds, bookableBy, tickerMinSeconds, tickerWords,
 } = require('../utils/adFormats');
 const { findSlotConflict, slotAvailability, slotHolders } = require('../utils/adSlots');
 const { balanceOf, ledgerOf } = require('../utils/adBalance');
@@ -158,7 +158,14 @@ function tickerText(b) {
   if (!url || url.protocol !== 'https:') {
     return { error: 'The link has to be a full https:// address.' };
   }
-  return { message, clickUrl: url.toString() };
+  // How it moves: 'crawl' (default) or 'hold' (slide in, pause in the middle, slide out).
+  const style = b.style === 'hold' ? 'hold' : 'crawl';
+  // Longer than the longest booking can never be readable, so say it now.
+  const needs = tickerMinSeconds(message);
+  if (needs > AD_TICKER_MAX_SECONDS) {
+    return { error: `That message needs about ${needs} seconds to read and a ticker runs at most ${AD_TICKER_MAX_SECONDS}. Shorten it a little.` };
+  }
+  return { message, clickUrl: url.toString(), style };
 }
 
 /**
@@ -169,13 +176,17 @@ function tickerText(b) {
  * human has to look at again. Exactly the rule the image path follows by keying on
  * the image url.
  */
-function tickerKey(advertiser, { message, clickUrl }) {
+// The style is part of the key: the same words shown a different way is a different
+// thing to review. 'crawl' keeps the original key, so tickers saved before styles
+// existed keep theirs.
+function tickerKey(advertiser, { message, clickUrl, style = 'crawl' }) {
+  const extra = style === 'crawl' ? '' : `\n${style}`;
   return `txt:${crypto.createHash('sha1')
-    .update(`${advertiser.reference}\n${message}\n${clickUrl}`).digest('hex').slice(0, 24)}`;
+    .update(`${advertiser.reference}\n${message}\n${clickUrl}${extra}`).digest('hex').slice(0, 24)}`;
 }
 
-async function saveTickerCreative(advertiser, { message, clickUrl }) {
-  const key = tickerKey(advertiser, { message, clickUrl });
+async function saveTickerCreative(advertiser, { message, clickUrl, style = 'crawl' }) {
+  const key = tickerKey(advertiser, { message, clickUrl, style });
   const db = getDb();
   const prior = await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: key });
   const settled = prior
@@ -188,6 +199,7 @@ async function saveTickerCreative(advertiser, { message, clickUrl }) {
         kind: CREATIVE_KINDS.TEXT,
         message,
         clickUrl,
+        style,
         owner: advertiser.hiveAccount,
         durationSeconds: 0,
         manifestCid: null,
@@ -211,6 +223,9 @@ function publicCreative(cr) {
     // A ticker's text and where it links. Null on every other kind.
     message: cr.message || null,
     clickUrl: cr.clickUrl || null,
+    tickerStyle: cr.kind === CREATIVE_KINDS.TEXT ? (cr.style || 'crawl') : null,
+    // The readability minimum for this message, so the booking form can default to it.
+    minSeconds: cr.kind === CREATIVE_KINDS.TEXT ? tickerMinSeconds(cr.message) : null,
     // So the page can show what a banner actually is when offering it, and check it
     // against the format's spec before sending anything.
     imageWidth: cr.imageWidth ?? null,
@@ -829,6 +844,19 @@ router.post('/campaigns/:id/creative', featureVisible, express.json({ limit: '16
         const t = tickerText(b);
         if (t.error) return res.status(400).json({ success: false, error: t.error });
         key = await saveTickerCreative(advertiser, t);
+      }
+      /* Readable or refused: a message needing 14 seconds on a 10-second booking would
+       * race past. Said with both ways out, since either fixes it. */
+      const saved = await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: key });
+      const booked = Number(campaign.spotSeconds) || 0;
+      const needs = tickerMinSeconds(saved?.message);
+      if (booked > 0 && booked < needs) {
+        return res.status(400).json({
+          success: false,
+          error: `This message has ${tickerWords(saved?.message)} words and needs at least ${needs} seconds to be readable; `
+            + `this booking is ${booked}. Book ${needs} seconds or more, or shorten the message.`,
+          minSeconds: needs,
+        });
       }
       await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
         { _id: id },

@@ -85,7 +85,8 @@ const {
   AD_BANNER_RECOMMENDED,
   AD_SHORTS_PRICE_PER_SECOND_DAY_HBD, AD_SHORTS_MAX_SECONDS,
   AD_SHORTS_MAX_ASPECT, AD_SHORTS_MIN_WIDTH, AD_SHORTS_RECOMMENDED,
-  AD_TICKER_RATE_OF_BANNER, AD_TICKER_MAX_SECONDS, AD_TICKER_MAX_CHARS, AD_TICKER_BETA_ONLY,
+  AD_TICKER_RATE_OF_BANNER, AD_TICKER_MAX_SECONDS,
+  AD_TICKER_BASE_SECONDS, AD_TICKER_SECONDS_PER_WORD, AD_TICKER_MIN_SECONDS, AD_TICKER_MAX_CHARS, AD_TICKER_BETA_ONLY,
 } = require('./config');
 const { CREATIVE_KINDS } = require('./adCreativeKinds');
 const { platformRate } = require('./adSettings');
@@ -270,7 +271,13 @@ const FORMATS = Object.freeze({
     // Compiled fallback only. The real default follows the banner; see defaultRateFor().
     ratePerSecondDayHbd: Math.round(AD_BANNER_PRICE_PER_SECOND_DAY_HBD * AD_TICKER_RATE_OF_BANNER * 1e6) / 1e6,
     rateFollows: Object.freeze({ format: 'video_banner', factor: AD_TICKER_RATE_OF_BANNER }),
-    creativeSpec: Object.freeze({ maxChars: AD_TICKER_MAX_CHARS }),
+    creativeSpec: Object.freeze({
+      maxChars: AD_TICKER_MAX_CHARS,
+      // 'crawl' crosses once; 'hold' slides in, stops in the middle, slides out.
+      styles: Object.freeze(['crawl', 'hold']),
+      // The readability scale, published so the page computes the same minimum.
+      minSeconds: Object.freeze({ base: AD_TICKER_BASE_SECONDS, perWord: AD_TICKER_SECONDS_PER_WORD, floor: AD_TICKER_MIN_SECONDS }),
+    }),
   }),
 });
 
@@ -318,6 +325,22 @@ function payoutPoolOf(campaign) {
 /** Every pool actually in use, derived from the registry rather than kept in step by hand. */
 function activePools() {
   return [...new Set(FORMAT_KEYS.map((k) => FORMATS[k].payoutPool))];
+}
+
+/** Words in a ticker message, the unit of the readability scale. */
+function tickerWords(message) {
+  const t = String(message || '').trim();
+  return t ? t.split(/\s+/).length : 0;
+}
+
+/**
+ * Seconds a ticker message needs on screen to be readable: base + perWord x words,
+ * rounded up, never under the floor. May exceed the format's maximum for a very long
+ * message; the caller says so rather than silently capping.
+ */
+function tickerMinSeconds(message) {
+  const words = tickerWords(message);
+  return Math.max(AD_TICKER_MIN_SECONDS, Math.ceil(AD_TICKER_BASE_SECONDS + AD_TICKER_SECONDS_PER_WORD * words));
 }
 
 /**
@@ -518,5 +541,5 @@ function creativeSpecError(formatKey, { width, height }) {
 module.exports = {
   FORMATS, FORMAT_KEYS, DEFAULT_FORMAT, CREATOR_CREDIT, PAYOUT_POOLS,
   formatOf, payoutPoolOf, activePools, isBookableFormat, rateFor, defaultRateFor, snapshotRates,
-  rateCard, creativeSpecError, acceptedKinds, formatAccepts, bookableBy,
+  rateCard, creativeSpecError, acceptedKinds, formatAccepts, bookableBy, tickerMinSeconds, tickerWords,
 };
