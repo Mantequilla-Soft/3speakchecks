@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
+const { ENABLE_MONGO_WRITES } = require('../utils/config');
 
 /* ────────────────────────────────────────────────────────────────────
  * GET /feeds/watched/:username?type=videos|shorts&since=<unix s>&page=&limit=
@@ -26,6 +27,53 @@ const { getDb } = require('../utils/db');
  * ──────────────────────────────────────────────────────────────────── */
 
 const MAX_LIMIT = 50;
+// Unflagged rows classified per request. The worst user has ~650, so one call
+// settles them; the cap only bounds a pathological history.
+const CLASSIFY_BATCH = 1000;
+
+/**
+ * Settle `short` on this user's history rows that never got it.
+ *
+ * Only the shorts player sends the flag. The watch page records before it knows
+ * what it is playing, so a short opened there was stored unflagged and landed in
+ * the Videos tab (where a portrait card switches the grid to its mixed layout).
+ * Our own `embed-video.short` is the truth, so classify from it here: rows we can
+ * match get true/false, rows we cannot (legacy uploads, which predate shorts, or
+ * videos gone for good) get false. Each row is settled once; the playlists
+ * service only writes `short` when a caller sends it, so a later rewatch from the
+ * watch page leaves the answer alone.
+ */
+async function classifyUnflagged(db, username) {
+  if (!ENABLE_MONGO_WRITES) return;
+  const history = db.collection('watch_history');
+  const rows = await history.find(
+    { username, short: { $exists: false } },
+    { projection: { author: 1, permlink: 1 } },
+  ).limit(CLASSIFY_BATCH).toArray();
+  if (!rows.length) return;
+
+  const permlinks = [...new Set(rows.map((r) => r.permlink))];
+  const projection = { owner: 1, permlink: 1, hive_permlink: 1, short: 1 };
+  const [byAsset, byHive] = await Promise.all([
+    db.collection('embed-video').find({ permlink: { $in: permlinks } }, { projection }).toArray(),
+    db.collection('embed-video').find({ hive_permlink: { $in: permlinks } }, { projection }).toArray(),
+  ]);
+  const isShort = new Map();
+  for (const ev of byAsset) isShort.set(`${ev.owner}/${ev.permlink}`, ev.short === true);
+  for (const ev of byHive) {
+    const k = `${ev.owner}/${ev.hive_permlink}`;
+    if (!isShort.has(k)) isShort.set(k, ev.short === true);
+  }
+
+  await history.bulkWrite(rows.map((r) => ({
+    updateOne: {
+      // Guarded on the field still being absent, so a flag the player sent in
+      // the meantime is never overwritten.
+      filter: { _id: r._id, short: { $exists: false } },
+      update: { $set: { short: isShort.get(`${r.author}/${r.permlink}`) === true } },
+    },
+  })), { ordered: false });
+}
 
 function historyFilter(username, type, since) {
   const filter = { username };
@@ -83,6 +131,11 @@ router.get('/watched/:username', async (req, res) => {
 
     const db = getDb();
     const history = db.collection('watch_history');
+    // Before counting, so the tabs split on the real answer. Never fatal: an
+    // unclassified row only lands in the wrong tab.
+    await classifyUnflagged(db, username).catch((err) => {
+      console.error('[watched-feed] classify failed:', err && err.message);
+    });
 
     // Both tab counts on every call: the tabs label themselves with them, and
     // they follow the date filter, so they cannot be fetched once and reused.
