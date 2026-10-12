@@ -41,7 +41,7 @@ const {
   AD_BANNER_CLOSE_AFTER_SECONDS, AD_BANNER_FREQUENCY_CAP_MINUTES, AD_GATE_ALLOWED_UPLOADERS, ADS_STAGE,
   AD_COOLDOWN_MINUTES, AD_PACING_ENABLED, AD_PACING_MIN_FRACTION, AD_SESSION_RATE_PER_MIN,
   AD_COUNT_AFTER_SECONDS,
-  AD_SHORTS_EVERY_N, AD_SHORTS_IGNORE_REPEAT_CAP,
+  AD_SHORTS_EVERY_N, AD_SHORTS_IGNORE_REPEAT_CAP, AD_LIVE_ENABLED, AD_LIVE_ASSUMED_SECONDS,
   AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT, AD_BANNER_LABEL,
 } = require('../utils/config');
 const {
@@ -949,12 +949,26 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // Does the client want the banner drawn in the page rather than burned in? Asked
     // by the client because it is the only thing that knows what it can do; see
     // bannerMode below.
-    const bannerOverlay = b.bannerOverlay === true || String(b.bannerOverlay) === 'true';
+    const askedBannerOverlay = b.bannerOverlay === true || String(b.bannerOverlay) === 'true';
     // Can this client DRAW a ticker? Only a page that can is ever handed one, so a
     // player without the overlay never takes a placement it would silently drop.
     const wantsTicker = b.ticker === true || String(b.ticker) === 'true';
     const rawSurface = str(b.surface, 16);
-    const surface = rawSurface === 'shorts' ? 'shorts' : (rawSurface === 'upload' ? 'upload' : 'watch');
+    const surface = rawSurface === 'shorts' ? 'shorts'
+      : (rawSurface === 'upload' ? 'upload' : (rawSurface === 'live' ? 'live' : 'watch'));
+    /* ── LIVE STREAMS ──────────────────────────────────────────────────────────
+     * `owner` is the host, `permlink` the room name (also the permlink of the
+     * stream's Hive post when it was announced). It runs the WATCH surface's rules
+     * end to end (approval gate, premium / own-video / creator opt-out, cooldown,
+     * frequency caps, one ad per address per stream per day), with three changes:
+     *   - overlay formats only: no roll, and the banner is always page-drawn, since
+     *     nothing can be burned into a WebRTC stream;
+     *   - no content manifest and no stored duration: the stream is treated as a
+     *     video of AD_LIVE_ASSUMED_SECONDS, for length targeting here and for the
+     *     page's placement maths (positionPercent of that length);
+     *   - the session is tagged 'live', and so are its impressions. */
+    if (surface === 'live' && !AD_LIVE_ENABLED) return res.json({ ad: null, reason: 'live_ads_off' });
+    const bannerOverlay = surface === 'live' ? true : askedBannerOverlay;
     /* WHICH APPLICATION is playing this, as opposed to `surface`, which is which
      * kind of slot within it. Carried onto the impression so delivery can be read
      * per app.
@@ -1295,11 +1309,14 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // Legacy uploads (the old uploader, HiveSuite) have no embed-video row at all,
     // only one in `videos`, which carries the duration too. Without this fallback
     // every length-targeted campaign skipped them as "unknown length".
-    const video = await db.collection('embed-video')
-      .findOne({ permlink, owner }, { projection: { duration: 1, short: 1 } })
+    const video = surface === 'live' ? null : (
+      await db.collection('embed-video')
+        .findOne({ permlink, owner }, { projection: { duration: 1, short: 1 } })
       || await db.collection('videos')
-        .findOne({ permlink, owner }, { projection: { duration: 1 } });
-    const videoSeconds = Number(video && video.duration) || null;
+        .findOne({ permlink, owner }, { projection: { duration: 1 } }));
+    // A live stream has no stored length; it is placed and targeted as a video of
+    // AD_LIVE_ASSUMED_SECONDS (see the live note at the top of this handler).
+    const videoSeconds = surface === 'live' ? AD_LIVE_ASSUMED_SECONDS : (Number(video && video.duration) || null);
 
     // 🚨 NO WATCH-SURFACE ADS ON A SHORT, whatever its length.
     //
@@ -1361,6 +1378,9 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       if (!c.advertiserRef || !approvedRefs.has(c.advertiserRef)) return false;
       const creative = byCampaign.get(String(c._id));
       if (servableReason(c, creative)) return false;
+      // Live: no roll. A spliced spot is impossible on a WebRTC stream, and the
+      // roadmap asks for the less disruptive overlays only.
+      if (surface === 'live' && formatOf(c).key === 'video_roll') return false;
       // A format only a page can draw goes only to a page that asked for it, and a
       // ticker only onto content its beta list allows.
       if (formatOf(c).overlayOnly && (!wantsTicker || !tickerAllowedOn(owner))) return false;
@@ -1424,6 +1444,17 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     const sid = crypto.randomBytes(16).toString('hex');
     await db.collection(SESSIONS).insertOne({
       sid,
+      // Only set for live streams; a watch session never carried a surface and
+      // every reader treats a missing one as 'watch'.
+      ...(surface === 'live' ? { surface: 'live' } : {}),
+      /* Live has no playlist for applyBanner() to measure, so the banner's window is
+       * fixed here from the same slot maths over the assumed length, in seconds
+       * after the viewer started watching. /m/:sid/i reads it like a spliced one. */
+      ...(surface === 'live' && bannerCampaign && bannerCreative ? {
+        bannerStartAt: slotSecondsFor(bannerCampaign, AD_LIVE_ASSUMED_SECONDS),
+        bannerDurationSeconds: Number(bannerCampaign.spotSeconds) || 0,
+        bannerBookedSeconds: Number(bannerCampaign.spotSeconds) || 0,
+      } : {}),
       // When this session first pulled an ad segment. Starts the pacing budget; see
       // pacingRefusal(). Null until the viewer actually reaches the break.
       adFirstFetchAt: null,
@@ -2234,6 +2265,7 @@ router.post('/:sid/ticker-shown', servingVisible, express.json({ limit: '1kb' })
         permlink: session.permlink,
         country: session.country || null,
         ticker: true,
+        ...(session.surface === 'live' ? { live: true } : {}),
       },
       completed: true,
     });
@@ -2565,6 +2597,7 @@ router.post('/:sid/banner-shown', servingVisible, express.json({ limit: '1kb' })
         // So overlay-delivered impressions can be told apart from burned ones in any
         // report. They are worth the same, and they are not the same evidence.
         bannerOverlay: true,
+        ...(session.surface === 'live' ? { live: true } : {}),
       },
       completed: true,
     });

@@ -1138,6 +1138,14 @@ module.exports = {
     // time-based cooldown, so minutes would let the feed carry an ad almost
     // continuously (or, tuned the other way, almost never).
     AD_SHORTS_EVERY_N: parseInt(process.env.AD_SHORTS_EVERY_N) || 5,
+    /* LIVE STREAMS (surface 'live', routes/adServe.js). A stream has no length, and
+     * every placement is a PERCENT of the content, so a stream is priced and placed
+     * as if it were a video of this many seconds, counted from when the viewer
+     * started watching. Overlay formats only (ticker + page-drawn banner): nothing
+     * can be spliced into a WebRTC stream, and a roll would interrupt the live
+     * moment. AD_LIVE_ENABLED=false switches the surface off without a deploy. */
+    AD_LIVE_ENABLED: process.env.AD_LIVE_ENABLED !== 'false',
+    AD_LIVE_ASSUMED_SECONDS: parseInt(process.env.AD_LIVE_ASSUMED_SECONDS, 10) || 300,
     // Let the SAME shorts spot come round again instead of waiting out the repeat cap.
     //
     // 🚨 A TESTING SWITCH. It must not be left on. The repeat cap is the thing that
