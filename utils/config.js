@@ -413,6 +413,16 @@ module.exports = {
     // snap or interacting with one still takes effect on the very next request --
     // the TTL only bounds how stale a NEW snap from another process can be.
     SNAP_FEED_CACHE_MS: parseInt(process.env.SNAP_FEED_CACHE_MS ?? '') || 60 * 1000,
+    // Spam filter for the home feed's scope=all (Discover + New): a snap only shows
+    // there when its author has at least this many Hive followers. Profile and
+    // community pages are NOT filtered. 0 turns the filter off, so it is parsed
+    // explicitly rather than with `|| default`.
+    SNAP_FEED_MIN_FOLLOWERS: (() => {
+        const n = parseInt(process.env.SNAP_FEED_MIN_FOLLOWERS ?? '', 10);
+        return Number.isFinite(n) && n >= 0 ? n : 300;
+    })(),
+    // Snaps from accounts the viewer follows skip the follower threshold.
+    SNAP_FEED_ALWAYS_SHOW_FOLLOWED: process.env.SNAP_FEED_ALWAYS_SHOW_FOLLOWED !== 'false',
 
     // ─── Engagement affinity (utils/engagementBoost.js + services/engagementSync.js) ──
     // The mirror image of the curation boost: instead of "how many people cared about

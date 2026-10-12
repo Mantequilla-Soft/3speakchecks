@@ -296,8 +296,12 @@ async function fetchLivePageData(authorPerms) {
     return results;
 }
 
-// Fetch follower counts via RPC in batches of 20
-async function fetchFollowerCounts(authors) {
+// Fetch follower counts via RPC in batches of 20.
+// `missing` is what an author gets when the RPC returned nothing for them (node
+// down, unknown account). The default 0 keeps the shorts ranking behaviour; a
+// caller that FILTERS on the count passes `{ missing: null, staleOnFailure: true }`
+// so a Hive hiccup can't read as "everyone has 0 followers" and hide everything.
+async function fetchFollowerCounts(authors, { missing = 0, staleOnFailure = false } = {}) {
     const results = new Map();
     const toFetch = [];
 
@@ -331,7 +335,8 @@ async function fetchFollowerCounts(authors) {
 
         for (const author of batch) {
             if (!results.has(author)) {
-                results.set(author, 0);
+                const stale = staleOnFailure ? followerCache.get(author) : null;
+                results.set(author, stale ? stale.followers : missing);
             }
         }
     }
