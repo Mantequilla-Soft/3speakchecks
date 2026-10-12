@@ -23,6 +23,8 @@ const { getDb, getLinksCollection } = require('../utils/db');
 const { verifyAndStore, unlinkIfRevoked } = require('../services/verifier');
 const { hashForHiveUsername } = require('../utils/hash');
 const { call, qs } = require('../utils/incubationHosted');
+const { fetchAiFlagsBatch } = require('../utils/transcriptionTags');
+const { isHiddenFromFeed } = require('../utils/hiddenFromFeed');
 
 /** Pass the service's answer through, or 502 if it did not answer. */
 function relay(res, cache) {
@@ -75,10 +77,98 @@ router.get('/user/:handle/posts', (req, res) => {
 
 // GET /incubation/feed?limit=&maxAgeDays=&contentType= — recent off-chain posts,
 // for interleaving into the home and discover feeds.
+//
+// Nothing posted before WARMUP_FEED_SINCE ever appears (owner's call, 2026-10-09:
+// the feeds opened to everyone that day, so only what was uploaded from then on).
+// The cutoff becomes the service's age window, so `limit` counts only posts after
+// it, and the items are checked against it again in case the window is rounded.
+//
+// Videos flagged as AI-generated (subtitles-tags ai_generated_v2) are left out too.
+// The home rail would drop them in the browser anyway, but the shorts swipe feed
+// runs its AI filter BEFORE it mixes warm-up shorts in, so they must not arrive.
+// This feed exists to put new creators in front of people, not AI uploads. If the
+// lookup fails the items are kept, like every other feed here.
+// The video a warm-up post carries, as subtitles-tags keys it: owner + asset id.
+const assetKey = (it) => {
+    const author = String(it.assetAuthor || it.handle || '').toLowerCase();
+    const permlink = String(it.assetPermlink || it.videoId || it.permlink || '');
+    return author && permlink ? `${author}/${permlink}` : null;
+};
+async function dropAiFlagged(items) {
+    const keys = items.map(assetKey).filter(Boolean);
+    if (!keys.length) return items;
+    try {
+        const flagged = new Set(await fetchAiFlagsBatch(getDb(), keys.map((k) => {
+            const i = k.indexOf('/');
+            return { author: k.slice(0, i), permlink: k.slice(i + 1) };
+        })));
+        return items.filter((it) => !flagged.has(assetKey(it)));
+    } catch (e) {
+        console.warn('[incubation] AI flag lookup failed, feed unfiltered:', e.message);
+        return items;
+    }
+}
+// Videos their creator took out of the feeds: hidden from feeds (hiddenFromFeed)
+// or unlisted (listed_on_3speak: false), read off the embed-video asset like
+// every other feed here. They stay on the creator's profile, which does not go
+// through /feed. If the lookup fails the items are kept.
+async function dropHiddenFromFeeds(items) {
+    const keys = [...new Set(items.map(assetKey).filter(Boolean))];
+    if (!keys.length) return items;
+    try {
+        const rows = await getDb().collection('embed-video').find(
+            { $or: keys.map((k) => { const i = k.indexOf('/'); return { owner: k.slice(0, i), permlink: k.slice(i + 1) }; }) },
+            { projection: { _id: 0, owner: 1, permlink: 1, hiddenFromFeed: 1, listed_on_3speak: 1 } },
+        ).toArray();
+        const hidden = new Set(rows
+            .filter((r) => isHiddenFromFeed(r) || r.listed_on_3speak === false)
+            .map((r) => `${String(r.owner).toLowerCase()}/${r.permlink}`));
+        return items.filter((it) => !hidden.has(assetKey(it)));
+    } catch (e) {
+        console.warn('[incubation] hidden-from-feed lookup failed, feed unfiltered:', e.message);
+        return items;
+    }
+}
+// Only a share of the warm-up posts per load, a fresh random pick each time
+// (owner 2026-10-12: 50%). Drawn from the whole pool the service will give (its
+// cap is 50), not just the newest `limit`, so older posts get their turn too.
+// Rounded up, so a single warm-up post still shows. WARMUP_FEED_SHARE=1 turns
+// the sampling off.
+const WARMUP_FEED_SHARE = Math.min(Math.max(parseFloat(process.env.WARMUP_FEED_SHARE ?? '0.5') || 0, 0), 1);
+const WARMUP_FEED_POOL = 50;
+function sampleShare(items) {
+    if (WARMUP_FEED_SHARE >= 1 || items.length === 0) return items;
+    const keep = Math.ceil(items.length * WARMUP_FEED_SHARE);
+    const idx = items.map((_, i) => i);
+    for (let i = idx.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [idx[i], idx[j]] = [idx[j], idx[i]];
+    }
+    // Back in the service's order (newest first) once picked.
+    return idx.slice(0, keep).sort((a, b) => a - b).map((i) => items[i]);
+}
+const WARMUP_FEED_SINCE = new Date(process.env.WARMUP_FEED_SINCE || '2026-10-09T00:00:00Z');
 router.get('/feed', (req, res) => {
-    const { limit, maxAgeDays, contentType } = req.query;
-    call('GET', `/public/feed${qs({ limit, maxAgeDays, contentType })}`)
-        .then(relay(res, 'public, max-age=30')).catch(failed(res, 'feed'));
+    const { limit, contentType } = req.query;
+    const sinceMs = WARMUP_FEED_SINCE.getTime();
+    const cutoffDays = Math.max((Date.now() - sinceMs) / 86400000, 0.001);
+    const asked = parseFloat(req.query.maxAgeDays);
+    const maxAgeDays = Number.isFinite(asked) && asked > 0 ? Math.min(asked, cutoffDays) : cutoffDays;
+    // The caller's limit applies to what is shown, after the draw; the service is
+    // asked for the whole pool. Same default as the service when none is given.
+    const shownLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), WARMUP_FEED_POOL);
+    const sampling = WARMUP_FEED_SHARE < 1;
+    call('GET', `/public/feed${qs({ limit: sampling ? WARMUP_FEED_POOL : shownLimit, maxAgeDays, contentType })}`)
+        .then(async (r) => {
+            if (r.status === 200 && Array.isArray(r.body?.items)) {
+                const items = r.body.items.filter((it) => new Date(it.created).getTime() >= sinceMs);
+                const shown = await dropAiFlagged(await dropHiddenFromFeeds(items));
+                r.body.items = sampleShare(shown).slice(0, shownLimit);
+            }
+            // A random pick must not be cached, or everyone gets the same half.
+            relay(res, sampling ? 'no-store' : 'public, max-age=30')(r);
+        })
+        .catch(failed(res, 'feed'));
 });
 
 // GET /incubation/replies?parentAuthor=&parentPermlink= — the off-chain replies
