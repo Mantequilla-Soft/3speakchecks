@@ -41,6 +41,7 @@ const videosRoutes = require('./routes/videos');
 const shortsRoutes = require('./routes/shorts');
 const audioRoutes = require('./routes/audio');
 const feedsRoutes = require('./routes/feeds');
+const watchedFeedRoutes = require('./routes/watchedFeed');
 const rssRoutes = require('./routes/rss');
 const pushRoutes = require('./routes/push');
 const incubationRoutes = require('./routes/incubation');
@@ -107,6 +108,7 @@ app.use('/', promoteRoutes);
 app.use('/', shortsRoutes);
 app.use('/audio', audioRoutes);
 app.use('/feeds', feedsRoutes);
+app.use('/feeds', watchedFeedRoutes);              // /feeds/watched/:username (history as cards)
 app.use('/rss', rssRoutes);
 app.use('/verify', verifyRoutes);
 app.use('/scheduled-posts', scheduledPostsRoutes);
