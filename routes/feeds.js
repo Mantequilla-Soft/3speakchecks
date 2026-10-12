@@ -40,10 +40,10 @@ const {
     RELATED_TOPIC_MULT, RELATED_INTEREST_MULT, RELATED_CREATOR_MULT,
     RELATED_CREATOR_POOL, RELATED_JITTER,
 } = require('../utils/config');
-const { jitter, interleaveExploration, interleaveByAge, interleaveByInterest, freshness, ageHours } = require('../utils/discoverScore');
+const { jitter, weightedOrder, interleaveExploration, interleaveByAge, interleaveByInterest, freshness, ageHours } = require('../utils/discoverScore');
 const {
     DISCOVER_AGE_STRATIFY, DISCOVER_AGE_WEIGHTS, DISCOVER_INTEREST_SHARE,
-    DISCOVER_FRONT_TILT, DISCOVER_FRONT_HALFLIFE_SLOTS,
+    DISCOVER_FRONT_TILT, DISCOVER_FRONT_HALFLIFE_SLOTS, DISCOVER_SAMPLE_POWER,
 } = require('../utils/config');
 const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
 const { getFollowSetForReq, applyFollowBoost } = require('../utils/followBoost');
@@ -423,15 +423,22 @@ router.get('/discover', async (req, res) => {
         // compound for the same creator — see utils/engagementBoost.js.
         applyEngagementBoost(scored, affinity, { scoreField: 'discover_score' });
 
+        // Not a plain score sort: that put the same handful of videos on screen 1 on
+        // every reload (the jitter above is too small to reorder them). A seeded
+        // weighted draw keeps quality in front while each seed, i.e. each page
+        // load, picks a different selection. Pagination stays stable within a seed.
+        let ordered;
         if (chrono) {
-            scored.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
+            ordered = scored.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
+        } else if (DISCOVER_SAMPLE_POWER > 0) {
+            ordered = weightedOrder(scored, rng, (e) => Math.pow(e.discover_score, DISCOVER_SAMPLE_POWER));
         } else {
-            scored.sort((a, b) => b.discover_score - a.discover_score);
+            ordered = scored.sort((a, b) => b.discover_score - a.discover_score);
         }
 
         // Drop dismissed ("not interested" / hidden creator) and — when the
         // preference is on — already-watched, BEFORE pagination so pages stay full.
-        const visible = await filterForUser(db, req, scored);
+        const visible = await filterForUser(db, req, ordered);
 
         // Compose the page to the target AGE DISTRIBUTION (skipped in chrono mode).
         // The list is already score-sorted; interleaveByAge splits it into age bands
@@ -730,7 +737,16 @@ router.get('/promoted', async (req, res) => {
             promotedUntil: ev.promotedUntil,
         }));
 
-        res.json({ success: true, feed: 'promoted', limit, total: videos.length, videos });
+        // Dismissals (always) + already-watched (hidewatched=1) BEFORE the client sees
+        // them; filtering only in the browser flashed a watched promo on first paint.
+        // An embed's uploader can differ from its Hive author, so the watched check
+        // runs on both keys. No ?currentuser= → unchanged (filterForUser no-ops).
+        let visible = await filterForUser(db, req, videos);
+        if (visible.some((v) => v.author && v.author !== v.owner)) {
+            visible = await filterForUser(db, req, visible, (v) => `${v.author}:${v.permlink}`);
+        }
+
+        res.json({ success: true, feed: 'promoted', limit, total: visible.length, videos: visible });
     } catch (error) {
         console.error('Error fetching promoted feed:', error);
         res.status(500).json({ success: false, error: 'Internal server error' });

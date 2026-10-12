@@ -676,10 +676,11 @@ async function settlePeriod(db, period, deps = {}) {
   if (!impressions.length) {
     // No creator impressions does not mean no viewers: someone may still have
     // watched a video to 75% while a flight was running.
-    const viewerPaidNoImp = await payViewers(db, period, viewerPoolHbd, viewerAssetPool);
+    const viewerPaidNoImp = await payViewers(db, period, viewerPoolHbd, viewerAssetPool, { defer: true });
     // Referrers do not depend on delivery: the advertiser's money accrued over
     // the flight whether or not any creator carried the ad this period.
-    await writePayoutRows(db, period.key, referral.rows);
+    // ONE merged write with the viewer rows: a referrer who also watched must get both.
+    await writePayoutRows(db, period.key, [...referral.rows, ...viewerPaidNoImp.rows]);
     // Nothing delivered. The money is not ours to keep — carry it forward, in the
     // assets it arrived as so the next period can actually send it.
     await periods.updateOne({ _id: period.key }, {
@@ -803,7 +804,13 @@ async function settlePeriod(db, period, deps = {}) {
    * `carriedOut`, which is the creator pool's carry. An unsendable referral
    * simply stays with the platform this period -- payPending marks a row it
    * cannot send as `review` rather than paying it, so nothing is lost quietly. */
-  const written = await writePayoutRows(db, period.key, [...creatorRows, ...referral.rows]);
+  // Viewers settle from the platform's slice, independently of the creator pool
+  // above: a period can owe viewers even when it owed creators nothing.
+  // 🚨 Deferred and folded into the ONE write below. Writing viewer rows separately
+  // replaced the creator row of anyone who was both (unique on periodKey+account).
+  const viewerPaid = await payViewers(db, period, viewerPoolHbd, viewerAssetPool, { defer: true });
+
+  const written = await writePayoutRows(db, period.key, [...creatorRows, ...referral.rows, ...viewerPaid.rows]);
   const referralPaidHbd = Math.round(referral.rows.reduce((a, r) => a + r.hbd, 0) * 1000) / 1000;
   if (referralPaidHbd > 0) {
     console.log(`[adPayout] period ${period.key}: ${fmt3(referralPaidHbd)} HBD to ${referral.rows.length} referrer(s)`);
@@ -814,10 +821,6 @@ async function settlePeriod(db, period, deps = {}) {
     { _id: { $in: impressions.map((i) => i._id) } },
     { $set: { payoutId: period.key } },
   );
-
-  // Viewers settle from the platform's slice, independently of the creator pool
-  // above: a period can owe viewers even when it owed creators nothing.
-  const viewerPaid = await payViewers(db, period, viewerPoolHbd, viewerAssetPool);
 
   await periods.updateOne({ _id: period.key }, {
     $set: {
@@ -997,7 +1000,7 @@ async function payPending(db, deps = {}) {
           from: SOURCE_ACCOUNT,
           to: p.account,
           amount: `${fmt3(amt)} ${symbol}`,
-          memo: `3Speak ad revenue share (${p.kind}) — ${p.periodKey}`,
+          memo: `3Speak ad revenue share (${p.kind}) - ${p.periodKey}`,
         }]], key);
         // Recorded immediately, before the next leg can fail. A crash between the
         // broadcast and this write is the one irreducible risk — Hive transfers carry
@@ -1067,9 +1070,9 @@ async function payPending(db, deps = {}) {
  * what stops a viewer being paid twice for the same watch if a settlement is retried
  * — the same job `payoutId` does for impressions on the creator side.
  */
-async function payViewers(db, period, viewerPoolHbd, viewerAssetPool = null) {
+async function payViewers(db, period, viewerPoolHbd, viewerAssetPool = null, { defer = false } = {}) {
   // Nothing earmarked this period, so there is nothing to pay OR to carry.
-  if (!(viewerPoolHbd > 0)) return { recipients: 0, paidHbd: 0, carriedOut: 0 };
+  if (!(viewerPoolHbd > 0)) return { recipients: 0, paidHbd: 0, carriedOut: 0, rows: [] };
   const watch = db.collection(AD_VIEWER_WATCH_COLLECTION);
 
   // Everything banked and not yet settled. No date filter: a watch recorded in an
@@ -1078,7 +1081,7 @@ async function payViewers(db, period, viewerPoolHbd, viewerAssetPool = null) {
   const claimable = await watch.find({ payoutId: null }).toArray();
   // Nobody has banked a qualifying watch yet. The pool still belongs to viewers, so
   // it waits for them rather than quietly becoming ours.
-  if (!claimable.length) return { recipients: 0, paidHbd: 0, carriedOut: viewerPoolHbd };
+  if (!claimable.length) return { recipients: 0, paidHbd: 0, carriedOut: viewerPoolHbd, rows: [] };
 
   // Excluded accounts are dropped from the pool ENTIRELY, not just from the payout.
   // Leaving their seconds in the denominator would hand part of a pool we earmarked
@@ -1106,11 +1109,11 @@ async function payViewers(db, period, viewerPoolHbd, viewerAssetPool = null) {
   const rows = claimable.filter((r) => !isExcluded(r.viewer));
   if (!rows.length) {
     await claimExcluded();
-    return { recipients: 0, paidHbd: 0, carriedOut: viewerPoolHbd };
+    return { recipients: 0, paidHbd: 0, carriedOut: viewerPoolHbd, rows: [] };
   }
 
   const totalSeconds = rows.reduce((a, r) => a + (Number(r.contentSeconds) || 0), 0);
-  if (totalSeconds <= 0) return { recipients: 0, paidHbd: 0, carriedOut: viewerPoolHbd };
+  if (totalSeconds <= 0) return { recipients: 0, paidHbd: 0, carriedOut: viewerPoolHbd, rows: [] };
   const perSecond = viewerPoolHbd / totalSeconds;
 
   const owed = new Map();
@@ -1144,16 +1147,20 @@ async function payViewers(db, period, viewerPoolHbd, viewerAssetPool = null) {
     await watch.updateMany({ _id: { $in: claimIds } }, { $set: { payoutId: period.key, settledAt: new Date() } });
   }
 
-  for (const r of payable) {
-    await db.collection(AD_PAYOUTS_COLLECTION).updateOne(
-      { periodKey: period.key, account: r.account },
-      {
-        $set: { hbd: r.hbd, amounts: splitAmounts(viewerPoolHbd > 0 ? r.hbd / viewerPoolHbd : 0, viewerAssetPool || { HBD: viewerPoolHbd }), kind: 'viewer', updatedAt: new Date() },
-        $setOnInsert: { status: 'pending', createdAt: new Date() },
-      },
-      { upsert: true },
-    );
-  }
+  /* 🚨 Written through writePayoutRows, never with a $set of its own.
+   *
+   * A viewer is very often also a creator (or a referrer) in the same period, and
+   * `ad_payouts` is unique on (periodKey, account). A separate `$set` upsert here
+   * REPLACED the creator row settlePeriod had just written, before payPending sent
+   * it: 48 creators lost their whole creator share across 2026-09-16..10-01 that way.
+   * settlePeriod passes `defer` and hands these rows to its single merged write. */
+  const viewerRows = payable.map((r) => ({
+    account: r.account,
+    hbd: r.hbd,
+    amounts: splitAmounts(viewerPoolHbd > 0 ? r.hbd / viewerPoolHbd : 0, viewerAssetPool || { HBD: viewerPoolHbd }),
+    kind: 'viewer',
+  }));
+  if (!defer) await writePayoutRows(db, period.key, viewerRows);
 
   const total = payable.reduce((a, r) => a + r.hbd, 0);
   const carriedOut = Math.max(0, Math.round((viewerPoolHbd - total) * 1000) / 1000);
@@ -1164,7 +1171,7 @@ async function payViewers(db, period, viewerPoolHbd, viewerAssetPool = null) {
     + `→ ${payable.length} viewer(s), ${fmt3(total)} HBD`
     + (waiting > 0 ? ` (${waiting} under ${AD_PAYOUT_MIN_HBD} still building, ${fmt3(carriedOut)} HBD carried)` : ''),
   );
-  return { recipients: payable.length, paidHbd: total, carriedOut };
+  return { recipients: payable.length, paidHbd: total, carriedOut, rows: viewerRows };
 }
 
 /**
@@ -1261,7 +1268,7 @@ async function refundRefusedPayments(db) {
         from: SOURCE_ACCOUNT,
         to,
         amount: `${fmt3(amount)} ${symbol}`,
-        memo: `3Speak ads: returned — please pay from @${p.expectedFrom || 'the account the campaign is booked under'}`,
+        memo: `3Speak ads: returned - please pay from @${p.expectedFrom || 'the account the campaign is booked under'}`,
       }]], key);
       await payments.updateOne({ _id: p._id }, {
         $set: {

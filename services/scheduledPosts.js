@@ -19,6 +19,7 @@ const { ObjectId } = require('mongodb');
 const { getDb } = require('../utils/db');
 const { HIVE_RPC_ENDPOINTS } = require('../utils/config');
 const { hiveRpcBatch } = require('../utils/hive');
+const { applyVideoAdFlag } = require('../utils/videoAdOptOut');
 
 const THREESPEAK_USERNAME = process.env.THREESPEAK_USERNAME || 'threespeak';
 const THREESPEAK_POSTING_KEY = process.env.THREESPEAK_POSTING_KEY || '';
@@ -430,6 +431,14 @@ async function runTick() {
             );
             console.log(`[scheduledPosts] posted ${doc.owner}/${doc.permlink} (tx=${tx && tx.id})`);
             await linkEmbedVideoToHivePost(doc);
+            // Per-video ad opt-out. The uploader cannot sync this one itself, the post
+            // did not exist yet. Taken from the metadata just broadcast rather than
+            // read back, which a fresh post would not be yet. Never fails the post.
+            try {
+                await applyVideoAdFlag(doc.owner, doc.permlink, doc.jsonMetadata);
+            } catch (flagErr) {
+                console.error(`[scheduledPosts] video ad flag failed for ${doc.owner}/${doc.permlink}:`, flagErr && flagErr.message);
+            }
         } catch (err) {
             const attempts = (doc.attempts || 0) + 1; // we already incremented above
             const final = attempts >= MAX_ATTEMPTS;

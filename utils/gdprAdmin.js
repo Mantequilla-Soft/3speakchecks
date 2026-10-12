@@ -34,6 +34,10 @@ const OWNED = [
   { coll: 'audio-listen-log', field: 'username' },
   { coll: 'hiveprofiles', field: 'username' },
   { coll: 'users', field: 'username' },
+  // Replies to the opening-popup announcements. Only the VOUCHED name lives in
+  // `username`; an unproven one sits in `claimed_username` and is matched too.
+  { coll: 'announcement_replies', field: 'username' },
+  { coll: 'announcement_replies', field: 'claimed_username' },
 ];
 // watch_history keys by a compound _id "user:owner:permlink" — matched by prefix.
 const WATCH_HISTORY = 'watch_history';
@@ -62,7 +66,8 @@ async function exportUser(db, usernameRaw) {
   const out = { account: username, exportedAt: new Date().toISOString(), data: {} };
   for (const { coll, field } of OWNED) {
     const rows = await db.collection(coll).find({ [field]: username }).toArray();
-    if (rows.length) out.data[coll] = rows;
+    // A collection may be listed twice (two name columns), so add up, never overwrite.
+    if (rows.length) out.data[coll] = (out.data[coll] || []).concat(rows);
   }
   const wh = await db.collection(WATCH_HISTORY).find({ _id: { $regex: `^${esc(username)}:` } }).toArray();
   if (wh.length) out.data[WATCH_HISTORY] = wh;
@@ -91,7 +96,7 @@ async function deleteUser(db, usernameRaw, { dryRun = true } = {}) {
     const n = await db.collection(coll).countDocuments({ [field]: username });
     if (!n) continue;
     total += n;
-    breakdown[coll] = n;
+    breakdown[coll] = (breakdown[coll] || 0) + n;
     if (!dryRun) await db.collection(coll).deleteMany({ [field]: username });
   }
   const whN = await db.collection(WATCH_HISTORY).countDocuments({ _id: { $regex: `^${esc(username)}:` } });

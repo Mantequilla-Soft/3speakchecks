@@ -12,6 +12,7 @@
  *   GET  /advertise/application/:reference status by reference (no account enumeration)
  *   GET  /advertise/creator/prefs/:account whether an account carries ads
  *   POST /advertise/creator/prefs          creator opt-out, Hive-signature required
+ *   POST /advertise/creator/video-ads/sync per-video opt-out, mirrored from the post on chain
  *
  * Admin surface (Bearer AD_ADMIN_SECRET — deliberately NOT the frontend's key)
  *   GET  /advertise/admin/applications     the queue
@@ -45,6 +46,7 @@ const {
   FORMATS, FORMAT_KEYS, isBookableFormat, defaultRateFor, snapshotRates, rateFor,
 } = require('../utils/adFormats');
 const adSettings = require('../utils/adSettings');
+const { syncVideoAdFlagFromChain } = require('../utils/videoAdOptOut');
 const {
   ADVERTISERS_COLLECTION,
   AD_CREATOR_PREFS_COLLECTION,
@@ -988,6 +990,53 @@ router.post('/creator/prefs', featureVisible, express.json({ limit: '8kb' }), as
     });
   } catch (err) {
     console.error('[advertise] creator prefs write failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+/* ─── per-video opt-out ───────────────────────────────────────────────────
+ * Unauthenticated on purpose: nothing in the request is believed. The route reads
+ * the post off the chain and mirrors the `3speak.ads` flag its author signed into
+ * it, so the most anyone can do by calling it is make the mirror agree with the
+ * chain. See utils/videoAdOptOut.js.
+ *
+ * 404 while the post is not readable yet, which right after a broadcast is normal;
+ * the uploader retries on exactly that answer.
+ */
+const syncHits = new Map();
+const SYNC_MAX_PER_WINDOW = 30;
+function syncThrottled(ip) {
+  if (!ip) return false;
+  const now = Date.now();
+  const live = (syncHits.get(ip) || []).filter((t) => now - t < WINDOW_MS);
+  if (live.length >= SYNC_MAX_PER_WINDOW) { syncHits.set(ip, live); return true; }
+  live.push(now);
+  syncHits.set(ip, live);
+  if (syncHits.size > 5000) {
+    for (const [k, arr] of syncHits) if (!arr.some((t) => now - t < WINDOW_MS)) syncHits.delete(k);
+  }
+  return false;
+}
+
+router.post('/creator/video-ads/sync', featureVisible, express.json({ limit: '2kb' }), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const author = account(b.author);
+    const permlink = str(b.permlink, 256);
+    if (!HIVE_ACCOUNT_RE.test(author) || !/^[a-z0-9-]+$/.test(permlink)) {
+      return res.status(400).json({ success: false, error: 'Invalid author/permlink' });
+    }
+    if (syncThrottled(clientIp(req))) {
+      return res.status(429).json({ success: false, error: 'Too many requests' });
+    }
+
+    const out = await syncVideoAdFlagFromChain(author, permlink);
+    if (out === null) return res.status(502).json({ success: false, error: 'Hive unreachable' });
+    if (out.notFound) return res.status(404).json({ success: false, error: 'Post not found' });
+    if (out.refused) return res.status(409).json({ success: false, error: out.refused });
+    res.json({ success: true, owner: out.owner, permlink: out.permlink, adsEnabled: out.adsEnabled });
+  } catch (err) {
+    console.error('[advertise] video ads sync failed:', err && err.message);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });

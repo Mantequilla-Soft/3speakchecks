@@ -1,6 +1,6 @@
 const { getLinksCollection } = require('../utils/db');
 const { hashForHiveUsername } = require('../utils/hash');
-const { getPlatform } = require('./platforms');
+const { getPlatform, isLinkEnabled } = require('./platforms');
 const { MAX_LINKS_PER_USER } = require('../utils/config');
 
 function requireAdapter(platform) {
@@ -29,12 +29,20 @@ async function findOtherVerifiedClaim({ hive_username, platform, platform_userna
 //   - adapter errors (e.g. CHANNEL_NOT_FOUND, lookup_failed)
 //   - CHANNEL_ALREADY_LINKED   (a different hive user has it verified)
 //   - TOO_MANY_LINKS           (this hive user is at the per-user cap)
-async function verifyAndStore({ hive_username, platform, platform_username }) {
+// `ignoreLinkSwitch`: the warm-up "link your channel" task (routes/incubation.js)
+// has its own platform list and is not gated by VERIFY_<NAME>.
+async function verifyAndStore({ hive_username, platform, platform_username }, { ignoreLinkSwitch = false } = {}) {
     if (!hive_username) throw new Error('hive_username is required');
     if (!platform) throw new Error('platform is required');
     if (!platform_username) throw new Error('platform_username is required');
 
     const adapter = requireAdapter(platform);
+    // New links only for switched-on platforms (VERIFY_<NAME>); unlinking is not gated.
+    if (!ignoreLinkSwitch && !isLinkEnabled(adapter.name)) {
+        const err = new Error(`Unsupported platform: ${platform}`);
+        err.code = 'UNSUPPORTED_PLATFORM';
+        throw err;
+    }
     const profile = await adapter.fetchProfile(platform_username);
     const hash = hashForHiveUsername(hive_username);
     const verified = typeof profile.text === 'string' && profile.text.includes(hash);

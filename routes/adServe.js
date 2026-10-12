@@ -41,7 +41,7 @@ const {
   AD_BANNER_CLOSE_AFTER_SECONDS, AD_BANNER_FREQUENCY_CAP_MINUTES, AD_GATE_ALLOWED_UPLOADERS, ADS_STAGE,
   AD_COOLDOWN_MINUTES, AD_PACING_ENABLED, AD_PACING_MIN_FRACTION, AD_SESSION_RATE_PER_MIN,
   AD_COUNT_AFTER_SECONDS,
-  AD_SHORTS_EVERY_N, AD_SHORTS_IGNORE_REPEAT_CAP,
+  AD_SHORTS_EVERY_N, AD_SHORTS_IGNORE_REPEAT_CAP, AD_LIVE_ENABLED, AD_LIVE_ASSUMED_SECONDS,
   AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT, AD_BANNER_LABEL,
 } = require('../utils/config');
 const {
@@ -114,7 +114,7 @@ function claimedAdKeys(body) {
 }
 
 /**
- * One ad per address per video per day.
+ * One ad per network (/24, /48 for IPv6) per video per day.
  *
  * Without it an anonymous viewer's cap resets on every page load (capId is per
  * load by design), so reloading a video in a loop earns its creator one paid
@@ -123,47 +123,97 @@ function claimedAdKeys(body) {
  * and bills advertisers for a script. A person rewatching the same video the
  * same day simply gets it without an ad.
  *
- * Same deal as the rate limiter: the key is a hash in a Map with an expiry,
- * never a document or a log line. A restart forgets it, which costs at most one
- * extra ad per pair.
+ * The key is a sha256 of network + video, never the address itself. It lives in
+ * Mongo (REPEAT_COLLECTION, TTL on `exp`) with the Map in front as a cache. It
+ * used to be the Map alone, on the theory that a restart "costs at most one
+ * extra ad per pair" - but the checker restarts several times a day (31 times
+ * in the first week of October), and every restart handed every address a
+ * fresh first ad. The pending sid -> key link is persisted the same way, so an
+ * ad that starts before a restart and plays after it still marks its key.
  *
  * Marked only when an ad was actually PLAYED, not when one was handed out: a
  * session only parks its key under its sid (pendingRepeat), and recordDelivery
  * marks it the first time that session's impression is counted, which is the
  * same "delivered" that billing and payout use. Someone who leaves before the ad
  * plays has not used up the day's ad.
+ *
+ * Mongo trouble fails OPEN (the ad is served): the Map still holds everything
+ * marked since the last restart, and a Mongo blip must not switch ads off.
  */
 const REPEAT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const PENDING_REPEAT_MS = 2 * 60 * 60 * 1000;
+const REPEAT_COLLECTION = 'ad_repeat_gate';
 const repeatSeen = new Map();
 const pendingRepeat = new Map();   // sid -> { key, exp }
+let repeatIndexed = false;
+function repeatColl() {
+  const c = getDb().collection(REPEAT_COLLECTION);
+  if (!repeatIndexed) {
+    repeatIndexed = true;
+    c.createIndex({ exp: 1 }, { expireAfterSeconds: 0 }).catch((err) => {
+      repeatIndexed = false;
+      console.error('[ad-serve] repeat gate index failed:', err && err.message);
+    });
+  }
+  return c;
+}
 function parkRepeat(sid, key) {
   if (!sid || !key) return;
   const now = Date.now();
   if (pendingRepeat.size > 50000) {
     for (const [s, p] of pendingRepeat) if (p.exp <= now) pendingRepeat.delete(s);
   }
-  pendingRepeat.set(sid, { key, exp: now + PENDING_REPEAT_MS });
+  const exp = now + PENDING_REPEAT_MS;
+  pendingRepeat.set(sid, { key, exp });
+  repeatColl().updateOne({ _id: `p:${sid}` }, { $set: { key, exp: new Date(exp) } }, { upsert: true })
+    .catch((err) => console.error('[ad-serve] repeat park failed:', err && err.message));
 }
 /** Called on a session's first counted delivery. */
-function repeatPlayed(sid) {
-  const p = pendingRepeat.get(sid);
-  if (!p) return;
+async function repeatPlayed(sid) {
+  if (!sid) return;
+  let p = pendingRepeat.get(sid);
   pendingRepeat.delete(sid);
-  if (p.exp > Date.now()) markRepeat(p.key);
+  try {
+    const doc = await repeatColl().findOneAndDelete({ _id: `p:${sid}` });
+    const d = doc && (doc.value !== undefined ? doc.value : doc);
+    if (!p && d && d.key) p = { key: d.key, exp: new Date(d.exp).getTime() };
+  } catch (err) {
+    console.error('[ad-serve] repeat pending lookup failed:', err && err.message);
+  }
+  if (p && p.exp > Date.now()) await markRepeat(p.key);
 }
+/* Keyed on the NETWORK (/24 for IPv4, /48 for IPv6), not the exact address: mobile
+ * and CGNAT users hop between addresses inside their ISP's block (one creator's own
+ * logged-out views on 2026-10-03 came 2h apart from two addresses of one /24), and
+ * Hive is small enough that two real viewers of the same video in the same /24 on
+ * the same day is rare (owner's call, 2026-10-06). */
 function repeatKeyOf(ip, owner, permlink) {
   if (!ip) return null;
-  return crypto.createHash('sha256').update(`${ip}|${owner}/${permlink}`).digest('base64').slice(0, 22);
+  const addr = String(ip).replace(/^::ffff:/i, '');
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/.exec(addr);
+  const net = v4
+    ? `${v4[1]}.${v4[2]}.${v4[3]}.0/24`
+    : `${addr.toLowerCase().split('::')[0].split(':').filter(Boolean).slice(0, 3).join(':')}::/48`;
+  return crypto.createHash('sha256').update(`net:${net}|${owner}/${permlink}`).digest('base64').slice(0, 22);
 }
-function seenRepeat(key) {
+async function seenRepeat(key) {
   if (!key) return false;
+  const now = Date.now();
   const exp = repeatSeen.get(key);
-  if (exp && exp > Date.now()) return true;
+  if (exp && exp > now) return true;
   if (exp) repeatSeen.delete(key);
+  try {
+    const doc = await repeatColl().findOne({ _id: `s:${key}` }, { projection: { exp: 1 } });
+    if (doc && doc.exp && doc.exp.getTime() > now) {
+      repeatSeen.set(key, doc.exp.getTime());
+      return true;
+    }
+  } catch (err) {
+    console.error('[ad-serve] repeat lookup failed:', err && err.message);
+  }
   return false;
 }
-function markRepeat(key) {
+async function markRepeat(key) {
   if (!key) return;
   const now = Date.now();
   // Opportunistic prune, as overRateLimit does.
@@ -171,6 +221,8 @@ function markRepeat(key) {
     for (const [k, exp] of repeatSeen) if (exp <= now) repeatSeen.delete(k);
   }
   repeatSeen.set(key, now + REPEAT_WINDOW_MS);
+  await repeatColl().updateOne({ _id: `s:${key}` }, { $set: { exp: new Date(now + REPEAT_WINDOW_MS) } }, { upsert: true })
+    .catch((err) => console.error('[ad-serve] repeat mark failed:', err && err.message));
 }
 
 /** The caller's address, for rate limiting only. Never stored, never returned. */
@@ -180,6 +232,71 @@ function callerIp(req) {
   const xff = req.headers['x-forwarded-for'];
   if (xff) return String(xff).split(',')[0].trim();
   return req.socket && req.socket.remoteAddress ? String(req.socket.remoteAddress) : '';
+}
+
+/**
+ * Is the caller the video's own creator, watching signed out?
+ *
+ * A signed-in owner never gets an ad on their own video, but signed out they were
+ * just another address: on 2026-10-06 20 of one creator's 55 impressions came from
+ * their own /24, minutes after each upload. The creator's addresses are already
+ * known as keyed hashes: `uploader_ip_hash/_net_hash` on their uploads (embedvideos)
+ * and `viewer_ip_hash/_net_hash` on their own reward rows (player). Hash the caller
+ * the same way and compare; a hit on either the connection or its /24 means no ad.
+ *
+ * 🚨 Byte-for-byte the same inputs as embedvideos src/utils/ipHash.ts and the
+ * player's viewerIpHashes (`ip:<addr>`, `net:<a.b.c.0/24>` or `<g1:g2:g3>::/48`),
+ * with the SAME IP_HASH_SECRET. No secret = the check is off (fails open). Hashes
+ * only: the address is never stored, logged or returned. ⚠️ Never log the key.
+ */
+const OWNER_HASH_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+const OWNER_HASH_TTL_MS = 10 * 60 * 1000;
+const ownerHashCache = new Map();   // owner -> { set: Set<hash>, exp }
+function callerIpHashes(ip) {
+  const secret = process.env.IP_HASH_SECRET || '';
+  if (!secret || !ip) return null;
+  const addr = String(ip).replace(/^::ffff:/i, '');
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/.exec(addr);
+  const net = v4
+    ? `${v4[1]}.${v4[2]}.${v4[3]}.0/24`
+    : `${addr.toLowerCase().split('::')[0].split(':').filter(Boolean).slice(0, 3).join(':')}::/48`;
+  const h = (v) => crypto.createHmac('sha256', secret).update(v).digest('hex').slice(0, 32);
+  return [h(`ip:${addr}`), h(`net:${net}`)];
+}
+async function ownerHashes(owner) {
+  const now = Date.now();
+  const hit = ownerHashCache.get(owner);
+  if (hit && hit.exp > now) return hit.set;
+  const since = new Date(now - OWNER_HASH_WINDOW_MS);
+  const db = getDb();
+  const [ups, watches] = await Promise.all([
+    db.collection('embed-video')
+      .find({ owner, createdAt: { $gte: since }, uploader_ip_hash: { $type: 'string' } })
+      .project({ uploader_ip_hash: 1, uploader_net_hash: 1 }).limit(500).toArray(),
+    db.collection('ad_viewer_watch')
+      .find({ viewer: owner, at: { $gte: since }, viewer_ip_hash: { $type: 'string' } })
+      .project({ viewer_ip_hash: 1, viewer_net_hash: 1 }).limit(2000).toArray(),
+  ]);
+  const set = new Set();
+  for (const u of ups) { set.add(u.uploader_ip_hash); if (u.uploader_net_hash) set.add(u.uploader_net_hash); }
+  for (const w of watches) { set.add(w.viewer_ip_hash); if (w.viewer_net_hash) set.add(w.viewer_net_hash); }
+  if (ownerHashCache.size > 20000) {
+    for (const [k, v] of ownerHashCache) if (v.exp <= now) ownerHashCache.delete(k);
+  }
+  ownerHashCache.set(owner, { set, exp: now + OWNER_HASH_TTL_MS });
+  return set;
+}
+async function isOwnerConnection(ip, owner) {
+  if (!owner) return false;
+  const mine = callerIpHashes(ip);
+  if (!mine) return false;
+  try {
+    const set = await ownerHashes(owner);
+    return mine.some((h) => set.has(h));
+  } catch (err) {
+    console.error('[ad-serve] owner connection check failed:', err && err.message);
+    return false;
+  }
 }
 
 /**
@@ -832,12 +949,26 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // Does the client want the banner drawn in the page rather than burned in? Asked
     // by the client because it is the only thing that knows what it can do; see
     // bannerMode below.
-    const bannerOverlay = b.bannerOverlay === true || String(b.bannerOverlay) === 'true';
+    const askedBannerOverlay = b.bannerOverlay === true || String(b.bannerOverlay) === 'true';
     // Can this client DRAW a ticker? Only a page that can is ever handed one, so a
     // player without the overlay never takes a placement it would silently drop.
     const wantsTicker = b.ticker === true || String(b.ticker) === 'true';
     const rawSurface = str(b.surface, 16);
-    const surface = rawSurface === 'shorts' ? 'shorts' : (rawSurface === 'upload' ? 'upload' : 'watch');
+    const surface = rawSurface === 'shorts' ? 'shorts'
+      : (rawSurface === 'upload' ? 'upload' : (rawSurface === 'live' ? 'live' : 'watch'));
+    /* ── LIVE STREAMS ──────────────────────────────────────────────────────────
+     * `owner` is the host, `permlink` the room name (also the permlink of the
+     * stream's Hive post when it was announced). It runs the WATCH surface's rules
+     * end to end (approval gate, premium / own-video / creator opt-out, cooldown,
+     * frequency caps, one ad per address per stream per day), with three changes:
+     *   - overlay formats only: no roll, and the banner is always page-drawn, since
+     *     nothing can be burned into a WebRTC stream;
+     *   - no content manifest and no stored duration: the stream is treated as a
+     *     video of AD_LIVE_ASSUMED_SECONDS, for length targeting here and for the
+     *     page's placement maths (positionPercent of that length);
+     *   - the session is tagged 'live', and so are its impressions. */
+    if (surface === 'live' && !AD_LIVE_ENABLED) return res.json({ ad: null, reason: 'live_ads_off' });
+    const bannerOverlay = surface === 'live' ? true : askedBannerOverlay;
     /* WHICH APPLICATION is playing this, as opposed to `surface`, which is which
      * kind of slot within it. Carried onto the impression so delivery can be read
      * per app.
@@ -871,7 +1002,8 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
      * covers every one of the many return paths below without touching them. */
     if (surface !== 'upload') {
       const repeatKey = repeatKeyOf(callerIp(req), owner, permlink);
-      if (seenRepeat(repeatKey)) return res.json({ ad: null, reason: 'repeat_viewer' });
+      if (await seenRepeat(repeatKey)) return res.json({ ad: null, reason: 'repeat_viewer' });
+      if (await isOwnerConnection(callerIp(req), owner)) return res.json({ ad: null, reason: 'own_video' });
       const sendJson = res.json.bind(res);
       res.json = (body) => {
         const m = body ? /\/m\/([0-9a-f]{32})[./]/.exec(JSON.stringify(body)) : null;
@@ -1026,7 +1158,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
 
 
     // Premium viewers and opted-out creators, decided in one place.
-    const decision = await adDecision({ viewer, owner });
+    const decision = await adDecision({ viewer, owner, permlink });
     if (!decision.ads) {
       // `premium` is echoed so the player can flag the watch session accordingly.
       // The inventory forecast excludes premium sessions, and it can only do that
@@ -1177,11 +1309,14 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // Legacy uploads (the old uploader, HiveSuite) have no embed-video row at all,
     // only one in `videos`, which carries the duration too. Without this fallback
     // every length-targeted campaign skipped them as "unknown length".
-    const video = await db.collection('embed-video')
-      .findOne({ permlink, owner }, { projection: { duration: 1, short: 1 } })
+    const video = surface === 'live' ? null : (
+      await db.collection('embed-video')
+        .findOne({ permlink, owner }, { projection: { duration: 1, short: 1 } })
       || await db.collection('videos')
-        .findOne({ permlink, owner }, { projection: { duration: 1 } });
-    const videoSeconds = Number(video && video.duration) || null;
+        .findOne({ permlink, owner }, { projection: { duration: 1 } }));
+    // A live stream has no stored length; it is placed and targeted as a video of
+    // AD_LIVE_ASSUMED_SECONDS (see the live note at the top of this handler).
+    const videoSeconds = surface === 'live' ? AD_LIVE_ASSUMED_SECONDS : (Number(video && video.duration) || null);
 
     // 🚨 NO WATCH-SURFACE ADS ON A SHORT, whatever its length.
     //
@@ -1243,6 +1378,9 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       if (!c.advertiserRef || !approvedRefs.has(c.advertiserRef)) return false;
       const creative = byCampaign.get(String(c._id));
       if (servableReason(c, creative)) return false;
+      // Live: no roll. A spliced spot is impossible on a WebRTC stream, and the
+      // roadmap asks for the less disruptive overlays only.
+      if (surface === 'live' && formatOf(c).key === 'video_roll') return false;
       // A format only a page can draw goes only to a page that asked for it, and a
       // ticker only onto content its beta list allows.
       if (formatOf(c).overlayOnly && (!wantsTicker || !tickerAllowedOn(owner))) return false;
@@ -1306,6 +1444,17 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     const sid = crypto.randomBytes(16).toString('hex');
     await db.collection(SESSIONS).insertOne({
       sid,
+      // Only set for live streams; a watch session never carried a surface and
+      // every reader treats a missing one as 'watch'.
+      ...(surface === 'live' ? { surface: 'live' } : {}),
+      /* Live has no playlist for applyBanner() to measure, so the banner's window is
+       * fixed here from the same slot maths over the assumed length, in seconds
+       * after the viewer started watching. /m/:sid/i reads it like a spliced one. */
+      ...(surface === 'live' && bannerCampaign && bannerCreative ? {
+        bannerStartAt: slotSecondsFor(bannerCampaign, AD_LIVE_ASSUMED_SECONDS),
+        bannerDurationSeconds: Number(bannerCampaign.spotSeconds) || 0,
+        bannerBookedSeconds: Number(bannerCampaign.spotSeconds) || 0,
+      } : {}),
       // When this session first pulled an ad segment. Starts the pacing budget; see
       // pacingRefusal(). Null until the viewer actually reaches the break.
       adFirstFetchAt: null,
@@ -1852,7 +2001,7 @@ async function recordDelivery({ db, sid, campaignId, facts, completed, maxFacts,
     if (first) {
       // The ad has now really played for this session: from here on this address
       // gets no further ad on this video today.
-      repeatPlayed(sid);
+      await repeatPlayed(sid);
       await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
         { _id: campaignId },
         { $inc: { deliveredImpressions: 1 }, $set: { status: STATES.RUNNING, updatedAt: new Date() } },
@@ -2116,6 +2265,7 @@ router.post('/:sid/ticker-shown', servingVisible, express.json({ limit: '1kb' })
         permlink: session.permlink,
         country: session.country || null,
         ticker: true,
+        ...(session.surface === 'live' ? { live: true } : {}),
       },
       completed: true,
     });
@@ -2447,6 +2597,7 @@ router.post('/:sid/banner-shown', servingVisible, express.json({ limit: '1kb' })
         // So overlay-delivered impressions can be told apart from burned ones in any
         // report. They are worth the same, and they are not the same evidence.
         bannerOverlay: true,
+        ...(session.surface === 'live' ? { live: true } : {}),
       },
       completed: true,
     });

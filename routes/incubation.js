@@ -19,8 +19,12 @@
 
 const express = require('express');
 const router = express.Router();
-const { getDb } = require('../utils/db');
+const { getDb, getLinksCollection } = require('../utils/db');
+const { verifyAndStore, unlinkIfRevoked } = require('../services/verifier');
+const { hashForHiveUsername } = require('../utils/hash');
 const { call, qs } = require('../utils/incubationHosted');
+const { fetchAiFlagsBatch } = require('../utils/transcriptionTags');
+const { isHiddenFromFeed } = require('../utils/hiddenFromFeed');
 
 /** Pass the service's answer through, or 502 if it did not answer. */
 function relay(res, cache) {
@@ -73,10 +77,98 @@ router.get('/user/:handle/posts', (req, res) => {
 
 // GET /incubation/feed?limit=&maxAgeDays=&contentType= — recent off-chain posts,
 // for interleaving into the home and discover feeds.
+//
+// Nothing posted before WARMUP_FEED_SINCE ever appears (owner's call, 2026-10-09:
+// the feeds opened to everyone that day, so only what was uploaded from then on).
+// The cutoff becomes the service's age window, so `limit` counts only posts after
+// it, and the items are checked against it again in case the window is rounded.
+//
+// Videos flagged as AI-generated (subtitles-tags ai_generated_v2) are left out too.
+// The home rail would drop them in the browser anyway, but the shorts swipe feed
+// runs its AI filter BEFORE it mixes warm-up shorts in, so they must not arrive.
+// This feed exists to put new creators in front of people, not AI uploads. If the
+// lookup fails the items are kept, like every other feed here.
+// The video a warm-up post carries, as subtitles-tags keys it: owner + asset id.
+const assetKey = (it) => {
+    const author = String(it.assetAuthor || it.handle || '').toLowerCase();
+    const permlink = String(it.assetPermlink || it.videoId || it.permlink || '');
+    return author && permlink ? `${author}/${permlink}` : null;
+};
+async function dropAiFlagged(items) {
+    const keys = items.map(assetKey).filter(Boolean);
+    if (!keys.length) return items;
+    try {
+        const flagged = new Set(await fetchAiFlagsBatch(getDb(), keys.map((k) => {
+            const i = k.indexOf('/');
+            return { author: k.slice(0, i), permlink: k.slice(i + 1) };
+        })));
+        return items.filter((it) => !flagged.has(assetKey(it)));
+    } catch (e) {
+        console.warn('[incubation] AI flag lookup failed, feed unfiltered:', e.message);
+        return items;
+    }
+}
+// Videos their creator took out of the feeds: hidden from feeds (hiddenFromFeed)
+// or unlisted (listed_on_3speak: false), read off the embed-video asset like
+// every other feed here. They stay on the creator's profile, which does not go
+// through /feed. If the lookup fails the items are kept.
+async function dropHiddenFromFeeds(items) {
+    const keys = [...new Set(items.map(assetKey).filter(Boolean))];
+    if (!keys.length) return items;
+    try {
+        const rows = await getDb().collection('embed-video').find(
+            { $or: keys.map((k) => { const i = k.indexOf('/'); return { owner: k.slice(0, i), permlink: k.slice(i + 1) }; }) },
+            { projection: { _id: 0, owner: 1, permlink: 1, hiddenFromFeed: 1, listed_on_3speak: 1 } },
+        ).toArray();
+        const hidden = new Set(rows
+            .filter((r) => isHiddenFromFeed(r) || r.listed_on_3speak === false)
+            .map((r) => `${String(r.owner).toLowerCase()}/${r.permlink}`));
+        return items.filter((it) => !hidden.has(assetKey(it)));
+    } catch (e) {
+        console.warn('[incubation] hidden-from-feed lookup failed, feed unfiltered:', e.message);
+        return items;
+    }
+}
+// Only a share of the warm-up posts per load, a fresh random pick each time
+// (owner 2026-10-12: 50%). Drawn from the whole pool the service will give (its
+// cap is 50), not just the newest `limit`, so older posts get their turn too.
+// Rounded up, so a single warm-up post still shows. WARMUP_FEED_SHARE=1 turns
+// the sampling off.
+const WARMUP_FEED_SHARE = Math.min(Math.max(parseFloat(process.env.WARMUP_FEED_SHARE ?? '0.5') || 0, 0), 1);
+const WARMUP_FEED_POOL = 50;
+function sampleShare(items) {
+    if (WARMUP_FEED_SHARE >= 1 || items.length === 0) return items;
+    const keep = Math.ceil(items.length * WARMUP_FEED_SHARE);
+    const idx = items.map((_, i) => i);
+    for (let i = idx.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [idx[i], idx[j]] = [idx[j], idx[i]];
+    }
+    // Back in the service's order (newest first) once picked.
+    return idx.slice(0, keep).sort((a, b) => a - b).map((i) => items[i]);
+}
+const WARMUP_FEED_SINCE = new Date(process.env.WARMUP_FEED_SINCE || '2026-10-09T00:00:00Z');
 router.get('/feed', (req, res) => {
-    const { limit, maxAgeDays, contentType } = req.query;
-    call('GET', `/public/feed${qs({ limit, maxAgeDays, contentType })}`)
-        .then(relay(res, 'public, max-age=30')).catch(failed(res, 'feed'));
+    const { limit, contentType } = req.query;
+    const sinceMs = WARMUP_FEED_SINCE.getTime();
+    const cutoffDays = Math.max((Date.now() - sinceMs) / 86400000, 0.001);
+    const asked = parseFloat(req.query.maxAgeDays);
+    const maxAgeDays = Number.isFinite(asked) && asked > 0 ? Math.min(asked, cutoffDays) : cutoffDays;
+    // The caller's limit applies to what is shown, after the draw; the service is
+    // asked for the whole pool. Same default as the service when none is given.
+    const shownLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), WARMUP_FEED_POOL);
+    const sampling = WARMUP_FEED_SHARE < 1;
+    call('GET', `/public/feed${qs({ limit: sampling ? WARMUP_FEED_POOL : shownLimit, maxAgeDays, contentType })}`)
+        .then(async (r) => {
+            if (r.status === 200 && Array.isArray(r.body?.items)) {
+                const items = r.body.items.filter((it) => new Date(it.created).getTime() >= sinceMs);
+                const shown = await dropAiFlagged(await dropHiddenFromFeeds(items));
+                r.body.items = sampleShare(shown).slice(0, shownLimit);
+            }
+            // A random pick must not be cached, or everyone gets the same half.
+            relay(res, sampling ? 'no-store' : 'public, max-age=30')(r);
+        })
+        .catch(failed(res, 'feed'));
 });
 
 // GET /incubation/replies?parentAuthor=&parentPermlink= — the off-chain replies
@@ -255,6 +347,99 @@ router.put('/internal/contact/:userId', internalOnly, async (req, res) => {
     }
 });
 
+/* ── Warm-up "link your channel" (optional task) ─────────────────────────────
+ * A warm-up user has no Hive account, so their channel links are kept under
+ * `warmup:<butrauth userId>` in the same social_links collection (the userId,
+ * not the handle: a handle can still change before graduation). The code they
+ * put in their bio is md5 of that id, exactly like a Hive name's. Only 3Speak's
+ * API reaches these, after proving the warm-up session; claim-assets moves the
+ * links to the new Hive account at graduation.
+ *
+ * Its own platform list (WARMUP_LINK_PLATFORMS, default youtube,tiktok,instagram),
+ * NOT the VERIFY_<NAME> switches: prod allows profile links for YouTube and
+ * SoundCloud only, while warm-up users may still link these (owner 2026-10-06). */
+const WARMUP_LINK_PLATFORMS = (process.env.WARMUP_LINK_PLATFORMS || 'youtube,tiktok,instagram')
+    .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+const warmupId = (userId) => `warmup:${userId}`.toLowerCase();
+const shapeLink = (r) => ({
+    platform: r.platform, platform_username: r.platform_username, verified: !!r.verified,
+    verified_at: r.verified_at || null, last_error: r.last_error || null,
+});
+
+// GET /incubation/internal/social/:userId → { code, platforms, links }
+router.get('/internal/social/:userId', internalOnly, async (req, res) => {
+    try {
+        const userId = String(req.params.userId || '');
+        if (!USER_ID_RE.test(userId)) return res.status(400).json({ error: 'Invalid user id' });
+        const id = warmupId(userId);
+        const rows = await getLinksCollection().find({ hive_username: id }).toArray();
+        res.json({ code: hashForHiveUsername(id), platforms: WARMUP_LINK_PLATFORMS, links: rows.map(shapeLink) });
+    } catch (err) {
+        console.error('[incubation] internal social read:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// POST /incubation/internal/social/verify { userId, platform, platform_username }
+router.post('/internal/social/verify', internalOnly, async (req, res) => {
+    const userId = String(req.body?.userId || '');
+    const platform = String(req.body?.platform || '').toLowerCase();
+    const platformUsername = String(req.body?.platform_username || '').trim();
+    if (!USER_ID_RE.test(userId)) return res.status(400).json({ error: 'Invalid user id' });
+    if (!WARMUP_LINK_PLATFORMS.includes(platform)) {
+        return res.status(400).json({ error: `Unsupported platform: ${platform}`, supported: WARMUP_LINK_PLATFORMS });
+    }
+    if (!platformUsername) return res.status(400).json({ error: 'platform_username is required' });
+    try {
+        const saved = await verifyAndStore({ hive_username: warmupId(userId), platform, platform_username: platformUsername }, { ignoreLinkSwitch: true });
+        res.json(shapeLink(saved));
+    } catch (err) {
+        if (err.code === 'CHANNEL_NOT_FOUND') return res.status(404).json({ error: err.message });
+        if (err.code === 'CHANNEL_ALREADY_LINKED') return res.status(409).json({ error: 'This channel is already linked to another account', code: 'CHANNEL_ALREADY_LINKED' });
+        if (err.code === 'TOO_MANY_LINKS') return res.status(409).json({ error: err.message, code: 'TOO_MANY_LINKS' });
+        console.error('[incubation] internal social verify:', err.message);
+        res.status(502).json({ error: 'Platform lookup failed.' });
+    }
+});
+
+// POST /incubation/internal/social/unlink { userId, platform, platform_username }
+// Same rule as /verify/unlink: removed only once the code is gone from the bio.
+router.post('/internal/social/unlink', internalOnly, async (req, res) => {
+    const userId = String(req.body?.userId || '');
+    const platform = String(req.body?.platform || '').toLowerCase();
+    const platformUsername = String(req.body?.platform_username || '').trim();
+    if (!USER_ID_RE.test(userId) || !platform || !platformUsername) return res.status(400).json({ error: 'userId, platform and platform_username are required' });
+    try {
+        const result = await unlinkIfRevoked({ hive_username: warmupId(userId), platform, platform_username: platformUsername });
+        if (result.status === 'deleted') return res.json({ status: 'deleted' });
+        if (result.status === 'not_found') return res.status(404).json({ error: 'No such link' });
+        if (result.status === 'still_present') {
+            return res.status(409).json({ error: 'The code is still on your profile. Remove it from your bio, then try again.', status: 'still_present' });
+        }
+        res.status(502).json({ error: 'Platform lookup failed.' });
+    } catch (err) {
+        console.error('[incubation] internal social unlink:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// Move a graduate's warm-up links onto their new Hive account. A channel that
+// account already has is dropped from the warm-up copy (the unique index is
+// hive_username + platform + platform_username).
+async function moveWarmupLinks(userId, hiveUsername) {
+    if (!USER_ID_RE.test(userId)) return 0;
+    const coll = getLinksCollection();
+    const rows = await coll.find({ hive_username: warmupId(userId) }).toArray();
+    let moved = 0;
+    for (const r of rows) {
+        const clash = await coll.findOne({ hive_username: hiveUsername, platform: r.platform, platform_username: r.platform_username });
+        if (clash) { await coll.deleteOne({ _id: r._id }); continue; }
+        await coll.updateOne({ _id: r._id }, { $set: { hive_username: hiveUsername, moved_from_warmup: warmupId(userId), moved_at: new Date() } });
+        moved += 1;
+    }
+    return moved;
+}
+
 // POST /incubation/internal/claim-assets { handle, hiveUsername } — move the
 // uploads made under a warm-up handle onto the Hive account it graduated to.
 //
@@ -281,14 +466,19 @@ router.post('/internal/claim-assets', internalOnly, async (req, res) => {
             linkQuery,
             { $set: { hiveAccount: hiveUsername, graduatedAt: new Date() } },
         );
+        // Channel links made during the warm-up (also before the same-name return).
+        const linksMoved = await moveWarmupLinks(userId, hiveUsername).catch((e) => {
+            console.error('[incubation] claim-assets: moving warm-up links failed:', e.message);
+            return 0;
+        });
         // Same string: a no-op that would also sweep in anything uploaded after
         // graduation.
-        if (handle === hiveUsername) return res.json({ claimed: 0, reason: 'same_name' });
+        if (handle === hiveUsername) return res.json({ claimed: 0, reason: 'same_name', linksMoved });
         const result = await getDb().collection('embed-video').updateMany(
             { owner: handle },
             { $set: { owner: hiveUsername, owner_claimed_from: handle, owner_claimed_at: new Date() } },
         );
-        res.json({ claimed: result.modifiedCount, from: handle, to: hiveUsername });
+        res.json({ claimed: result.modifiedCount, from: handle, to: hiveUsername, linksMoved });
     } catch (err) {
         console.error('[incubation] internal claim-assets:', err.message);
         res.status(500).json({ error: 'Internal error' });

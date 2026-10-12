@@ -47,6 +47,7 @@ const DATA_SCOPE = [
   { key: 'viewer-tags', label: 'Viewer tags', detail: 'Topic labels you applied to videos when voting.', onChain: true },
   { key: 'watch_history', label: 'Watch history', detail: 'Which videos you watched, if you left watch history enabled.', onChain: false },
   { key: 'user-filters', label: 'Feed preferences', detail: 'Creators and videos you hid, and your selected interests.', onChain: false },
+  { key: 'announcement_replies', label: 'Announcement replies', detail: 'What you wrote back to an announcement popup on 3Speak.', onChain: false },
   { key: 'subscriptions', label: 'Subscription records', detail: 'Your 3Speak Pro subscription and payment records, if any.', onChain: true },
 ];
 

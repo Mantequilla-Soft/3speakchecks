@@ -280,6 +280,14 @@ module.exports = {
     DISCOVER_RETENTION_MIN_MULT: parseFloat(process.env.DISCOVER_RETENTION_MIN_MULT ?? '0.4'),
     DISCOVER_RETENTION_MAX_MULT: parseFloat(process.env.DISCOVER_RETENTION_MAX_MULT ?? '2.5'),
     DISCOVER_JITTER: parseFloat(process.env.DISCOVER_JITTER ?? '0.15'),              // ±15% seeded per-video jitter
+    // Discover ORDER is a seeded weighted draw (weight = score^power), not a sort.
+    // Jitter alone could not move a 4.35 below a 3.5, so every reload showed the same
+    // ~26 videos on screen 1 (measured 2026-10-08: two reloads shared 7.7 of 12).
+    // Simulated on the live pool (share of screen 1 two reloads have in common /
+    // average quality vs the sort): 6 → 3.5 of 12 / 89%, 5 → ~3 / ~86%,
+    // 4 → 2.5 / 83%, 3 → 1.9 / 79%, 2 → 1.1 / 69%. Owner wanted more variety than 5
+    // (2026-10-08). Higher = closer to the old sort; 0 restores the plain sort.
+    DISCOVER_SAMPLE_POWER: parseFloat(process.env.DISCOVER_SAMPLE_POWER ?? '3'),
     DISCOVER_EXPLORE_EVERY: parseInt(process.env.DISCOVER_EXPLORE_EVERY) || 4,       // every Nth slot = exploration pick (25%) — legacy interleave only
 
     // ── Target AGE DISTRIBUTION of the discover page (the primary age control) ──
@@ -405,6 +413,16 @@ module.exports = {
     // snap or interacting with one still takes effect on the very next request --
     // the TTL only bounds how stale a NEW snap from another process can be.
     SNAP_FEED_CACHE_MS: parseInt(process.env.SNAP_FEED_CACHE_MS ?? '') || 60 * 1000,
+    // Spam filter for the home feed's scope=all (Discover + New): a snap only shows
+    // there when its author has at least this many Hive followers. Profile and
+    // community pages are NOT filtered. 0 turns the filter off, so it is parsed
+    // explicitly rather than with `|| default`.
+    SNAP_FEED_MIN_FOLLOWERS: (() => {
+        const n = parseInt(process.env.SNAP_FEED_MIN_FOLLOWERS ?? '', 10);
+        return Number.isFinite(n) && n >= 0 ? n : 300;
+    })(),
+    // Snaps from accounts the viewer follows skip the follower threshold.
+    SNAP_FEED_ALWAYS_SHOW_FOLLOWED: process.env.SNAP_FEED_ALWAYS_SHOW_FOLLOWED !== 'false',
 
     // ─── Engagement affinity (utils/engagementBoost.js + services/engagementSync.js) ──
     // The mirror image of the curation boost: instead of "how many people cared about
@@ -714,6 +732,9 @@ module.exports = {
     // and is excluded from BOTH serving and the forecast, so we never sell what we
     // have promised not to use.
     AD_CREATOR_PREFS_COLLECTION: process.env.AD_CREATOR_PREFS_COLLECTION || 'ad_creator_prefs',
+    // Per-video exceptions for a creator who otherwise carries ads, mirrored from the
+    // post's own json_metadata. See utils/videoAdOptOut.js.
+    AD_VIDEO_OPTOUTS_COLLECTION: process.env.AD_VIDEO_OPTOUTS_COLLECTION || 'ad_video_optouts',
     AD_INVENTORY_ENABLED: parseBool(process.env.AD_INVENTORY_ENABLED, true),
     AD_INVENTORY_INTERVAL_H: parseInt(process.env.AD_INVENTORY_INTERVAL_H) || 6,
     AD_INVENTORY_WINDOW_DAYS: parseInt(process.env.AD_INVENTORY_WINDOW_DAYS) || 30,
@@ -1117,6 +1138,14 @@ module.exports = {
     // time-based cooldown, so minutes would let the feed carry an ad almost
     // continuously (or, tuned the other way, almost never).
     AD_SHORTS_EVERY_N: parseInt(process.env.AD_SHORTS_EVERY_N) || 5,
+    /* LIVE STREAMS (surface 'live', routes/adServe.js). A stream has no length, and
+     * every placement is a PERCENT of the content, so a stream is priced and placed
+     * as if it were a video of this many seconds, counted from when the viewer
+     * started watching. Overlay formats only (ticker + page-drawn banner): nothing
+     * can be spliced into a WebRTC stream, and a roll would interrupt the live
+     * moment. AD_LIVE_ENABLED=false switches the surface off without a deploy. */
+    AD_LIVE_ENABLED: process.env.AD_LIVE_ENABLED !== 'false',
+    AD_LIVE_ASSUMED_SECONDS: parseInt(process.env.AD_LIVE_ASSUMED_SECONDS, 10) || 300,
     // Let the SAME shorts spot come round again instead of waiting out the repeat cap.
     //
     // 🚨 A TESTING SWITCH. It must not be left on. The repeat cap is the thing that

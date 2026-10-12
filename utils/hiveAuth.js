@@ -3,6 +3,7 @@ const {
     HIVE_AUTH_REQUIRED,
     HIVE_RPC_ENDPOINTS,
     SIGNATURE_TIMESTAMP_TOLERANCE_MS,
+    AD_SIGNING_DELEGATES,
 } = require('./config');
 
 const client = new dhive.Client(HIVE_RPC_ENDPOINTS);
@@ -193,8 +194,21 @@ function requireHiveSignature(action) {
 
         const message = buildMessage({ action, hive_username, platform, platform_username, timestamp });
         try {
-            const ok = await verifyHiveSignedMessage({ message, signature, username: hive_username });
+            // The account's own posting key, OR @threespeak signing under the posting
+            // authority the user granted it. HiveSigner and Butter Auth sessions hold no
+            // key in the browser, so without the delegate they could never link a
+            // channel ("message signing is unsupported in HiveSigner"). Safe because the
+            // message is built HERE from this hive_username, never taken from the
+            // caller, so a delegate signature for one account cannot verify for another.
+            const { ok, signer } = await verifyHiveAuthority({
+                message, signature,
+                username: hive_username.toLowerCase(),
+                allowedDelegates: AD_SIGNING_DELEGATES,
+            });
             if (!ok) return res.status(401).json({ error: 'Invalid signature' });
+            if (signer !== hive_username.toLowerCase()) {
+                console.log(`[verify] ${action} for @${hive_username} signed by delegate @${signer}`);
+            }
             return next();
         } catch (err) {
             if (err.code === 'HIVE_ACCOUNT_NOT_FOUND') {

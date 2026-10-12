@@ -12,7 +12,7 @@ const express = require('express');
 const dhive = require('@hiveio/dhive');
 const { getDb } = require('../utils/db');
 const { HIVE_RPC_ENDPOINTS } = require('../utils/config');
-const { getFollowingList } = require('../utils/hive');
+const { getFollowingList, fetchFollowerCounts } = require('../utils/hive');
 
 const router = express.Router();
 const client = new dhive.Client(HIVE_RPC_ENDPOINTS);
@@ -25,7 +25,7 @@ const SNAP_APP = '3speak/snap'; // json_metadata.app our composer stamps on a sn
 const SNAP_FEED_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 const { getCached, invalidate: dropCache } = require('../utils/feedCache');
-const { SNAP_FEED_CACHE_MS } = require('../utils/config');
+const { SNAP_FEED_CACHE_MS, SNAP_FEED_MIN_FOLLOWERS, SNAP_FEED_ALWAYS_SHOW_FOLLOWED } = require('../utils/config');
 
 // ── Caches ────────────────────────────────────────────────────────────────────
 // Mongo is not in this datacentre and the round trip costs 110-390ms, which was the
@@ -200,11 +200,36 @@ router.get('/snaps/:owner', async (req, res) => {
   }
 });
 
+// Spam filter for scope=all (Discover + New on the home page): snaps from accounts
+// under SNAP_FEED_MIN_FOLLOWERS Hive followers stay off the main feed. They still
+// show on the author's profile and community pages, which use other routes.
+// scope=following needs no filter: the viewer chose to follow every author in it.
+// Returns the owners to DROP, or null when nothing is filtered.
+// Fails OPEN: an author whose count can't be read (Hive node down) is kept, so an
+// RPC hiccup can't empty the feed.
+async function ownersBelowFollowerThreshold(snaps, currentuser) {
+  if (!SNAP_FEED_MIN_FOLLOWERS || !snaps.length) return null;
+  const owners = [...new Set(snaps.map((sn) => sn.owner))];
+  const [counts, followed] = await Promise.all([
+    fetchFollowerCounts(owners, { missing: null, staleOnFailure: true }),
+    SNAP_FEED_ALWAYS_SHOW_FOLLOWED && currentuser
+      ? getFollowingList(currentuser).catch(() => null)
+      : null,
+  ]);
+  const followedSet = new Set(followed || []);
+  const drop = new Set(owners.filter((o) => {
+    const n = counts.get(o);
+    return n != null && n < SNAP_FEED_MIN_FOLLOWERS && !followedSet.has(o);
+  }));
+  return drop.size ? drop : null;
+}
+
 /**
  * GET /snaps-feed?scope=all|following&currentuser=&page=&limit=&nsfw=
  * Cross-author community-post feed for the home feed. Fresh (<7d) only.
  *   scope=following → only people `currentuser` follows (Interests + Follow sections)
- *   scope=all       → anyone (Discover + New sections)
+ *   scope=all       → anyone with >= SNAP_FEED_MIN_FOLLOWERS followers, plus
+ *                     people the viewer follows (Discover + New sections)
  * Excludes the viewer's snap-hidden posts/creators and the snaps they've already
  * voted/commented on (see POST /snaps/interaction). These filters are SEPARATE from
  * the video hide lists — a snap-hidden creator's videos are unaffected.
@@ -245,13 +270,19 @@ router.get('/snaps-feed', async (req, res) => {
     const cutoff = Date.now() - maxAgeMsFrom(req, SNAP_FEED_MAX_AGE_MS);
     const allowNsfw = req.query.nsfw === 'true';
     const all = await loadSnaps(db);
-    const matching = all.filter((sn) => (
+    const candidates = all.filter((sn) => (
       new Date(sn.created).getTime() > cutoff
       && (allowNsfw || sn.nsfw !== true)
       && (!following || following.has(sn.owner))
       && (!hiddenCreators || !hiddenCreators.has(sn.owner))
       && (!excludedKeys || !excludedKeys.has(sn._id))
     ));
+    const belowThreshold = scope === 'all'
+      ? await ownersBelowFollowerThreshold(candidates, currentuser)
+      : null;
+    const matching = belowThreshold
+      ? candidates.filter((sn) => !belowThreshold.has(sn.owner))
+      : candidates;
 
     res.json({
       success: true,

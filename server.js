@@ -41,6 +41,7 @@ const videosRoutes = require('./routes/videos');
 const shortsRoutes = require('./routes/shorts');
 const audioRoutes = require('./routes/audio');
 const feedsRoutes = require('./routes/feeds');
+const watchedFeedRoutes = require('./routes/watchedFeed');
 const rssRoutes = require('./routes/rss');
 const pushRoutes = require('./routes/push');
 const incubationRoutes = require('./routes/incubation');
@@ -63,11 +64,13 @@ const reviewsRoutes = require('./routes/reviews');
 const reportsRoutes = require('./routes/reports');
 const streamStatsRoutes = require('./routes/streamStats');
 const subtitleProxyRoutes = require('./routes/subtitleProxy');
+const subtitleEditRoutes = require('./routes/subtitleEdit');
 const advertiseRoutes = require('./routes/advertise');
 const adCampaignRoutes = require('./routes/adCampaigns');
 const adSelfPromoRoutes = require('./routes/adSelfPromo');
 const adServeRoutes = require('./routes/adServe');
 const badgeRoutes = require('./routes/badges');
+const announcementRoutes = require('./routes/announcements');
 
 const app = express();
 
@@ -105,6 +108,7 @@ app.use('/', promoteRoutes);
 app.use('/', shortsRoutes);
 app.use('/audio', audioRoutes);
 app.use('/feeds', feedsRoutes);
+app.use('/feeds', watchedFeedRoutes);              // /feeds/watched/:username (history as cards)
 app.use('/rss', rssRoutes);
 app.use('/verify', verifyRoutes);
 app.use('/scheduled-posts', scheduledPostsRoutes);
@@ -124,6 +128,7 @@ app.use('/', reportsRoutes);
 // request that reaches it — including ones meant for routes mounted after it.
 // Ordering this route first sidesteps that instead of touching streamStats.js.
 app.use('/', subtitleProxyRoutes);
+app.use('/', subtitleEditRoutes);          // author caption edits; same ordering rule (before streamStats)
 app.use('/advertise', advertiseRoutes);   // same reason as above: must precede streamStatsRoutes
 app.use('/advertise', adCampaignRoutes);  // booking + payment, same mount, same ordering rule
 app.use('/advertise', adSelfPromoRoutes); // a creator promoting their OWN video, same mount
@@ -135,6 +140,7 @@ app.use('/m', adServeRoutes);
 app.use('/push', pushRoutes);             // same ordering rule as above
 app.use('/incubation', incubationRoutes); // same ordering rule as above
 app.use('/badges', badgeRoutes);          // same ordering rule as above
+app.use('/', announcementRoutes);         // same ordering rule as above
 app.use('/', streamStatsRoutes);
 
 // Track whether heavy sync tasks are running

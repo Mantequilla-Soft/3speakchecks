@@ -15,6 +15,7 @@
  *     always wins over any inventory pressure.
  *   • The CREATOR turned ads off. Their videos carry none, and the forecast drops
  *     them too, so nothing is sold that we have promised not to use.
+ *   • The creator turned ads off on THIS video only (utils/videoAdOptOut.js).
  *
  * The premium set is read from the same `embed-users.premium` flag that
  * services/premiumSubsSync.js keeps in step with Okinoko subs every 60s, and that
@@ -29,6 +30,7 @@
  * answers "no ads" rather than risking an ad in front of a paying subscriber.
  */
 const { getDb } = require('./db');
+const { videoOptedOut } = require('./videoAdOptOut');
 const { PREMIUM_USERS_COLLECTION, AD_CREATOR_PREFS_COLLECTION, ADS_ALLOWED_OWNERS, AD_PREMIUM_OVERRIDE_ACCOUNTS , AD_SELF_VIEW_ALLOWED_ACCOUNTS } = require('./config');
 
 const TTL_MS = parseInt(process.env.AD_ELIGIBILITY_TTL_MS, 10) || 60 * 1000;
@@ -108,7 +110,7 @@ async function creatorOptedOut(owner) {
  * without re-deriving it, and so "no ads because you pay for Pro" can be shown to
  * the viewer as the benefit it is rather than as nothing happening.
  */
-async function adDecision({ viewer, owner }) {
+async function adDecision({ viewer, owner, permlink }) {
   // Hardest gate first, and cheapest: no database work for a video that could never
   // carry an ad anyway.
   if (ADS_ALLOWED_OWNERS.length) {
@@ -143,7 +145,14 @@ async function adDecision({ viewer, owner }) {
   if (premium === null) return { ads: false, reason: 'unknown_premium_state' };
   if (premium) return { ads: false, reason: 'premium_viewer' };
 
-  if (await creatorOptedOut(owner)) return { ads: false, reason: 'creator_opted_out' };
+  // Both reads at once: they are independent point reads, and the second must not
+  // add a Mongo round trip to every playback.
+  const [creatorOff, videoOff] = await Promise.all([
+    creatorOptedOut(owner),
+    videoOptedOut(owner, permlink),
+  ]);
+  if (creatorOff) return { ads: false, reason: 'creator_opted_out' };
+  if (videoOff) return { ads: false, reason: 'video_opted_out' };
 
   return { ads: true, reason: null };
 }
