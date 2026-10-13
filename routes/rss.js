@@ -384,7 +384,7 @@ function buildFeed({ username, videos, itunesAuthor, podcastSettings, feedPath, 
     const podcast_title = podcastSettings?.podcast_title || `${username} 3Speak Podcast`;
     const podcast_description =
         podcastSettings?.podcast_description ||
-        `Listen and watch the latest videos from ${username}. Hosted by 3Speak.tv. The free speech video platform on the HIVE blockchain.`;
+        `Listen and watch the latest videos from ${username}. Hosted by 3Speak.tv, the free speech video platform.`;
     // coverUrl is the square JPEG Apple Podcasts insists on (see /rss/cover)
     const podcast_image =
         coverUrl ||
@@ -699,7 +699,7 @@ router.get('/playlist/:id.xml', async (req, res) => {
         const podcastSettings = {
             podcast_title: title,
             podcast_description: album.description ||
-                `${title} by ${itunesAuthor}. Hosted by 3Speak.tv. The free speech video platform on the HIVE blockchain.`,
+                `${title} by ${itunesAuthor}. Hosted by 3Speak.tv, the free speech video platform.`,
             podcast_image: playlistCoverSource(playlist),
             podcast_languages: ownerSettings?.podcast_languages,
             podcast_language: ownerSettings?.podcast_language,
