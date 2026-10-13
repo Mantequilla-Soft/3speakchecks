@@ -360,7 +360,9 @@ function buildItem(video, itunesAuthor, feedOwner) {
                 }
             },
             { 'itunes:explicit': video.isNsfw ? 'yes' : 'clean' },
-            { 'itunes:image': { _attr: { href: baseThumbUrl } } },
+            // Square JPEG for Apple (16:9 thumbnails are fitted, not cropped);
+            // the plain <image> above keeps the original.
+            { 'itunes:image': { _attr: { href: episodeCoverLink(video) || baseThumbUrl } } },
             { 'podcast:medium': video.medium || video.kind },
             ...(video.duration > 0 ? [{ 'itunes:duration': hms(video.duration) }] : []),
             ...enclosure,
@@ -563,6 +565,13 @@ function coverLink(kind, key, sourceUrl) {
     return `${COVER_BASE}/${kind}/${encodeURIComponent(key)}.jpg?v=${v}`;
 }
 
+/** Episode art link for one item, or null when it has no thumbnail. */
+function episodeCoverLink(video) {
+    if (!video.thumb || !video.owner || !video.permlink) return null;
+    const v = crypto.createHash('sha1').update(String(video.thumb)).digest('hex').slice(0, 8);
+    return `${COVER_BASE}/episode/${encodeURIComponent(video.owner)}/${encodeURIComponent(video.permlink)}.jpg?v=${v}`;
+}
+
 /** The image a channel cover is rendered from. */
 function channelCoverSource(username, podcastSettings) {
     return podcastSettings?.podcast_image || `https://images.hive.blog/u/${username}/avatar/large`;
@@ -579,9 +588,9 @@ function playlistCoverSource(playlist) {
  * rendered (host not allowed, source gone, ffmpeg failed) so a feed never
  * shows a broken image. nginx caches either answer; the redirect only briefly.
  */
-async function sendCover(res, sourceUrl, label) {
+async function sendCover(res, sourceUrl, label, fit = 'crop') {
     try {
-        const jpeg = await renderCover(sourceUrl);
+        const jpeg = await renderCover(sourceUrl, { fit });
         res.setHeader('Content-Type', 'image/jpeg');
         res.setHeader('Cache-Control', 'public, max-age=86400');
         return res.send(jpeg);
@@ -604,6 +613,29 @@ router.get('/cover/user/:username.jpg', async (req, res) => {
         return await sendCover(res, channelCoverSource(username, settings), `@${username}`);
     } catch (err) {
         console.error(`[RSS] Cover error for @${username}:`, err);
+        return res.status(500).send('Internal server error');
+    }
+});
+
+// Episode art: resolved from the post itself (never from a URL in the
+// request), across the same three collections the feeds read.
+router.get('/cover/episode/:owner/:permlink.jpg', async (req, res) => {
+    const { owner, permlink } = req.params;
+    if (!/^[a-z0-9.-]{3,16}$/.test(owner) || !/^[a-z0-9-]{1,255}$/.test(permlink)) {
+        return res.status(400).send('Invalid episode');
+    }
+    try {
+        const db = getDb();
+        const [audio, embed, legacy] = await Promise.all([
+            db.collection('embed-audio').findOne({ owner, post_permlink: { $in: [permlink, `${owner}/${permlink}`] } }),
+            db.collection('embed-video').findOne({ hive_author: owner, hive_permlink: permlink, status: 'published' }),
+            db.collection('videos').findOne({ owner, permlink, status: 'published' }),
+        ]);
+        const episode = (embed && fromEmbedVideo(embed)) || (legacy && fromLegacyVideo(legacy)) || (audio && fromAudio(audio));
+        if (!episode || !episode.thumb) return res.status(404).send('Not found');
+        return await sendCover(res, episode.thumb, `episode ${owner}/${permlink}`, 'fit');
+    } catch (err) {
+        console.error(`[RSS] Cover error for episode ${owner}/${permlink}:`, err);
         return res.status(500).send('Internal server error');
     }
 });

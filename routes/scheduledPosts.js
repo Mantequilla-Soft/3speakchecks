@@ -65,6 +65,7 @@ router.post('/create', validateApiKey, express.json({ limit: '2mb' }), async (re
             parentAuthor = '',
             parentPermlink = 'hive-181335',
             embedPermlink = null,   // embedvideos service's internal permlink; lets the cron link the video record to the broadcast Hive post afterwards
+            reblog = false,         // "Add to my blog": the cron reblogs the post onto the owner's blog after posting
         } = req.body || {};
 
         // ─── basic validation ──────────────────────────────────────────
@@ -129,6 +130,7 @@ router.post('/create', validateApiKey, express.json({ limit: '2mb' }), async (re
             parentAuthor,
             parentPermlink,
             embedPermlink,
+            reblog: reblog === true,
             attempts: 0,
             lastError: null,
             createdAt: now,
@@ -233,7 +235,7 @@ router.post('/update', validateApiKey, express.json({ limit: '2mb' }), async (re
         const ALLOWED = [
             'title', 'description', 'body', 'tags', 'jsonMetadata',
             'beneficiaries', 'payoutOptions', 'thumbnail',
-            'parentAuthor', 'parentPermlink', 'embedPermlink',
+            'parentAuthor', 'parentPermlink', 'embedPermlink', 'reblog',
         ];
         const $set = { updatedAt: new Date() };
         for (const k of ALLOWED) {
@@ -241,6 +243,7 @@ router.post('/update', validateApiKey, express.json({ limit: '2mb' }), async (re
                 $set[k] = updates[k];
             }
         }
+        if ('reblog' in $set) $set.reblog = $set.reblog === true;
         if (Object.prototype.hasOwnProperty.call(updates, 'payoutOptions')) {
             const v = String(updates.payoutOptions).toLowerCase();
             if (!VALID_PAYOUT.has(v)) {

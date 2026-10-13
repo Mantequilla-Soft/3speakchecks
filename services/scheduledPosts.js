@@ -137,6 +137,31 @@ async function broadcastPost(doc) {
 }
 
 /**
+ * "Add to my blog" for a scheduled video: reblog it onto the owner's own blog
+ * right after it is out, as its own broadcast (what the live uploader does).
+ * Hive keeps an author's community posts off their blog and followers' feeds
+ * otherwise. Signed with the same @threespeak posting grant as the post.
+ * Non-fatal: the post is up either way, and a repeated reblog is ignored.
+ */
+async function reblogToBlog(doc) {
+    if (!doc.reblog) return;
+    try {
+        await getClient().broadcast.sendOperations([[
+            'custom_json',
+            {
+                required_auths: [],
+                required_posting_auths: [doc.owner],
+                id: 'follow',
+                json: JSON.stringify(['reblog', { account: doc.owner, author: doc.owner, permlink: doc.permlink }]),
+            },
+        ]], getKey());
+        console.log(`[scheduledPosts] reblogged ${doc.owner}/${doc.permlink} to its owner's blog`);
+    } catch (err) {
+        console.warn(`[scheduledPosts] reblog failed for ${doc.owner}/${doc.permlink}:`, err.message || err);
+    }
+}
+
+/**
  * After successfully broadcasting, tell the embed service that the embed
  * video now has a Hive post attached. Non-fatal — if the link fails we log
  * and continue (the broadcast itself is the source of truth).
@@ -333,6 +358,7 @@ async function requeueStuckPosts(coll) {
             if (upd.modifiedCount) {
                 console.log(`[scheduledPosts] recovered ${doc.owner}/${doc.permlink} — already on chain, marked posted`);
                 await linkEmbedVideoToHivePost(doc);
+                await reblogToBlog(doc);
             }
             continue;
         }
@@ -431,6 +457,7 @@ async function runTick() {
             );
             console.log(`[scheduledPosts] posted ${doc.owner}/${doc.permlink} (tx=${tx && tx.id})`);
             await linkEmbedVideoToHivePost(doc);
+            await reblogToBlog(doc);
             // Per-video ad opt-out. The uploader cannot sync this one itself, the post
             // did not exist yet. Taken from the metadata just broadcast rather than
             // read back, which a fresh post would not be yet. Never fails the post.

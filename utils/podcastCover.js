@@ -21,7 +21,7 @@ const MAX_CONCURRENT = 2;
 // Only fetch from image hosts we know. Playlist covers and avatars are user
 // data, so an open fetcher here would let anyone make the checker request
 // internal addresses. Hive's avatar redirect stays on images.hive.blog.
-const ALLOWED_HOSTS = (process.env.RSS_COVER_HOSTS || 'images.3speak.tv,images.hive.blog')
+const ALLOWED_HOSTS = (process.env.RSS_COVER_HOSTS || 'images.3speak.tv,images.hive.blog,i.ecency.com,files.peakd.com')
     .split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
 
 function isAllowedSource(url) {
@@ -67,13 +67,22 @@ async function withSlot(fn) {
     }
 }
 
-/** Centre-crop to a square and scale to COVER_SIZE (enlarging small avatars). */
-function renderJpeg(inPath, outPath) {
+/**
+ * Scale to a COVER_SIZE square (enlarging small avatars).
+ *   crop  centre-crop: show and channel covers, usually square-ish art
+ *   fit   the whole image over a blurred copy of itself: episode art from 16:9
+ *         video thumbnails, whose sides (often with text) must not be cut off
+ */
+function renderJpeg(inPath, outPath, fit = 'crop') {
+    const N = COVER_SIZE;
+    const filter = fit === 'fit'
+        ? ['-filter_complex', `[0:v]split[a][b];[a]scale=${N}:${N}:force_original_aspect_ratio=increase,crop=${N}:${N},boxblur=40:4[bg];[b]scale=${N}:${N}:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuvj420p`]
+        : ['-vf', `scale=${N}:${N}:force_original_aspect_ratio=increase,crop=${N}:${N},format=yuvj420p`];
     const args = [
         '-hide_banner', '-nostdin', '-y', '-loglevel', 'error',
         '-i', inPath,
         '-frames:v', '1',
-        '-vf', `scale=${COVER_SIZE}:${COVER_SIZE}:force_original_aspect_ratio=increase,crop=${COVER_SIZE}:${COVER_SIZE},format=yuvj420p`,
+        ...filter,
         '-q:v', '5',
         outPath,
     ];
@@ -95,7 +104,7 @@ function renderJpeg(inPath, outPath) {
  * Square 1400 px JPEG of the image at sourceUrl.
  * @returns {Promise<Buffer>}
  */
-async function renderCover(sourceUrl) {
+async function renderCover(sourceUrl, { fit = 'crop' } = {}) {
     return withSlot(async () => {
         const source = await fetchSource(sourceUrl);
         const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'spk-cover-'));
@@ -103,7 +112,7 @@ async function renderCover(sourceUrl) {
             const inPath = path.join(dir, 'source');
             const outPath = path.join(dir, 'cover.jpg');
             await fsp.writeFile(inPath, source);
-            await renderJpeg(inPath, outPath);
+            await renderJpeg(inPath, outPath, fit);
             return await fsp.readFile(outPath);
         } finally {
             await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
