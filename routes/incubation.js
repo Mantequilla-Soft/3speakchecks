@@ -111,20 +111,40 @@ async function dropAiFlagged(items) {
 // Videos their creator took out of the feeds: hidden from feeds (hiddenFromFeed)
 // or unlisted (listed_on_3speak: false), read off the embed-video asset like
 // every other feed here. They stay on the creator's profile, which does not go
-// through /feed. If the lookup fails the items are kept.
-async function dropHiddenFromFeeds(items) {
+// through /feed.
+//
+// And nothing shows until 3Speak approved it (owner 2026-10-13): the admin
+// backend sets `warmup_approved: true` on the embed-video asset. Missing or
+// anything but true = not shown, so a post without an asset never shows either.
+// WARMUP_APPROVAL_REQUIRED=false turns the gate off.
+//
+// If the lookup fails, the hidden rule fails open like every other feed here,
+// but the approval gate fails CLOSED: an unreviewed post must not slip out on a
+// database hiccup, so the feed comes back empty instead.
+const WARMUP_APPROVAL_REQUIRED = process.env.WARMUP_APPROVAL_REQUIRED !== 'false';
+async function filterByAsset(items) {
     const keys = [...new Set(items.map(assetKey).filter(Boolean))];
-    if (!keys.length) return items;
+    if (!keys.length) return WARMUP_APPROVAL_REQUIRED ? [] : items;
     try {
         const rows = await getDb().collection('embed-video').find(
             { $or: keys.map((k) => { const i = k.indexOf('/'); return { owner: k.slice(0, i), permlink: k.slice(i + 1) }; }) },
-            { projection: { _id: 0, owner: 1, permlink: 1, hiddenFromFeed: 1, listed_on_3speak: 1 } },
+            { projection: { _id: 0, owner: 1, permlink: 1, hiddenFromFeed: 1, listed_on_3speak: 1, warmup_approved: 1 } },
         ).toArray();
+        const rowKey = (r) => `${String(r.owner).toLowerCase()}/${r.permlink}`;
         const hidden = new Set(rows
             .filter((r) => isHiddenFromFeed(r) || r.listed_on_3speak === false)
-            .map((r) => `${String(r.owner).toLowerCase()}/${r.permlink}`));
-        return items.filter((it) => !hidden.has(assetKey(it)));
+            .map(rowKey));
+        const approved = new Set(rows.filter((r) => r.warmup_approved === true).map(rowKey));
+        return items.filter((it) => {
+            const k = assetKey(it);
+            if (WARMUP_APPROVAL_REQUIRED && !approved.has(k)) return false;
+            return !hidden.has(k);
+        });
     } catch (e) {
+        if (WARMUP_APPROVAL_REQUIRED) {
+            console.warn('[incubation] embed-video lookup failed, warm-up feed held back:', e.message);
+            return [];
+        }
         console.warn('[incubation] hidden-from-feed lookup failed, feed unfiltered:', e.message);
         return items;
     }
@@ -162,13 +182,87 @@ router.get('/feed', (req, res) => {
         .then(async (r) => {
             if (r.status === 200 && Array.isArray(r.body?.items)) {
                 const items = r.body.items.filter((it) => new Date(it.created).getTime() >= sinceMs);
-                const shown = await dropAiFlagged(await dropHiddenFromFeeds(items));
+                const shown = await dropAiFlagged(await filterByAsset(items));
                 r.body.items = sampleShare(shown).slice(0, shownLimit);
             }
             // A random pick must not be cached, or everyone gets the same half.
             relay(res, sampling ? 'no-store' : 'public, max-age=30')(r);
         })
         .catch(failed(res, 'feed'));
+});
+
+// GET /incubation/review?state=pending|approved|rejected|all — the queue for the
+// admin backend's warm-up approval (see filterByAsset above). Every warm-up post
+// since WARMUP_FEED_SINCE with its embed-video asset and review state:
+//   pending  = warmup_approved missing (never reviewed)
+//   approved = warmup_approved: true (shown in the feeds)
+//   rejected = warmup_approved: false (reviewed, kept out)
+// Read-only and public like the rest of this router: the posts are already on
+// each creator's public profile. Approving is a write the admin backend makes on
+// embed-video itself. The service caps one read at 50, so videos and shorts are
+// read separately: the newest 50 of each.
+const reviewState = (row) => (row?.warmup_approved === true ? 'approved'
+    : row?.warmup_approved === false ? 'rejected' : 'pending');
+router.get('/review', async (req, res) => {
+    const want = String(req.query.state || 'pending');
+    const maxAgeDays = Math.max((Date.now() - WARMUP_FEED_SINCE.getTime()) / 86400000, 0.001);
+    try {
+        const reads = await Promise.all(['video', 'short'].map((contentType) =>
+            call('GET', `/public/feed${qs({ limit: WARMUP_FEED_POOL, maxAgeDays, contentType })}`)));
+        if (reads.some((r) => r.status !== 200)) return relay(res)(reads.find((r) => r.status !== 200));
+        const items = reads.flatMap((r) => r.body?.items || [])
+            .filter((it) => new Date(it.created).getTime() >= WARMUP_FEED_SINCE.getTime())
+            .sort((a, b) => new Date(b.created) - new Date(a.created));
+        const keys = [...new Set(items.map(assetKey).filter(Boolean))];
+        const rows = keys.length ? await getDb().collection('embed-video').find(
+            { $or: keys.map((k) => { const i = k.indexOf('/'); return { owner: k.slice(0, i), permlink: k.slice(i + 1) }; }) },
+            { projection: { _id: 0, owner: 1, permlink: 1, status: 1, short: 1, hiddenFromFeed: 1, listed_on_3speak: 1,
+                warmup_approved: 1, warmup_reviewed_by: 1, warmup_reviewed_at: 1 } },
+        ).toArray() : [];
+        const byKey = new Map(rows.map((r) => [`${String(r.owner).toLowerCase()}/${r.permlink}`, r]));
+        let ai = new Set();
+        try {
+            ai = new Set(await fetchAiFlagsBatch(getDb(), keys.map((k) => {
+                const i = k.indexOf('/');
+                return { author: k.slice(0, i), permlink: k.slice(i + 1) };
+            })));
+        } catch (e) {
+            console.warn('[incubation] review: AI flag lookup failed:', e.message);
+        }
+        const out = items.map((it) => {
+            const k = assetKey(it);
+            const row = k ? byKey.get(k) : null;
+            return {
+                handle: it.handle,
+                permlink: it.permlink,
+                title: it.title,
+                body: it.body,
+                contentType: it.contentType,
+                created: it.created,
+                thumbnail: it.thumbnail,
+                duration: it.duration,
+                watchUrl: `https://3speak.tv/watch?v=${encodeURIComponent(it.handle)}/${encodeURIComponent(it.permlink)}`,
+                embedUrl: row ? `https://play.3speak.tv/embed?v=${encodeURIComponent(row.owner)}/${encodeURIComponent(row.permlink)}` : null,
+                // The document the admin backend writes warmup_approved on.
+                asset: row ? { owner: row.owner, permlink: row.permlink } : null,
+                state: reviewState(row),
+                reviewedBy: row?.warmup_reviewed_by ?? null,
+                reviewedAt: row?.warmup_reviewed_at ?? null,
+                // Kept out of the feeds anyway, whatever the review says.
+                hiddenByCreator: !!row && (isHiddenFromFeed(row) || row.listed_on_3speak === false),
+                aiGenerated: !!k && ai.has(k),
+                assetStatus: row?.status ?? null,
+            };
+        });
+        res.set('Cache-Control', 'no-store');
+        res.json({
+            approvalRequired: WARMUP_APPROVAL_REQUIRED,
+            since: WARMUP_FEED_SINCE.toISOString(),
+            items: want === 'all' ? out : out.filter((o) => o.state === want),
+        });
+    } catch (err) {
+        failed(res, 'review')(err);
+    }
 });
 
 // GET /incubation/replies?parentAuthor=&parentPermlink= — the off-chain replies

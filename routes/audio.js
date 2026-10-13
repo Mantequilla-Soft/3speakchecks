@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const { getDb } = require('../utils/db');
+const { decodePlaylistMeta } = require('../utils/playlistMeta');
 const { nsfwFilter } = require('../utils/filters');
 
 // Treat docs with no category as `voice_message` — the default snap-style
@@ -24,11 +25,16 @@ function categoryMatchClause(value) {
     return { category: value };
 }
 
-// Aggregation stages that enrich each audio doc with `playlist_thumbnail` —
-// the cover of the earliest-created playlist that contains the audio's
-// (owner, post_permlink) tuple. Uploaders sometimes publish a track straight
-// into an album playlist; this lets the tile fall back to the album art
-// when the audio itself has no thumbnail set.
+// Aggregation stages that enrich each audio doc from the playlists that
+// contain its (owner, post_permlink) tuple:
+//   playlist_thumbnail  the cover of the earliest-created such playlist that
+//                       has one. Uploaders sometimes publish a track straight
+//                       into an album playlist; the tile falls back to the album
+//                       art when the audio itself has no thumbnail.
+//   playlist_id/_name   the earliest-created PUBLIC one, i.e. the album, for the
+//                       "from <album>" line on the tile. Private lists (Watch
+//                       Later etc.) never show.
+// One lookup for both, so it stays a single pass over the playlists per track.
 const playlistJoin = [
     {
         $lookup: {
@@ -37,7 +43,6 @@ const playlistJoin = [
             pipeline: [
                 {
                     $match: {
-                        thumbnail: { $exists: true, $ne: '' },
                         $expr: {
                             $and: [
                                 { $ne: ['$$audioPermlink', null] },
@@ -56,18 +61,31 @@ const playlistJoin = [
                     }
                 },
                 { $sort: { created_at: 1 } },
-                { $limit: 1 },
-                { $project: { thumbnail: 1, _id: 0 } }
+                { $project: { name: 1, access: 1, thumbnail: 1 } }
             ],
             as: '_playlist'
         }
     },
     {
         $addFields: {
-            playlist_thumbnail: { $arrayElemAt: ['$_playlist.thumbnail', 0] }
+            _cover: { $arrayElemAt: [{ $filter: {
+                input: '$_playlist', as: 'p',
+                cond: { $gt: [{ $strLenCP: { $ifNull: ['$$p.thumbnail', ''] } }, 0] },
+            } }, 0] },
+            _album: { $arrayElemAt: [{ $filter: {
+                input: '$_playlist', as: 'p',
+                cond: { $eq: ['$$p.access', 'public'] },
+            } }, 0] },
         }
     },
-    { $project: { _playlist: 0 } }
+    {
+        $addFields: {
+            playlist_thumbnail: '$_cover.thumbnail',
+            playlist_id: '$_album._id',
+            playlist_name: '$_album.name',
+        }
+    },
+    { $project: { _playlist: 0, _cover: 0, _album: 0 } }
 ];
 
 // Pipeline stages that overwrite each audio doc's `plays` with the *derived*
@@ -874,22 +892,6 @@ router.get('/creators', async (req, res) => {
         res.status(500).json({ error: 'Internal server error' });
     }
 });
-
-// Playlist `metadata` is stored as JSON (json.RawMessage) — via the Node
-// driver it can arrive as an object, a BSON Binary, or a base64 string.
-function decodePlaylistMeta(m) {
-    try {
-        if (!m) return null;
-        if (typeof m === 'object' && m._bsontype === 'Binary') return JSON.parse(m.buffer.toString('utf8'));
-        if (Buffer.isBuffer(m)) return JSON.parse(m.toString('utf8'));
-        if (typeof m === 'string') {
-            // Could be raw JSON or base64-encoded JSON.
-            try { return JSON.parse(m); } catch { return JSON.parse(Buffer.from(m, 'base64').toString('utf8')); }
-        }
-        if (typeof m === 'object') return m;
-    } catch { /* ignore */ }
-    return null;
-}
 
 // GET /audio/playlists — public playlists that contain music, split into:
 //   by_artist    → every track is by the playlist creator
