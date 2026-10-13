@@ -553,6 +553,16 @@ function emptyFeed(title, link, description) {
     );
 }
 
+/**
+ * Cover URL for a feed. The ?v= tag is a hash of the source image, so a new
+ * cover is a new URL for Cloudflare and podcast apps (nginx caches by path
+ * only, so made-up tags can't trigger extra renders).
+ */
+function coverLink(kind, key, sourceUrl) {
+    const v = crypto.createHash('sha1').update(String(sourceUrl)).digest('hex').slice(0, 8);
+    return `${COVER_BASE}/${kind}/${encodeURIComponent(key)}.jpg?v=${v}`;
+}
+
 /** The image a channel cover is rendered from. */
 function channelCoverSource(username, podcastSettings) {
     return podcastSettings?.podcast_image || `https://images.hive.blog/u/${username}/avatar/large`;
@@ -707,7 +717,7 @@ router.get('/playlist/:id.xml', async (req, res) => {
             podcastSettings,
             feedPath: `rss/playlist/${id}.xml`,
             pageLink,
-            coverUrl: `${COVER_BASE}/playlist/${id}.jpg`,
+            coverUrl: coverLink('playlist', id, playlistCoverSource(playlist)),
             medium: allMusic ? 'music' : allAudio ? 'podcast' : 'video',
         }));
     } catch (err) {
@@ -791,7 +801,7 @@ router.get('/:username.xml', async (req, res) => {
 
         const feedXml = buildFeed({
             username, videos, itunesAuthor, podcastSettings,
-            coverUrl: `${COVER_BASE}/user/${username}.jpg`,
+            coverUrl: coverLink('user', username, channelCoverSource(username, podcastSettings)),
         });
 
         res.setHeader('Content-Type', 'application/xml; charset=utf-8');
