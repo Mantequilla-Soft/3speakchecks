@@ -23,6 +23,7 @@
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
+const { decodePlaylistMeta } = require('../utils/playlistMeta');
 const { getFollowingList } = require('../utils/hive');
 const { getCached } = require('../utils/feedCache');
 const { PLAYLIST_FEED_CACHE_MS } = require('../utils/config');
@@ -36,22 +37,6 @@ function maxAgeMsFrom(req, defaultMs) {
   const h = parseFloat(req.query.maxAgeHours);
   if (!Number.isFinite(h) || h <= 0) return defaultMs;
   return Math.min(h * 60 * 60 * 1000, defaultMs);
-}
-
-// Playlist `metadata` is stored as JSON (json.RawMessage) — via the Node driver
-// it can arrive as an object, a BSON Binary, or a base64 string. (Mirrors the
-// helper in routes/audio.js.)
-function decodePlaylistMeta(m) {
-  try {
-    if (!m) return null;
-    if (typeof m === 'object' && m._bsontype === 'Binary') return JSON.parse(m.buffer.toString('utf8'));
-    if (Buffer.isBuffer(m)) return JSON.parse(m.toString('utf8'));
-    if (typeof m === 'string') {
-      try { return JSON.parse(m); } catch { return JSON.parse(Buffer.from(m, 'base64').toString('utf8')); }
-    }
-    if (typeof m === 'object') return m;
-  } catch { /* ignore */ }
-  return null;
 }
 
 /**

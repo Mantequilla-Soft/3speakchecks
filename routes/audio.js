@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const { getDb } = require('../utils/db');
+const { decodePlaylistMeta } = require('../utils/playlistMeta');
 const { nsfwFilter } = require('../utils/filters');
 
 // Treat docs with no category as `voice_message` — the default snap-style
@@ -874,22 +875,6 @@ router.get('/creators', async (req, res) => {
         res.status(500).json({ error: 'Internal server error' });
     }
 });
-
-// Playlist `metadata` is stored as JSON (json.RawMessage) — via the Node
-// driver it can arrive as an object, a BSON Binary, or a base64 string.
-function decodePlaylistMeta(m) {
-    try {
-        if (!m) return null;
-        if (typeof m === 'object' && m._bsontype === 'Binary') return JSON.parse(m.buffer.toString('utf8'));
-        if (Buffer.isBuffer(m)) return JSON.parse(m.toString('utf8'));
-        if (typeof m === 'string') {
-            // Could be raw JSON or base64-encoded JSON.
-            try { return JSON.parse(m); } catch { return JSON.parse(Buffer.from(m, 'base64').toString('utf8')); }
-        }
-        if (typeof m === 'object') return m;
-    } catch { /* ignore */ }
-    return null;
-}
 
 // GET /audio/playlists — public playlists that contain music, split into:
 //   by_artist    → every track is by the playlist creator
