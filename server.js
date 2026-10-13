@@ -110,6 +110,7 @@ app.use('/audio', audioRoutes);
 app.use('/feeds', feedsRoutes);
 app.use('/feeds', watchedFeedRoutes);              // /feeds/watched/:username (history as cards)
 app.use('/rss', rssRoutes);
+app.use('/client-errors', require('./routes/clientErrors')); // frontend route-error reports (before the streamStats gate)
 app.use('/verify', verifyRoutes);
 app.use('/scheduled-posts', scheduledPostsRoutes);
 app.use('/', communitiesRoutes);
