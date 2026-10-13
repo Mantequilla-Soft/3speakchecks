@@ -2,6 +2,8 @@
  * RSS Feed Endpoints
  * GET /rss/:username.xml       one feed per channel
  * GET /rss/playlist/:id.xml    one feed per public playlist / album
+ * GET /rss/cover/user/:username.jpg, /rss/cover/playlist/:id.jpg
+ *                              square JPEG cover art, behind nginx's /img/c/ cache
  *
  * Generates a valid RSS 2.0 / Podcast Namespace feed for a 3Speak channel.
  * Ported from the legacy frontend's helper/rss.js & routes/index.js.
@@ -27,6 +29,7 @@ const generateXML = require('xml');
 const { getDb } = require('../utils/db');
 const { hiveRpcBatch } = require('../utils/hive');
 const { decodePlaylistMeta } = require('../utils/playlistMeta');
+const { renderCover } = require('../utils/podcastCover');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PAGE_DOMAIN = process.env.RSS_FEED_BASE_URL || 'https://3speak.tv';
@@ -54,6 +57,10 @@ const FEED_LIMIT = parseInt(process.env.RSS_FEED_LIMIT, 10) || 30;
 // A playlist feed is the whole series (someone subscribing to a 30-day
 // challenge wants every day), so it carries far more than a channel feed.
 const PLAYLIST_FEED_LIMIT = parseInt(process.env.RSS_PLAYLIST_FEED_LIMIT, 10) || 300;
+
+// Feed covers go through nginx's image cache (snippets/3speak-img.conf,
+// /img/c/ -> /rss/cover/ here), which keeps each rendered JPEG on disk.
+const COVER_BASE = (process.env.RSS_COVER_BASE_URL || `${PAGE_PROTOCOL}://${DOMAIN_NO_PROTO}/img/c`).replace(/\/$/, '');
 
 // Podcast namespace: <podcast:guid> is a UUIDv5 of the feed URL (no scheme,
 // no trailing slash) under this namespace, so it survives a host move.
@@ -368,7 +375,7 @@ function buildItem(video, itunesAuthor, feedOwner) {
  * `feedPath` / `pageLink` / `medium` are given (podcastSettings then carries
  * the playlist's title, description and cover).
  */
-function buildFeed({ username, videos, itunesAuthor, podcastSettings, feedPath, pageLink, medium = 'video' }) {
+function buildFeed({ username, videos, itunesAuthor, podcastSettings, feedPath, pageLink, coverUrl, medium = 'video' }) {
     const feedUrl = `${DOMAIN_NO_PROTO}/${feedPath || `rss/${username}.xml`}`;
     const selfUrl = `${PAGE_PROTOCOL}://${feedUrl}`;
     const link = pageLink || `${PAGE_PROTOCOL}://${DOMAIN_NO_PROTO}/user/${username}`;
@@ -378,7 +385,9 @@ function buildFeed({ username, videos, itunesAuthor, podcastSettings, feedPath, 
     const podcast_description =
         podcastSettings?.podcast_description ||
         `Listen and watch the latest videos from ${username}. Hosted by 3Speak.tv. The free speech video platform on the HIVE blockchain.`;
+    // coverUrl is the square JPEG Apple Podcasts insists on (see /rss/cover)
     const podcast_image =
+        coverUrl ||
         podcastSettings?.podcast_image ||
         `https://images.hive.blog/u/${username}/avatar/large`;
     const podcast_language =
@@ -544,7 +553,67 @@ function emptyFeed(title, link, description) {
     );
 }
 
+/** The image a channel cover is rendered from. */
+function channelCoverSource(username, podcastSettings) {
+    return podcastSettings?.podcast_image || `https://images.hive.blog/u/${username}/avatar/large`;
+}
+
+/** The image a playlist cover is rendered from. */
+function playlistCoverSource(playlist) {
+    const album = decodePlaylistMeta(playlist.metadata)?.album || {};
+    return playlist.thumbnail || album.thumbnail || `https://images.hive.blog/u/${playlist.owner}/avatar/large`;
+}
+
+/**
+ * Send the rendered cover, or redirect to the original if it can't be
+ * rendered (host not allowed, source gone, ffmpeg failed) so a feed never
+ * shows a broken image. nginx caches either answer; the redirect only briefly.
+ */
+async function sendCover(res, sourceUrl, label) {
+    try {
+        const jpeg = await renderCover(sourceUrl);
+        res.setHeader('Content-Type', 'image/jpeg');
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        return res.send(jpeg);
+    } catch (err) {
+        console.warn(`[RSS] Cover for ${label} not rendered (${err.message}), redirecting to source`);
+        res.setHeader('Cache-Control', 'public, max-age=300');
+        return res.redirect(302, sourceUrl);
+    }
+}
+
 // ─── Routes ──────────────────────────────────────────────────────────────────
+
+router.get('/cover/user/:username.jpg', async (req, res) => {
+    const { username } = req.params;
+    if (!username || !/^[a-z0-9.-]{3,16}$/.test(username)) {
+        return res.status(400).send('Invalid username');
+    }
+    try {
+        const settings = await fetchPodcastSettings(getDb(), username);
+        return await sendCover(res, channelCoverSource(username, settings), `@${username}`);
+    } catch (err) {
+        console.error(`[RSS] Cover error for @${username}:`, err);
+        return res.status(500).send('Internal server error');
+    }
+});
+
+router.get('/cover/playlist/:id.jpg', async (req, res) => {
+    const { id } = req.params;
+    if (!id || !/^[a-zA-Z0-9-]{8,64}$/.test(id)) {
+        return res.status(400).send('Invalid playlist id');
+    }
+    try {
+        const playlist = await getDb().collection('playlists').findOne({ _id: id });
+        if (!playlist || playlist.access !== 'public' || !playlist.owner) {
+            return res.status(404).send('Not found');
+        }
+        return await sendCover(res, playlistCoverSource(playlist), `playlist ${id}`);
+    } catch (err) {
+        console.error(`[RSS] Cover error for playlist ${id}:`, err);
+        return res.status(500).send('Internal server error');
+    }
+});
 
 /**
  * GET /rss/playlist/:id.xml
@@ -621,7 +690,7 @@ router.get('/playlist/:id.xml', async (req, res) => {
             podcast_title: title,
             podcast_description: album.description ||
                 `${title} by ${itunesAuthor}. Hosted by 3Speak.tv. The free speech video platform on the HIVE blockchain.`,
-            podcast_image: playlist.thumbnail || album.thumbnail || `https://images.hive.blog/u/${owner}/avatar/large`,
+            podcast_image: playlistCoverSource(playlist),
             podcast_languages: ownerSettings?.podcast_languages,
             podcast_language: ownerSettings?.podcast_language,
             podcast_categories: ownerSettings?.podcast_categories,
@@ -638,6 +707,7 @@ router.get('/playlist/:id.xml', async (req, res) => {
             podcastSettings,
             feedPath: `rss/playlist/${id}.xml`,
             pageLink,
+            coverUrl: `${COVER_BASE}/playlist/${id}.jpg`,
             medium: allMusic ? 'music' : allAudio ? 'podcast' : 'video',
         }));
     } catch (err) {
@@ -719,7 +789,10 @@ router.get('/:username.xml', async (req, res) => {
         const itunesAuthor = await fetchItunesAuthor(username);
         const podcastSettings = await fetchPodcastSettings(db, username);
 
-        const feedXml = buildFeed({ username, videos, itunesAuthor, podcastSettings });
+        const feedXml = buildFeed({
+            username, videos, itunesAuthor, podcastSettings,
+            coverUrl: `${COVER_BASE}/user/${username}.jpg`,
+        });
 
         res.setHeader('Content-Type', 'application/xml; charset=utf-8');
         res.setHeader('Cache-Control', 'public, max-age=600'); // 10 min cache
