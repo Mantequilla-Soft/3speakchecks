@@ -120,6 +120,9 @@ const near = (l, g, w, tol = 0.002) => { const ok = Math.abs(g - w) <= tol; if (
     await camps.deleteMany({ _id: { $in: [idA, idB] } });
     await imps.deleteMany({ sid: { $regex: `^${TAG}-` } });
     await outs.deleteMany({ account: { $regex: '^payout-test-' } });
+    // 🚨 Every row this period holds is synthetic, including the encoder share
+    // (AD_ENCODER_ACCOUNT, a REAL account). Left pending, the live payout run sends it.
+    await outs.deleteMany({ periodKey: period.key });
     await periods.deleteMany({ _id: period.key });
     console.log('\ncleaned up');
   }

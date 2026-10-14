@@ -135,11 +135,26 @@ const stubDeps = (referrerMap, realAccounts) => ({
       await done();
     }
 
-    // No impressions at all: the referral write used to replace the viewer row.
+    // No ad shown at all: nobody is paid out of a booking that will be credited
+    // back to the advertiser, and the watch waits for a period that had ad views.
     {
       const me = `${MARK}-ref`;
-      const { rows, clean: done } = await run('no impressions, referrer who also watched', {
+      const { rows, clean: done } = await run('no ad shown, referrer who also watched', {
         creator: null, impressions: 0, viewers: [[me, 600]],
+        referrerMap: { [`${MARK}-adv`]: me }, realAccounts: [me],
+      });
+      check('nobody is paid', rows.map((r) => r.account), []);
+      const w = await watch.findOne({ viewer: me });
+      check('  the watch is NOT claimed (still owed later)', w && w.payoutId, null);
+      await done();
+    }
+
+    // The referral write used to replace the viewer row: a referrer who also watched,
+    // in a period whose ad WAS shown, gets one row holding both.
+    {
+      const me = `${MARK}-ref`;
+      const { rows, clean: done } = await run('ad shown, referrer who also watched', {
+        creator: `${MARK}-cr`, impressions: 4, viewers: [[me, 600]],
         referrerMap: { [`${MARK}-adv`]: me }, realAccounts: [me],
       });
       const mine = rows.filter((r) => r.account === me);

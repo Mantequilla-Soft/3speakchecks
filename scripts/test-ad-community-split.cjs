@@ -173,7 +173,7 @@ const LEGACY = { author: 'hiveredcarpet', permlink: 'ozmstwre', community: 'hive
     check('with no preference set, no community is paid',
       reRun.filter((p) => p.kind === 'community').length, 0);
     check('  and the creators keep the whole pool',
-      Math.abs(reRun.reduce((a, p) => a + p.hbd, 0) - pool) < 0.02, true);
+      Math.abs(reRun.filter((p) => p.kind !== 'encoder').reduce((a, p) => a + p.hbd, 0) - pool) < 0.02, true);
     check('  which is the platform default', AD_DEFAULT_COMMUNITY_PCT, 0);
   } finally {
     await restoreRealRows();

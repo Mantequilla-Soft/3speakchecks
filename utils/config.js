@@ -58,6 +58,28 @@ const REFERRAL_POOL_PCT = (() => {
     return wanted;
 })();
 
+/* The encoders' cut, in the same percentage points of the whole, paid every
+ * period to AD_ENCODER_ACCOUNT.
+ *
+ * Out of what we keep, like the viewer and referrer shares: creators and viewers
+ * must not be able to notice this exists. With the defaults the split becomes
+ * 50 creator / 10 viewer / 2 referrer / 5 encoder / 33 platform.
+ *
+ * Clamped against what is left after all three, for the same reason they are.
+ */
+const ENCODER_POOL_PCT = (() => {
+    const n = parseFloat(process.env.AD_ENCODER_POOL_PCT);
+    const wanted = Number.isFinite(n) && n >= 0 && n <= 100 ? n : 5;
+    const room = 100 - CREATOR_POOL_PCT - VIEWER_POOL_PCT - REFERRAL_POOL_PCT;
+    if (wanted > room) {
+        console.warn(`[ads] AD_ENCODER_POOL_PCT=${wanted} is more than the platform's `
+            + `remaining ${room}% (creator ${CREATOR_POOL_PCT}%, viewer ${VIEWER_POOL_PCT}%, `
+            + `referrer ${REFERRAL_POOL_PCT}%). Clamped to ${Math.max(0, room)}%.`);
+        return Math.max(0, room);
+    }
+    return wanted;
+})();
+
 module.exports = {
     // ─── Social-link verifier (merged from mantequilla-social-verifier) ───
     SOCIAL_LINKS_COLLECTION: process.env.SOCIAL_LINKS_COLLECTION || 'social_links',
@@ -802,6 +824,9 @@ module.exports = {
     // route, the signing endpoint, the UI and the message format independently.
     AD_CREATOR_POOL_PCT: CREATOR_POOL_PCT,
     AD_REFERRAL_POOL_PCT: REFERRAL_POOL_PCT,
+    AD_ENCODER_POOL_PCT: ENCODER_POOL_PCT,
+    // Who receives the encoders' cut. Empty switches it off (the platform keeps it).
+    AD_ENCODER_ACCOUNT: (process.env.AD_ENCODER_ACCOUNT ?? 'encoder.pay').trim().toLowerCase().replace(/^@/, ''),
     /* Butter Auth, for asking who referred an advertiser. Credentials are a
      * confidential client's, so they belong on the server and nowhere else.
      * Unset means the lookup is skipped and the platform keeps the referral

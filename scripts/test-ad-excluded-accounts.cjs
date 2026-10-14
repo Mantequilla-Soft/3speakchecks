@@ -109,7 +109,8 @@ const EXCLUDED = cfg.AD_EXCLUDED_ACCOUNTS[0];
     check('  excluded row still CLAIMED (not re-read forever)', exclWatch.payoutId, per.key);
 
     console.log('\n-- nothing real was touched --');
-    const strays = rows.filter((r) => r.account !== `${MARK}-creator` && r.account !== `${MARK}-viewer`);
+    // The encoders' cut is paid every period, so its row is expected here.
+    const strays = rows.filter((r) => r.account !== `${MARK}-creator` && r.account !== `${MARK}-viewer` && r.kind !== 'encoder');
     check('no payout row for any account outside this test', strays.map((r) => r.account), []);
 
     await clean();

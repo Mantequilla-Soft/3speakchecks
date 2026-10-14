@@ -127,7 +127,8 @@ const PAID_VIEWER = `${MARK}-paid-viewer`;
     check("  a non-boolean 'yes' does NOT withhold", !!again.find((r) => r.account === PAID_CREATOR), true);
 
     console.log('\n-- nothing real was touched --');
-    const strays = again.filter((r) => !r.account.startsWith(MARK));
+    // The encoders' cut is paid every period, so its row is expected here.
+    const strays = again.filter((r) => !r.account.startsWith(MARK) && r.kind !== 'encoder');
     check('no payout row outside this test', strays.map((r) => r.account), []);
 
     await wipe();
