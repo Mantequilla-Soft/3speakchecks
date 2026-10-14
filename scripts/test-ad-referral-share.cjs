@@ -4,7 +4,8 @@
  *
  *   node scripts/test-ad-referral-share.cjs
  *
- * The split becomes 50 creator / 10 viewer / 2 referrer / 38 platform. The
+ * The split becomes 50 creator / 10 viewer / 2 referrer / 5 encoder / 33
+ * platform. The
  * things worth asserting are the ones that cost real money when wrong:
  *
  *   - The creator pool does not move. A referrer is paid out of what we keep;
@@ -92,7 +93,7 @@ const stubDeps = (referrerMap, realAccounts) => ({
   };
 
   try {
-    // 100 HBD campaign. creator 50, viewer 10, referrer 2, platform 38.
+    // 100 HBD campaign. creator 50, viewer 10, referrer 2, encoder 5, platform 33.
     {
       const { rows, period, clean: done } = await run('referred advertiser, plain case', {
         paidAssets: { HBD: 100 }, creator: 'creatorx',
@@ -106,6 +107,11 @@ const stubDeps = (referrerMap, realAccounts) => ({
       check('  paid in the asset the advertiser sent', ref.amounts, [{ symbol: 'HBD', amount: 2 }]);
       check('viewer pool untouched at 10', period.viewerPoolHbd, 10);
       check('period records the referral pool', period.referralPoolHbd, 2);
+      const enc = rows.find((r) => r.account === cfg.AD_ENCODER_ACCOUNT);
+      const ENC = cfg.AD_ENCODER_POOL_PCT;
+      check('encoders get AD_ENCODER_POOL_PCT of revenue', enc && [enc.hbd, enc.kind], [ENC, 'encoder']);
+      check('  in the asset the advertiser sent', enc && enc.amounts, [{ symbol: 'HBD', amount: ENC }]);
+      check('period records the encoder pool', [period.encoderPoolHbd, period.encoderAccount], [ENC, cfg.AD_ENCODER_ACCOUNT]);
       await done();
     }
 
@@ -132,6 +138,8 @@ const stubDeps = (referrerMap, realAccounts) => ({
       const ref = rows.find((r) => r.account === 'refbob');
       check('referrer paid in HIVE, not HBD', ref.amounts, [{ symbol: 'HIVE', amount: 8 }]);
       check('  HBD-equivalent still recorded', ref.hbd, 2);
+      const enc = rows.find((r) => r.account === cfg.AD_ENCODER_ACCOUNT);
+      check('encoders paid in HIVE too', enc && enc.amounts, [{ symbol: 'HIVE', amount: 4 * cfg.AD_ENCODER_POOL_PCT }]);
       await done();
     }
 
@@ -153,9 +161,55 @@ const stubDeps = (referrerMap, realAccounts) => ({
         paidAssets: { HBD: 100 }, creator: 'creatorx',
         referrerMap: {}, realAccounts: [],
       });
-      check('only the creator is paid', rows.map((r) => r.account), ['creatorx']);
+      check('only the creator (and the encoders) are paid', rows.map((r) => r.account).sort(), ['creatorx', cfg.AD_ENCODER_ACCOUNT].sort());
       check('no referral pool', period.referralPoolHbd, 0);
       await done();
+    }
+
+    // Two campaigns in one period, only one of them shown. The viewer, referrer
+    // and encoder cuts come from the shown one alone: the other will be credited
+    // back to its advertiser, so nobody may be paid out of it.
+    {
+      const per = P.periodContaining(Date.now() - 60 * 864e5);
+      await clean(per);
+      const mid = new Date(per.start.getTime() + (per.end.getTime() - per.start.getTime()) / 2);
+      const base = { name: MARK, advertiserRef: MARK, status: 'complete', startAt: per.start, endAt: per.end, createdAt: per.start };
+      const seen = await camps.insertOne({ ...base, hiveAccount: 'adv', paidHbd: 100, priceHbd: 100, paidAssets: { HBD: 100 } });
+      await camps.insertOne({ ...base, hiveAccount: 'adv2', paidHbd: 60, priceHbd: 60, paidAssets: { HBD: 60 } });
+      await imps.insertMany([0, 1].map((i) => ({
+        sid: `${MARK}-${i}`, campaignId: seen.insertedId, owner: 'creatorx', permlink: `p${i}`,
+        completed: true, payoutId: null, completedAt: mid, at: mid,
+      })));
+      await P.settlePeriod(db, per, stubDeps({ adv: 'refbob', adv2: 'refcarol' }, ['refbob', 'refcarol']));
+      const rows = await pays.find({ periodKey: per.key }).toArray();
+      const period = await periods.findOne({ _id: per.key });
+      const by = (a) => rows.find((r) => r.account === a);
+      console.log('\n-- one campaign shown, one not --');
+      check('encoders: share of the SHOWN 100 only', by(cfg.AD_ENCODER_ACCOUNT)?.hbd, cfg.AD_ENCODER_POOL_PCT);
+      check('viewer pool: share of the shown 100 only', period.viewerPoolHbd, cfg.AD_VIEWER_POOL_PCT);
+      check('referrer of the shown campaign paid', by('refbob')?.hbd, 2);
+      check('referrer of the unshown campaign NOT paid', !!by('refcarol'), false);
+      check('period records the shown revenue', period.shownRevenueHbd, 100);
+      await clean(per);
+    }
+
+    // Nothing shown at all: no encoder, referrer or viewer row.
+    {
+      const per = P.periodContaining(Date.now() - 60 * 864e5);
+      await clean(per);
+      await camps.insertOne({
+        name: MARK, advertiserRef: MARK, hiveAccount: 'adv', status: 'complete',
+        paidHbd: 100, priceHbd: 100, paidAssets: { HBD: 100 },
+        startAt: per.start, endAt: per.end, createdAt: per.start,
+      });
+      await P.settlePeriod(db, per, stubDeps({ adv: 'refbob' }, ['refbob']));
+      const rows = await pays.find({ periodKey: per.key }).toArray();
+      const period = await periods.findOne({ _id: per.key });
+      console.log('\n-- nothing shown --');
+      check('nobody is paid', rows.map((r) => r.account), []);
+      check('  encoder pool 0', period.encoderPoolHbd, 0);
+      check('  creator pool still carried forward', period.carriedOut, 50);
+      await clean(per);
     }
   } finally {
     await restore();

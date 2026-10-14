@@ -61,7 +61,7 @@ const {
   ADS_BETA_USERS,
   AD_CREATOR_POOL_PCT,
   AD_DEFAULT_COMMUNITY_PCT,
-  AD_VIEWER_POOL_PCT,
+  AD_VIEWER_POOL_PCT, AD_ENCODER_POOL_PCT,
   AD_CREATIVES_COLLECTION,
   AD_CAMPAIGNS_COLLECTION,
   AD_PAYMENTS_COLLECTION,
@@ -178,6 +178,10 @@ function splitOf(doc) {
     // left as `100 - poolPct` for the client to work out, because that subtraction
     // is the one that was silently wrong the moment viewer rewards existed.
     platformPct: round1(100 - AD_CREATOR_POOL_PCT - viewerPct),
+    // The encoders' cut (AD_ENCODER_POOL_PCT), paid out of platformPct above, not
+    // beside it: platformPct stays "the platform side" so a client that does not
+    // know this field still draws a key that adds up to 100.
+    encoderPct: round1(AD_ENCODER_POOL_PCT),
     isDefault: stored === undefined || stored === null,
   };
 }

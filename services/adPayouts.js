@@ -39,6 +39,7 @@ const {
   AD_DEFAULT_COMMUNITY_PCT, AD_CREATOR_PREFS_COLLECTION, AD_PAYMENT_ACCOUNT,
   AD_PAYOUTS_ENABLED, AD_PAYOUT_INTERVAL_H, AD_PAYOUT_MIN_HBD, AD_CREDIT_MIN_HBD, AD_PAYOUT_PERIOD_DAYS, AD_PAYOUT_PERIOD_OFFSET_MIN, AD_PAYMENTS_COLLECTION, AD_BOOKING_EXPIRY_DAYS,
   AD_VIEWER_POOL_PCT, AD_VIEWER_WATCH_COLLECTION, AD_REFERRAL_POOL_PCT,
+  AD_ENCODER_POOL_PCT, AD_ENCODER_ACCOUNT,
 } = require('../utils/config');
 const { STATES } = require('../utils/adModel');
 // The chain is the authority on which community a post was published to — see
@@ -331,6 +332,25 @@ async function planReferralPayouts(db, campaigns, period, deps = {}) {
   return { rows, poolHbd: Math.round(rows.reduce((a, r) => a + r.hbd, 0) * 1000) / 1000, skipped };
 }
 
+/**
+ * The encoders' cut for this period: AD_ENCODER_POOL_PCT of the revenue, as one
+ * row for AD_ENCODER_ACCOUNT, in the assets the advertisers paid.
+ *
+ * 🚨 Out of the platform's slice, like the viewer and referrer shares. The creator
+ * and viewer pools are computed from their own percentages and do not move.
+ *
+ * Taken from THIS period's revenue only, never from a carry: dust carried into a
+ * period is the creator pool's or the viewers', and is not ours to cut again.
+ */
+function planEncoderPayout(revenue, assetTotals) {
+  const empty = { rows: [], poolHbd: 0 };
+  if (!(AD_ENCODER_POOL_PCT > 0) || !AD_ENCODER_ACCOUNT || !(revenue > 0)) return empty;
+  const hbd = Math.round(revenue * (AD_ENCODER_POOL_PCT / 100) * 1000) / 1000;
+  const amounts = splitAmounts(1, assetPoolFor(assetTotals, AD_ENCODER_POOL_PCT, hbd, revenue));
+  if (!(hbd > 0) || !amounts.length) return empty;
+  return { rows: [{ account: AD_ENCODER_ACCOUNT, hbd, amounts, kind: 'encoder' }], poolHbd: hbd };
+}
+
 const isCommunity = (cat) => /^hive-\d+$/.test(String(cat || ''));
 
 /**
@@ -617,8 +637,36 @@ async function settlePeriod(db, period, deps = {}) {
     carriedInAssets,
   );
 
+  const impressions = await db.collection(AD_IMPRESSIONS_COLLECTION).find({
+    completed: true,
+    payoutId: null,
+    completedAt: { $gte: period.start, $lt: period.end },
+  }).toArray();
+
+  /* ─── only money from ads that were SHOWN funds the platform-side cuts ───
+   * The viewer, referrer and encoder shares are taken from campaigns with at least
+   * one completed impression in this period, never from every booked flight.
+   *
+   * 🚨 Why: a campaign that under-delivers gets its shortfall back as advertiser
+   * credit at close (closeFinishedCampaigns), and that credit is covered by what the
+   * platform kept. Paying these cuts on an ad nobody saw meant the platform paid them
+   * out of its own pocket on money it later handed back. A period with no ad views
+   * therefore pays none of them; carries from earlier periods still go out, since
+   * those came from ads that were shown. (Owner's call, 2026-10-14.)
+   */
+  const shownIds = new Set(impressions.map((i) => String(i.campaignId)));
+  const shown = campaigns.filter((c) => shownIds.has(String(c._id)));
+  const shownRevenue = shown.reduce((sum, c) => sum + accrualFor(c, period.start, period.end), 0);
+  const shownAssetTotals = {};
+  for (const c of shown) {
+    for (const [sym, n] of Object.entries(accrualAssetsFor(c, period.start, period.end))) {
+      shownAssetTotals[sym] = (shownAssetTotals[sym] || 0) + n;
+    }
+  }
+
   /* ─── viewer share ──────────────────────────────────────────────────────
-   * AD_VIEWER_POOL_PCT of the revenue, set aside for the people who watched.
+   * AD_VIEWER_POOL_PCT of the revenue from ads that were shown, set aside for the
+   * people who watched.
    *
    * 🚨 Taken from what WE keep, never from `pool`. The creator side must not notice
    * this exists — funding viewer rewards out of the creator pool would be paying
@@ -637,12 +685,12 @@ async function settlePeriod(db, period, deps = {}) {
    * rather than a number reconstructed after the fact from periods nobody measured.
    * Nothing is lost by waiting: it stays in the platform's own share until claimed.
    */
-  const ownViewerPool = Math.round(revenue * (AD_VIEWER_POOL_PCT / 100) * 1000) / 1000;
+  const ownViewerPool = Math.round(shownRevenue * (AD_VIEWER_POOL_PCT / 100) * 1000) / 1000;
   // Viewers carry too. A period where nobody cleared the minimum sendable amount has
   // not stopped owing them; the money waits with the seconds that earned it.
   const viewerPoolHbd = Math.round((ownViewerPool + viewerCarriedIn) * 1000) / 1000;
   const viewerAssetPool = mergeAssets(
-    assetPoolFor(assetTotals, AD_VIEWER_POOL_PCT, ownViewerPool, revenue),
+    assetPoolFor(shownAssetTotals, AD_VIEWER_POOL_PCT, ownViewerPool, shownRevenue),
     viewerCarriedInAssets,
   );
 
@@ -655,32 +703,29 @@ async function settlePeriod(db, period, deps = {}) {
    * reason: creators must not fund it. With the defaults the split becomes
    * 50 creator / 10 viewer / 2 referrer / 38 platform.
    *
-   * Planned BEFORE the impressions branch because it does not depend on
-   * impressions at all. A period can deliver nothing and still owe a referrer:
-   * the advertiser's money accrued over the flight either way, and whether any
-   * creator happened to carry the ad is not the referrer's concern.
+   * Only campaigns that were shown this period (see above): a referrer is not
+   * paid out of a booking that was later credited back to the advertiser.
    */
-  const referral = await planReferralPayouts(db, campaigns, period, deps);
+  const referral = await planReferralPayouts(db, shown, period, deps);
   if (referral.skipped.length) {
     for (const sk of referral.skipped) {
       console.warn(`[adPayout] period ${period.key}: referral for @${sk.advertiser} not paid to @${sk.referrer} (${sk.why})`);
     }
   }
 
-  const impressions = await db.collection(AD_IMPRESSIONS_COLLECTION).find({
-    completed: true,
-    payoutId: null,
-    completedAt: { $gte: period.start, $lt: period.end },
-  }).toArray();
+  /* ─── encoder share ─────────────────────────────────────────────────────
+   * AD_ENCODER_POOL_PCT of the revenue from ads that were shown, to
+   * AD_ENCODER_ACCOUNT, out of the platform's slice.
+   */
+  const encoder = planEncoderPayout(shownRevenue, shownAssetTotals);
 
   if (!impressions.length) {
-    // No creator impressions does not mean no viewers: someone may still have
-    // watched a video to 75% while a flight was running.
+    // No ad was shown, so this period adds nothing to the viewer pool; only a
+    // carry from an earlier period (money from ads that WERE shown) can go out.
     const viewerPaidNoImp = await payViewers(db, period, viewerPoolHbd, viewerAssetPool, { defer: true });
-    // Referrers do not depend on delivery: the advertiser's money accrued over
-    // the flight whether or not any creator carried the ad this period.
-    // ONE merged write with the viewer rows: a referrer who also watched must get both.
-    await writePayoutRows(db, period.key, [...referral.rows, ...viewerPaidNoImp.rows]);
+    // Referral and encoder rows are empty here (nothing was shown); kept in the
+    // ONE merged write so the shape matches the normal path.
+    await writePayoutRows(db, period.key, [...referral.rows, ...encoder.rows, ...viewerPaidNoImp.rows]);
     // Nothing delivered. The money is not ours to keep — carry it forward, in the
     // assets it arrived as so the next period can actually send it.
     await periods.updateOne({ _id: period.key }, {
@@ -698,6 +743,9 @@ async function settlePeriod(db, period, deps = {}) {
         referralPoolHbd: referral.poolHbd,
         referralRecipients: referral.rows.length,
         referralSkipped: referral.skipped,
+      encoderPoolHbd: encoder.poolHbd,
+      shownRevenueHbd: Math.round(shownRevenue * 1000) / 1000,
+      encoderAccount: encoder.rows.length ? AD_ENCODER_ACCOUNT : null,
         impressions: 0, ratePerImpression: 0, carriedIn, carriedOut: pool,
         carriedOutAssets: creatorAssetPool,
         carryTo: periodContaining(period.end.getTime()).key,
@@ -810,10 +858,13 @@ async function settlePeriod(db, period, deps = {}) {
   // replaced the creator row of anyone who was both (unique on periodKey+account).
   const viewerPaid = await payViewers(db, period, viewerPoolHbd, viewerAssetPool, { defer: true });
 
-  const written = await writePayoutRows(db, period.key, [...creatorRows, ...referral.rows, ...viewerPaid.rows]);
+  const written = await writePayoutRows(db, period.key, [...creatorRows, ...referral.rows, ...encoder.rows, ...viewerPaid.rows]);
   const referralPaidHbd = Math.round(referral.rows.reduce((a, r) => a + r.hbd, 0) * 1000) / 1000;
   if (referralPaidHbd > 0) {
     console.log(`[adPayout] period ${period.key}: ${fmt3(referralPaidHbd)} HBD to ${referral.rows.length} referrer(s)`);
+  }
+  if (encoder.poolHbd > 0) {
+    console.log(`[adPayout] period ${period.key}: ${fmt3(encoder.poolHbd)} HBD to @${AD_ENCODER_ACCOUNT} (encoders)`);
   }
   void written;
 
@@ -830,6 +881,9 @@ async function settlePeriod(db, period, deps = {}) {
       referralPoolHbd: referral.poolHbd,
       referralRecipients: referral.rows.length,
       referralSkipped: referral.skipped,
+      encoderPoolHbd: encoder.poolHbd,
+      shownRevenueHbd: Math.round(shownRevenue * 1000) / 1000,
+      encoderAccount: encoder.rows.length ? AD_ENCODER_ACCOUNT : null,
       viewerPoolHbd,
       viewerPoolStatus: viewerPaid.recipients ? 'paid' : 'earmarked',
       viewerRecipients: viewerPaid.recipients,
