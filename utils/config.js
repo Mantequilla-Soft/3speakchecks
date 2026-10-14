@@ -1166,11 +1166,17 @@ module.exports = {
     /* LIVE STREAMS (surface 'live', routes/adServe.js). A stream has no length, and
      * every placement is a PERCENT of the content, so a stream is priced and placed
      * as if it were a video of this many seconds, counted from when the viewer
-     * started watching. Overlay formats only (ticker + page-drawn banner): nothing
-     * can be spliced into a WebRTC stream, and a roll would interrupt the live
-     * moment. AD_LIVE_ENABLED=false switches the surface off without a deploy. */
+     * started watching. Ticker + page-drawn banner during the stream, and a video
+     * roll only as a PRE-ROLL, played by the page before the stream starts (nothing
+     * can be spliced into a WebRTC stream). AD_LIVE_ENABLED=false switches the
+     * surface off without a deploy. */
     AD_LIVE_ENABLED: process.env.AD_LIVE_ENABLED !== 'false',
     AD_LIVE_ASSUMED_SECONDS: parseInt(process.env.AD_LIVE_ASSUMED_SECONDS, 10) || 300,
+    /* Which booked roll slots may play as a stream's pre-roll, in percent. 0 is the
+     * pre-roll it was sold as; 50 (mid-roll) is added on purpose so mid-roll buyers
+     * also reach live viewers. Empty switches live pre-rolls off. */
+    AD_LIVE_ROLL_SLOT_PERCENTS: (process.env.AD_LIVE_ROLL_SLOT_PERCENTS ?? '0,50')
+      .split(',').map((x) => x.trim()).filter(Boolean).map(Number).filter(Number.isFinite),
     // Let the SAME shorts spot come round again instead of waiting out the repeat cap.
     //
     // 🚨 A TESTING SWITCH. It must not be left on. The repeat cap is the thing that
