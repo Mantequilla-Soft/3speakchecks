@@ -41,7 +41,7 @@ const {
   AD_BANNER_CLOSE_AFTER_SECONDS, AD_BANNER_FREQUENCY_CAP_MINUTES, AD_GATE_ALLOWED_UPLOADERS, ADS_STAGE,
   AD_COOLDOWN_MINUTES, AD_PACING_ENABLED, AD_PACING_MIN_FRACTION, AD_SESSION_RATE_PER_MIN,
   AD_COUNT_AFTER_SECONDS,
-  AD_SHORTS_EVERY_N, AD_SHORTS_IGNORE_REPEAT_CAP, AD_LIVE_ENABLED, AD_LIVE_ASSUMED_SECONDS,
+  AD_SHORTS_EVERY_N, AD_SHORTS_IGNORE_REPEAT_CAP, AD_LIVE_ENABLED, AD_LIVE_ASSUMED_SECONDS, AD_LIVE_ROLL_SLOT_PERCENTS,
   AD_BANNER_WIDTH_PCT, AD_BANNER_MAX_HEIGHT_PCT, AD_BANNER_MARGIN_PCT, AD_BANNER_LABEL,
 } = require('../utils/config');
 const {
@@ -953,6 +953,9 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // Can this client DRAW a ticker? Only a page that can is ever handed one, so a
     // player without the overlay never takes a placement it would silently drop.
     const wantsTicker = b.ticker === true || String(b.ticker) === 'true';
+    // Can this client play a roll BEFORE a live stream? Same idea as `ticker`: a
+    // live page that cannot play one is never handed one (live surface only).
+    const wantsPreroll = b.preroll === true || String(b.preroll) === 'true';
     const rawSurface = str(b.surface, 16);
     const surface = rawSurface === 'shorts' ? 'shorts'
       : (rawSurface === 'upload' ? 'upload' : (rawSurface === 'live' ? 'live' : 'watch'));
@@ -961,8 +964,11 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
      * stream's Hive post when it was announced). It runs the WATCH surface's rules
      * end to end (approval gate, premium / own-video / creator opt-out, cooldown,
      * frequency caps, one ad per address per stream per day), with three changes:
-     *   - overlay formats only: no roll, and the banner is always page-drawn, since
-     *     nothing can be burned into a WebRTC stream;
+     *   - nothing can be spliced or burned into a WebRTC stream, so the banner is
+     *     always page-drawn and a roll only ever plays as a PRE-ROLL, on its own
+     *     playlist (/m/:sid/short.m3u8) before the page starts the stream. Only for
+     *     a page that asked (`preroll`), and only a roll booked at a slot listed in
+     *     AD_LIVE_ROLL_SLOT_PERCENTS (0 and 50: mid-roll buyers reach streams too);
      *   - no content manifest and no stored duration: the stream is treated as a
      *     video of AD_LIVE_ASSUMED_SECONDS, for length targeting here and for the
      *     page's placement maths (positionPercent of that length);
@@ -1378,9 +1384,10 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       if (!c.advertiserRef || !approvedRefs.has(c.advertiserRef)) return false;
       const creative = byCampaign.get(String(c._id));
       if (servableReason(c, creative)) return false;
-      // Live: no roll. A spliced spot is impossible on a WebRTC stream, and the
-      // roadmap asks for the less disruptive overlays only.
-      if (surface === 'live' && formatOf(c).key === 'video_roll') return false;
+      // Live: a roll only as the pre-roll (see the live note at the top), for a
+      // page that can play one, booked at one of the allowed slots.
+      if (surface === 'live' && formatOf(c).key === 'video_roll'
+        && !(wantsPreroll && liveRollSlotAllowed(c))) return false;
       // A format only a page can draw goes only to a page that asked for it, and a
       // ticker only onto content its beta list allows.
       if (formatOf(c).overlayOnly && (!wantsTicker || !tickerAllowedOn(owner))) return false;
@@ -1472,6 +1479,9 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       // relative, seconds for older flights. slotSecondsFor() picks.
       slotPercent: campaign ? (campaign.slotPercent ?? null) : null,
       slotPosition: campaign ? (campaign.slotPosition ?? null) : null,
+      // A watch session learns the roll's length from the splice; a live pre-roll
+      // is never spliced, so it is set here (POST /:sid/w and /:sid/i read it).
+      ...(surface === 'live' && campaign && creative ? { adDurationSeconds: adSecondsFor(creative, campaign) } : {}),
 
       // The BANNER placement. Everything the burn and its measurement need, resolved
       // now: the creative can be edited or a campaign paused mid-playback, and a
@@ -1546,7 +1556,10 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       // lives inside the playlist exactly as a roll does — the player loads one
       // source either way and never learns which placements it carries.
       ad: campaign ? {
-        manifestUrl: `${publicBase}/m/${sid}.m3u8`,
+        // A live pre-roll has no content to be spliced into: the spot is played
+        // on its own, before the stream, from the standalone playlist.
+        manifestUrl: surface === 'live' ? `${publicBase}/m/${sid}/short.m3u8` : `${publicBase}/m/${sid}.m3u8`,
+        ...(surface === 'live' ? { preroll: true, skipAfterSeconds: skipAfterFor(adSecondsFor(creative, campaign)) } : {}),
         // Informational only — the player takes the real cut point from /m/:sid/i
         // once the splice has happened, because that is the number the manifest
         // actually landed on.
@@ -2302,7 +2315,9 @@ router.get('/:sid/short.m3u8', servingVisible, async (req, res) => {
      * 🚨 This read `!== 'shorts'` and 404'd every gate manifest. The gate fails open on
      * a load error, by design, so the spot never appeared and Post Video unlocked
      * immediately. A 404 here is silent: nothing logs, and the gate simply looks off. */
-    if (!session || (session.surface !== 'shorts' && session.surface !== 'upload')) {
+    if (!session || (session.surface !== 'shorts' && session.surface !== 'upload'
+      // A live stream's pre-roll is a standalone spot as well.
+      && !(session.surface === 'live' && session.campaignId))) {
       return res.status(404).send('expired');
     }
     if (!session.adManifestUrl) return res.status(404).send('no spot on this session');
@@ -2404,6 +2419,15 @@ router.post('/:sid/posted', servingVisible, express.json({ limit: '2kb' }), asyn
  * page that decided this for itself could offer a skip on a spot the server thinks is
  * unskippable and there would be no way to tell which was right.
  */
+/** May this roll campaign play as a live stream's pre-roll? By its booked slot:
+ *  percent bookings must be in AD_LIVE_ROLL_SLOT_PERCENTS; a legacy booking in
+ *  seconds only when it was sold as a pre-roll (0 s). */
+function liveRollSlotAllowed(c) {
+  const pct = Number(c && c.slotPercent);
+  if (c && c.slotPercent != null && Number.isFinite(pct)) return AD_LIVE_ROLL_SLOT_PERCENTS.includes(pct);
+  return (Number(c && c.slotPosition) || 0) === 0 && AD_LIVE_ROLL_SLOT_PERCENTS.includes(0);
+}
+
 function skipAfterFor(durationSeconds) {
   const d = Number(durationSeconds);
   if (!Number.isFinite(d) || d <= AD_SKIP_MIN_SPOT_SECONDS) return null;
