@@ -716,8 +716,8 @@ function playlistMedium(episodes) {
 /**
  * GET /rss/playlist/:id/card.json
  *
- * What a link preview needs: name, owner, description, cover and the newest
- * items. The OG prerender (3speak.tv's server/og-server.cjs) builds the
+ * What a link preview needs: name, owner, description, cover and the first
+ * 20 items in the playlist's own order. The OG prerender (3speak.tv's server/og-server.cjs) builds the
  * Discord / X / WhatsApp card for /playlist/:id from this. It lives here
  * because the playlists API the site reads does not pass covers or album
  * details through; this collection is the one place that has them.
@@ -750,6 +750,9 @@ router.get('/playlist/:id/card.json', async (req, res) => {
             .filter((x) => x.ep);
 
         const latestWithThumb = newestFirst.find((x) => x.ep.thumb && !x.ep.isNsfw);
+        // Listed in the playlist's own order, as the page shows it (an album's
+        // track order matters); only the cover goes by when items were added.
+        const inOrder = [...newestFirst].sort((a, b) => (a.ref.position ?? 0) - (b.ref.position ?? 0));
         const own = playlist.thumbnail || album.thumbnail || null;
 
         res.setHeader('Cache-Control', 'public, max-age=300');
@@ -771,7 +774,8 @@ router.get('/playlist/:id/card.json', async (req, res) => {
             coverFrom: own ? 'playlist' : latestWithThumb ? 'latest-item' : null,
             itemCount: newestFirst.length,
             updatedAt: playlist.updated_at || null,
-            items: newestFirst.slice(0, 20).map(({ ref, ep }) => ({
+            items: inOrder.slice(0, 20).map(({ ref, ep }) => ({
+                position: ref.position ?? null,
                 author: ref.author,
                 permlink: ref.permlink,
                 kind: ep.kind,
