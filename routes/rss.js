@@ -658,6 +658,136 @@ router.get('/cover/playlist/:id.jpg', async (req, res) => {
 });
 
 /**
+ * A public playlist with its items resolved to episodes, for the feed and the
+ * share card alike.
+ *
+ * Null when it does not exist or is private (Watch Later included): neither a
+ * feed nor a link preview may show it. `blocked` when its owner is banned or
+ * hidden, who takes the whole playlist with them; anyone else just loses their
+ * own items (`live` is what is left).
+ */
+async function loadPublicPlaylist(db, id) {
+    const playlist = await db.collection('playlists').findOne({ _id: id });
+    if (!playlist || playlist.access !== 'public' || !playlist.owner) return null;
+
+    const owner = playlist.owner;
+    const refs = (playlist.items || [])
+        .filter((i) => i && i.author && i.permlink)
+        .slice(0, 1000);
+
+    const authors = [...new Set([owner, ...refs.map((i) => i.author)])];
+    const blocked = new Set(
+        (await db.collection('contentcreators')
+            .find({ username: { $in: authors }, $or: [{ banned: true }, { hidden: true }] })
+            .project({ username: 1 }).toArray()
+        ).map((c) => c.username)
+    );
+    if (blocked.has(owner)) return { playlist, blocked: true, live: [], episodes: [] };
+    const live = refs.filter((i) => !blocked.has(i.author));
+
+    let episodes = [];
+    if (live.length > 0) {
+        const [legacyRaw, embedRaw, audioRaw] = await Promise.all([
+            db.collection('videos')
+                .find({ status: 'published', $or: live.map((i) => ({ owner: i.author, permlink: i.permlink })) })
+                .toArray(),
+            db.collection('embed-video')
+                .find({ status: 'published', $or: live.map((i) => ({ hive_author: i.author, hive_permlink: i.permlink })) })
+                .toArray(),
+            db.collection('embed-audio')
+                .find({
+                    status: 'published',
+                    $or: live.map((i) => ({ owner: i.author, post_permlink: { $in: [i.permlink, `${i.author}/${i.permlink}`] } })),
+                })
+                .toArray(),
+        ]);
+        episodes = mergeEpisodes({ embedRaw, legacyRaw, audioRaw }, PLAYLIST_FEED_LIMIT);
+    }
+    return { playlist, blocked: false, live, episodes };
+}
+
+/** The feed's medium, from what the episodes are. */
+function playlistMedium(episodes) {
+    const allAudio = episodes.length > 0 && episodes.every((e) => e.kind === 'audio');
+    const allMusic = allAudio && episodes.every((e) => e.medium === 'music');
+    return allMusic ? 'music' : allAudio ? 'podcast' : 'video';
+}
+
+/**
+ * GET /rss/playlist/:id/card.json
+ *
+ * What a link preview needs: name, owner, description, cover and the newest
+ * items. The OG prerender (3speak.tv's server/og-server.cjs) builds the
+ * Discord / X / WhatsApp card for /playlist/:id from this. It lives here
+ * because the playlists API the site reads does not pass covers or album
+ * details through; this collection is the one place that has them.
+ *
+ * Cover: the playlist's own, else the thumbnail of the item ADDED most
+ * recently. That changes as the playlist grows, which is intended: the card
+ * shows what is new in it.
+ */
+router.get('/playlist/:id/card.json', async (req, res) => {
+    const { id } = req.params;
+    if (!id || !/^[a-zA-Z0-9-]{8,64}$/.test(id)) {
+        return res.status(400).json({ error: 'Invalid playlist id' });
+    }
+    try {
+        const loaded = await loadPublicPlaylist(getDb(), id);
+        if (!loaded || loaded.blocked) return res.status(404).json({ error: 'Playlist not found' });
+        const { playlist, live, episodes } = loaded;
+
+        const album = decodePlaylistMeta(playlist.metadata)?.album || {};
+        const byKey = new Map(episodes.map((e) => [`${e.owner}/${e.permlink}`, e]));
+        // added_at is unix seconds from the indexer and a Date from older writers.
+        const addedMs = (i) => {
+            const t = i.added_at;
+            if (typeof t === 'number') return t < 1e12 ? t * 1000 : t;
+            return Date.parse(t) || 0;
+        };
+        const newestFirst = [...live]
+            .sort((a, b) => addedMs(b) - addedMs(a))
+            .map((i) => ({ ref: i, ep: byKey.get(`${i.author}/${i.permlink}`) }))
+            .filter((x) => x.ep);
+
+        const latestWithThumb = newestFirst.find((x) => x.ep.thumb && !x.ep.isNsfw);
+        const own = playlist.thumbnail || album.thumbnail || null;
+
+        res.setHeader('Cache-Control', 'public, max-age=300');
+        return res.json({
+            id,
+            name: playlist.name || `${playlist.owner} playlist`,
+            owner: playlist.owner,
+            medium: playlistMedium(episodes),
+            description: album.description || null,
+            album: (album.musicStyle || album.year || album.label || album.credits)
+                ? {
+                    musicStyle: album.musicStyle || null,
+                    year: album.year || null,
+                    label: album.label || null,
+                    credits: album.credits || null,
+                }
+                : null,
+            cover: own || (latestWithThumb && latestWithThumb.ep.thumb) || null,
+            coverFrom: own ? 'playlist' : latestWithThumb ? 'latest-item' : null,
+            itemCount: newestFirst.length,
+            updatedAt: playlist.updated_at || null,
+            items: newestFirst.slice(0, 20).map(({ ref, ep }) => ({
+                author: ref.author,
+                permlink: ref.permlink,
+                kind: ep.kind,
+                title: ep.title,
+                duration: ep.duration || 0,
+                thumb: ep.isNsfw ? null : (ep.thumb || null),
+                addedAt: new Date(addedMs(ref)).toISOString(),
+            })),
+        });
+    } catch (err) {
+        console.error(`[RSS] Error building playlist card ${id}:`, err);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+/**
  * GET /rss/playlist/:id.xml
  *
  * One feed per public playlist or album, so listeners can follow a single
@@ -676,50 +806,19 @@ router.get('/playlist/:id.xml', async (req, res) => {
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
 
     try {
-        const playlist = await db.collection('playlists').findOne({ _id: id });
+        const loaded = await loadPublicPlaylist(db, id);
         // Private playlists (and Watch Later) never get a feed
-        if (!playlist || playlist.access !== 'public' || !playlist.owner) {
+        if (!loaded) {
             return res.status(404).send(emptyFeed('Playlist not found', pageLink, 'This playlist does not exist or is private.'));
         }
-
+        const { playlist, episodes } = loaded;
         const owner = playlist.owner;
         const title = playlist.name || `${owner} playlist`;
 
-        const refs = (playlist.items || [])
-            .filter((i) => i && i.author && i.permlink)
-            .slice(0, 1000);
-
         // Banned or hidden creators drop out: the owner takes the whole feed
         // with them, anyone else just loses their episodes.
-        const authors = [...new Set([owner, ...refs.map((i) => i.author)])];
-        const blocked = new Set(
-            (await db.collection('contentcreators')
-                .find({ username: { $in: authors }, $or: [{ banned: true }, { hidden: true }] })
-                .project({ username: 1 }).toArray()
-            ).map((c) => c.username)
-        );
-        if (blocked.has(owner)) {
+        if (loaded.blocked) {
             return res.send(emptyFeed(title, pageLink, 'Playlist unavailable.'));
-        }
-        const live = refs.filter((i) => !blocked.has(i.author));
-
-        let episodes = [];
-        if (live.length > 0) {
-            const [legacyRaw, embedRaw, audioRaw] = await Promise.all([
-                db.collection('videos')
-                    .find({ status: 'published', $or: live.map((i) => ({ owner: i.author, permlink: i.permlink })) })
-                    .toArray(),
-                db.collection('embed-video')
-                    .find({ status: 'published', $or: live.map((i) => ({ hive_author: i.author, hive_permlink: i.permlink })) })
-                    .toArray(),
-                db.collection('embed-audio')
-                    .find({
-                        status: 'published',
-                        $or: live.map((i) => ({ owner: i.author, post_permlink: { $in: [i.permlink, `${i.author}/${i.permlink}`] } })),
-                    })
-                    .toArray(),
-            ]);
-            episodes = mergeEpisodes({ embedRaw, legacyRaw, audioRaw }, PLAYLIST_FEED_LIMIT);
         }
 
         const [itunesAuthor, ownerSettings] = await Promise.all([
@@ -738,9 +837,6 @@ router.get('/playlist/:id.xml', async (req, res) => {
             podcast_categories: ownerSettings?.podcast_categories,
         };
 
-        const allAudio = episodes.length > 0 && episodes.every((e) => e.kind === 'audio');
-        const allMusic = allAudio && episodes.every((e) => e.medium === 'music');
-
         res.setHeader('Cache-Control', 'public, max-age=600'); // 10 min cache
         res.send(buildFeed({
             username: owner,
@@ -750,7 +846,7 @@ router.get('/playlist/:id.xml', async (req, res) => {
             feedPath: `rss/playlist/${id}.xml`,
             pageLink,
             coverUrl: coverLink('playlist', id, playlistCoverSource(playlist)),
-            medium: allMusic ? 'music' : allAudio ? 'podcast' : 'video',
+            medium: playlistMedium(episodes),
         }));
     } catch (err) {
         console.error(`[RSS] Error generating playlist feed ${id}:`, err);
