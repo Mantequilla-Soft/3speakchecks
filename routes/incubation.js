@@ -79,9 +79,12 @@ router.get('/user/:handle/posts', (req, res) => {
 // for interleaving into the home and discover feeds.
 //
 // Nothing posted before WARMUP_FEED_SINCE ever appears (owner's call, 2026-10-09:
-// the feeds opened to everyone that day, so only what was uploaded from then on).
-// The cutoff becomes the service's age window, so `limit` counts only posts after
-// it, and the items are checked against it again in case the window is rounded.
+// the feeds opened to everyone that day, so only what was uploaded from then on),
+// and nothing older than WARMUP_FEED_MAX_AGE_DAYS (owner's call, 2026-10-17: 3
+// days, a warm-up post is a nudge for something new, not a back catalogue).
+// The later of the two becomes the service's age window, so `limit` counts only
+// posts after it, and the items are checked against it again in case the window
+// is rounded. The review queue below keeps the whole window since the start date.
 //
 // Videos flagged as AI-generated (subtitles-tags ai_generated_v2) are left out too.
 // The home rail would drop them in the browser anyway, but the shorts swipe feed
@@ -168,9 +171,13 @@ function sampleShare(items) {
     return idx.slice(0, keep).sort((a, b) => a - b).map((i) => items[i]);
 }
 const WARMUP_FEED_SINCE = new Date(process.env.WARMUP_FEED_SINCE || '2026-10-09T00:00:00Z');
+const WARMUP_FEED_MAX_AGE_DAYS = (() => {
+    const v = parseFloat(process.env.WARMUP_FEED_MAX_AGE_DAYS);
+    return Number.isFinite(v) && v > 0 ? v : 3;
+})();
 router.get('/feed', (req, res) => {
     const { limit, contentType } = req.query;
-    const sinceMs = WARMUP_FEED_SINCE.getTime();
+    const sinceMs = Math.max(WARMUP_FEED_SINCE.getTime(), Date.now() - WARMUP_FEED_MAX_AGE_DAYS * 86400000);
     const cutoffDays = Math.max((Date.now() - sinceMs) / 86400000, 0.001);
     const asked = parseFloat(req.query.maxAgeDays);
     const maxAgeDays = Number.isFinite(asked) && asked > 0 ? Math.min(asked, cutoffDays) : cutoffDays;
