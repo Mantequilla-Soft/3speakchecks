@@ -37,7 +37,9 @@
  * Also honoured here: creator opt-out. Ads run network-wide by default, but an
  * account in AD_CREATOR_PREFS_COLLECTION with adsEnabled:false is excluded from
  * the forecast as well as from serving — otherwise we would sell inventory we
- * have promised not to use.
+ * have promised not to use. An account with rollsEnabled:false takes banners and
+ * tickers but no rolls, so it stays in `slots` and is dropped from `rollSlots`,
+ * the figures a roll booking is quoted from.
  *
  * Writes ONE document (_id: 'current') into AD_INVENTORY_COLLECTION. Nothing
  * here reads or writes personal data: view-durations carries no IP and no
@@ -105,6 +107,33 @@ async function findOptedOutAccounts(db) {
   return rows.map((r) => r._id);
 }
 
+/** Accounts that take banners and tickers but no rolls. */
+async function findNoRollAccounts(db) {
+  const rows = await db.collection(AD_CREATOR_PREFS_COLLECTION)
+    .find({ adsEnabled: { $ne: false }, rollsEnabled: false }, { projection: { _id: 1 } }).toArray();
+  return rows.map((r) => r._id);
+}
+
+/** One slot's figures over `ownerFilter`. */
+async function slotRow(db, percent, since, windowDays, ownerFilter, cleanSessions) {
+  const [row] = await db.collection(WATCH_LOG)
+    .aggregate(slotPipeline(percent, since, ownerFilter), { allowDiskUse: true }).toArray();
+  const sessions = (row && row.sessions) || 0;
+  return {
+    percent,
+    kind: percent === 0 ? 'pre-roll' : 'mid-roll',
+    sessions,
+    videos: (row && row.videos) || 0,
+    perDay: Math.round((sessions / windowDays) * 10) / 10,
+    perMonth: Math.round((sessions / windowDays) * 30),
+    // Share of the CLEAN pool that actually reaches this slot. The drop from
+    // 100% at pre-roll is the honest cost of placing the ad later, and the
+    // reason we do it anyway is that an ad in front of a 6-second session is
+    // not an impression, it is a bounce.
+    reachPct: cleanSessions ? Math.round((sessions / cleanSessions) * 1000) / 10 : 0,
+  };
+}
+
 /**
  * Deliverable inventory for one slot position, in the cleaned pool.
  *
@@ -156,9 +185,10 @@ async function computeSnapshot() {
   const since = new Date(Date.now() - windowDays * DAY_MS);
   const since7 = new Date(Date.now() - 7 * DAY_MS);
 
-  const [suspects, optedOut, premiumSubscribers] = await Promise.all([
+  const [suspects, optedOut, noRolls, premiumSubscribers] = await Promise.all([
     findSuspectAccounts(db, since),
     findOptedOutAccounts(db),
+    findNoRollAccounts(db),
     // Not used in the arithmetic — surfaced so the size of the ad-free audience is
     // visible next to the numbers it will eventually subtract from.
     db.collection(PREMIUM_USERS).countDocuments({ premium: true }).catch(() => null),
@@ -216,22 +246,17 @@ async function computeSnapshot() {
 
   const slots = [];
   for (const percent of AD_SLOT_PERCENTS) {
-    const [row] = await db.collection(WATCH_LOG)
-      .aggregate(slotPipeline(percent, since, ownerFilter), { allowDiskUse: true }).toArray();
-    const sessions = (row && row.sessions) || 0;
-    slots.push({
-      percent,
-      kind: percent === 0 ? 'pre-roll' : 'mid-roll',
-      sessions,
-      videos: (row && row.videos) || 0,
-      perDay: Math.round((sessions / windowDays) * 10) / 10,
-      perMonth: Math.round((sessions / windowDays) * 30),
-      // Share of the CLEAN pool that actually reaches this slot. The drop from
-      // 100% at pre-roll is the honest cost of placing the ad later, and the
-      // reason we do it anyway is that an ad in front of a 6-second session is
-      // not an impression, it is a bounce.
-      reachPct: clean.sessions ? Math.round((sessions / clean.sessions) * 1000) / 10 : 0,
-    });
+    slots.push(await slotRow(db, percent, since, windowDays, ownerFilter, clean.sessions));
+  }
+  // The same slots without the creators who take no rolls. Only computed when
+  // there are any: otherwise it is the same pool and the same numbers.
+  let rollSlots = slots;
+  if (noRolls.length) {
+    const rollFilter = { owner: { $nin: Array.from(new Set([...excludedOwners, ...noRolls])) } };
+    rollSlots = [];
+    for (const percent of AD_SLOT_PERCENTS) {
+      rollSlots.push(await slotRow(db, percent, since, windowDays, rollFilter, clean.sessions));
+    }
   }
 
   const countries = countryRows.map((c) => ({
@@ -267,10 +292,13 @@ async function computeSnapshot() {
     excluded: {
       suspectAccounts: suspects,
       optedOutAccounts: optedOut,
+      noRollAccounts: noRolls,
       premiumSubscribers,
       premiumSessionsTracked: false,   // flips when the player starts flagging sessions
     },
     slots,
+    // What a ROLL booking is quoted from: `slots` minus the no-roll creators.
+    rollSlots,
     countries,
   };
 }
@@ -317,7 +345,7 @@ async function getSnapshot() {
  * Runs one aggregation at booking time. Returns null if it cannot be computed, and
  * the caller falls back to the snapshot rather than inventing a figure.
  */
-async function forecastPerDay({ percent, minVideoSeconds, maxVideoSeconds }) {
+async function forecastPerDay({ percent, minVideoSeconds, maxVideoSeconds, roll = false }) {
   try {
     const db = getDb();
     const windowDays = AD_INVENTORY_WINDOW_DAYS;
@@ -325,11 +353,13 @@ async function forecastPerDay({ percent, minVideoSeconds, maxVideoSeconds }) {
     // Same exclusion list the snapshot uses, so a targeted forecast and the rate
     // card are computed on the same pool and can be compared. Deliberately NOT the
     // serving allowlist, for the reason set out at the top of this file.
-    const [suspects, optedOut] = await Promise.all([
+    // A roll also skips the creators who take banners and tickers only.
+    const [suspects, optedOut, noRolls] = await Promise.all([
       findSuspectAccounts(db, since),
       findOptedOutAccounts(db),
+      roll ? findNoRollAccounts(db) : [],
     ]);
-    const excludedOwners = Array.from(new Set([...suspects.map((x) => x.owner), ...optedOut]));
+    const excludedOwners = Array.from(new Set([...suspects.map((x) => x.owner), ...optedOut, ...noRolls]));
     const ownerFilter = { owner: { $nin: excludedOwners } };
     const [row] = await db.collection(WATCH_LOG).aggregate(
       slotPipeline(percent, since, ownerFilter, { min: minVideoSeconds, max: maxVideoSeconds }),
