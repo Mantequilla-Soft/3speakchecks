@@ -27,13 +27,12 @@ const { ObjectId } = require('mongodb');
 const { getDb } = require('../utils/db');
 const { promisify } = require('util');
 const execFileP = promisify(require('child_process').execFile);
-const { hiveRpcBatch, transfersSince } = require('../utils/hive');
 const {
   ADVERTISERS_COLLECTION, AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION,
-  AD_PAYMENTS_COLLECTION, AD_PAYMENT_ACCOUNT,
+  AD_PAYMENT_ACCOUNT,
   AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_SLOT_PERCENTS, AD_LENGTH_SECONDS,
   AD_PRODUCTION_FEE_HBD, ADS_STAGE, AD_SLOT_MAX_SHARES, AD_SLOT_HOLD_HOURS, AD_DAY_CURVE_K,
-  AD_BOOKING_EXPIRY_DAYS, AD_TICKER_MAX_CHARS, AD_TICKER_MAX_SECONDS,
+  AD_TICKER_MAX_CHARS, AD_TICKER_MAX_SECONDS,
 } = require('../utils/config');
 const {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, DAY_MS, ensureAdIndexes, priceForDays, ratePerDayFor,
@@ -47,6 +46,7 @@ const {
 } = require('../utils/adFormats');
 const { findSlotConflict, slotAvailability, slotHolders } = require('../utils/adSlots');
 const { balanceOf, ledgerOf } = require('../utils/adBalance');
+const { claimCampaignPayment, getHbdPerHive } = require('../services/adPaymentClaim');
 
 /**
  * When ADS_STAGE is 'off' the whole booking surface answers 404 — not 403, not an
@@ -68,21 +68,68 @@ const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 
 /* ─── shared helpers ──────────────────────────────────────────────────── */
 
-// HBD per HIVE from the on-chain median feed, so a HIVE payment is valued the
-// same way promote.js values one. Never trust a client-supplied rate.
-async function getHbdPerHive() {
-  const [res] = await hiveRpcBatch([{
-    jsonrpc: '2.0', method: 'condenser_api.get_current_median_history_price', params: [], id: 1,
-  }]);
-  const base = parseFloat(res?.result?.base);
-  const quote = parseFloat(res?.result?.quote);
-  if (!base || !quote) return 0;
-  return base / quote;
-}
+/**
+ * The plays a booking is forecast to deliver. ONE function for the number written
+ * onto the campaign at booking (POST /campaigns) and the number quoted on the form
+ * before it (GET /forecast), so what an advertiser is shown before they book is
+ * exactly what a shortfall is later measured against.
+ *
+ * `perDay` is injectable only so the quote route can cache the video-length
+ * aggregation; booking always measures fresh.
+ */
+async function forecastForBooking({
+  fmt, formatKey, slotPercent, requestedStart, days, minVideoSeconds, maxVideoSeconds,
+  perDay: perDayFn = forecastPerDay,
+}) {
+  // What the inventory says this slot should deliver over the flight. Recorded at
+  // BOOKING time on purpose: it is the number the advertiser was shown, so it is
+  // the number a refund for under-delivery has to be measured against. Reading it
+  // at settlement instead would let a later change in traffic quietly rewrite what
+  // we had promised.
+  // 🚨 THE SHARE, not the slot. A position now carries up to AD_SLOT_MAX_SHARES
+  // advertisers and rotation splits the plays between them, so quoting the whole
+  // position is precisely the mistake that had two campaigns each promised 2322
+  // impressions, each delivering ~1161, and each automatically refunded half their
+  // money. Divided at BOOKING time because forecastImpressions is what a shortfall
+  // is later measured against — see adPayouts.js.
+  //
+  // Counted for the window this flight will actually run in, and excluding itself.
+  let shareOf = 1;
+  if (fmt.positioned && slotPercent !== null) {
+    try {
+      const w = windowFrom(requestedStart, days);
+      const { holders } = await slotHolders(getDb(), {
+        slotPercent, start: w.startAt.getTime(), end: w.endAt.getTime(), format: formatKey,
+      });
+      shareOf = Math.max(1, Math.min(AD_SLOT_MAX_SHARES, holders + 1));
+    } catch (_) { /* fall back to the undivided figure rather than none */ }
+  }
 
-function parseAsset(s) {
-  const [amount, symbol] = String(s || '').trim().split(' ');
-  return { amount: parseFloat(amount) || 0, symbol: (symbol || '').toUpperCase() };
+  // A roll does not run on the videos of creators who take banners and tickers
+  // only, so it is quoted from the pool without them (rollSlots, `roll`).
+  const roll = formatKey === 'video_roll';
+  let forecastImpressions = null;
+  try {
+    if (fmt.surface !== 'watch') {
+      // The inventory forecast counts video plays. The upload gate is not served
+      // against plays at all, so a play-based number would be a confident answer to
+      // a different question — better to record none than to quote a wrong one.
+      forecastImpressions = null;
+    } else if (minVideoSeconds || maxVideoSeconds) {
+      // Narrowed by video length, so the network-wide rate card no longer
+      // describes this booking. Measure the inventory that was actually bought.
+      const perDay = await perDayFn({ percent: slotPercent, minVideoSeconds, maxVideoSeconds, roll });
+      if (Number.isFinite(perDay)) forecastImpressions = Math.round(perDay * days);
+    } else {
+      const snap = await getSnapshot();
+      const slot = ((roll && snap?.rollSlots) || snap?.slots)?.find((x) => x.percent === slotPercent);
+      if (slot && Number.isFinite(slot.perDay)) forecastImpressions = Math.round(slot.perDay * days);
+    }
+  } catch (_) { /* no forecast on record — closeFinishedCampaigns flags it for a human */ }
+  if (Number.isFinite(forecastImpressions) && shareOf > 1) {
+    forecastImpressions = Math.round(forecastImpressions / shareOf);
+  }
+  return { forecastImpressions, shareOf };
 }
 
 function oid(v) {
@@ -464,6 +511,86 @@ router.get('/slots', featureVisible, async (req, res) => {
   }
 });
 
+/* ─── GET /advertise/forecast ─────────────────────────────────────────── */
+// The plays a booking would be quoted, BEFORE it is made: same inputs as POST
+// /campaigns, same forecastForBooking(). Read-only and needs no product, because
+// it only describes inventory the rate card already publishes.
+//
+// The video-length aggregation is a real query over the watch log, and the form
+// asks again as the advertiser types, so its answer is cached for a few minutes.
+// Booking itself still measures fresh; a few minutes of drift between the two is
+// noise against a figure built from a multi-day window.
+const FORECAST_QUOTE_TTL_MS = 10 * 60 * 1000;
+const forecastQuoteCache = new Map();
+async function cachedPerDay(args) {
+  const key = `${args.percent}|${args.minVideoSeconds || ''}|${args.maxVideoSeconds || ''}|${args.roll ? 'roll' : ''}`;
+  const hit = forecastQuoteCache.get(key);
+  if (hit && Date.now() - hit.at < FORECAST_QUOTE_TTL_MS) return hit.value;
+  const value = await forecastPerDay(args);
+  if (Number.isFinite(value)) {
+    if (forecastQuoteCache.size > 500) forecastQuoteCache.clear();
+    forecastQuoteCache.set(key, { at: Date.now(), value });
+  }
+  return value;
+}
+
+router.get('/forecast', featureVisible, async (req, res) => {
+  try {
+    const q = req.query || {};
+    const formatKey = str(q.format, 32) || DEFAULT_FORMAT;
+    if (!isBookableFormat(formatKey)) {
+      return res.status(400).json({ success: false, error: `format must be one of: ${FORMAT_KEYS.join(', ')}` });
+    }
+    const fmt = formatOf({ format: formatKey });
+    const days = Number(q.days);
+    if (!validDayCount(days)) {
+      return res.status(400).json({
+        success: false,
+        error: `days must be a whole number between ${AD_MIN_CAMPAIGN_DAYS} and ${AD_MAX_CAMPAIGN_DAYS}`,
+      });
+    }
+    // An unreadable start is quoted as "as soon as approved", which is what the
+    // booking would do with a blank one; the booking itself still refuses it.
+    let requestedStart = null;
+    if (q.startAt) {
+      const d = new Date(String(q.startAt));
+      if (!Number.isNaN(d.getTime())) requestedStart = d;
+    }
+    let slotPercent = null;
+    if (fmt.positioned) {
+      slotPercent = Number(q.slotPercent);
+      if (!AD_SLOT_PERCENTS.includes(slotPercent)) {
+        return res.status(400).json({
+          success: false,
+          error: `slotPercent must be one of: ${AD_SLOT_PERCENTS.join(', ')} (percent of the video)`,
+        });
+      }
+    }
+    const numOrNull = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+    };
+    const minVideoSeconds = numOrNull(q.minVideoSeconds);
+    const maxVideoSeconds = numOrNull(q.maxVideoSeconds);
+
+    const { forecastImpressions, shareOf } = await forecastForBooking({
+      fmt, formatKey, slotPercent, requestedStart, days, minVideoSeconds, maxVideoSeconds,
+      perDay: cachedPerDay,
+    });
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      success: true,
+      // null for formats that are not served against plays (the upload gate).
+      forecast: Number.isFinite(forecastImpressions) ? forecastImpressions : null,
+      days,
+      sharedWith: shareOf - 1,
+    });
+  } catch (err) {
+    console.error('[ad-campaigns] forecast failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
 /* ─── POST /advertise/campaigns ───────────────────────────────────────── */
 router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async (req, res) => {
   try {
@@ -625,54 +752,11 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
     const flightHbd = priceForDays(days, pricePerSecondDayHbd, spotSeconds);
     const priceHbd = Math.round((flightHbd + productionFeeHbd) * 1000) / 1000;
 
-    // What the inventory says this slot should deliver over the flight. Recorded at
-    // BOOKING time on purpose: it is the number the advertiser was shown, so it is
-    // the number a refund for under-delivery has to be measured against. Reading it
-    // at settlement instead would let a later change in traffic quietly rewrite what
-    // we had promised.
-    // 🚨 THE SHARE, not the slot. A position now carries up to AD_SLOT_MAX_SHARES
-    // advertisers and rotation splits the plays between them, so quoting the whole
-    // position is precisely the mistake that had two campaigns each promised 2322
-    // impressions, each delivering ~1161, and each automatically refunded half their
-    // money. Divided at BOOKING time because forecastImpressions is what a shortfall
-    // is later measured against — see adPayouts.js.
-    //
-    // Counted for the window this flight will actually run in, and excluding itself.
-    let shareOf = 1;
-    if (fmt.positioned && slotPercent !== null) {
-      try {
-        const w = windowFrom(requestedStart, days);
-        const { holders } = await slotHolders(getDb(), {
-          slotPercent, start: w.startAt.getTime(), end: w.endAt.getTime(), format: formatKey,
-        });
-        shareOf = Math.max(1, Math.min(AD_SLOT_MAX_SHARES, holders + 1));
-      } catch (_) { /* fall back to the undivided figure rather than none */ }
-    }
-
-    // A roll does not run on the videos of creators who take banners and tickers
-    // only, so it is quoted from the pool without them (rollSlots, `roll`).
-    const roll = formatKey === 'video_roll';
-    let forecastImpressions = null;
-    try {
-      if (fmt.surface !== 'watch') {
-        // The inventory forecast counts video plays. The upload gate is not served
-        // against plays at all, so a play-based number would be a confident answer to
-        // a different question — better to record none than to quote a wrong one.
-        forecastImpressions = null;
-      } else if (minVideoSeconds || maxVideoSeconds) {
-        // Narrowed by video length, so the network-wide rate card no longer
-        // describes this booking. Measure the inventory that was actually bought.
-        const perDay = await forecastPerDay({ percent: slotPercent, minVideoSeconds, maxVideoSeconds, roll });
-        if (Number.isFinite(perDay)) forecastImpressions = Math.round(perDay * days);
-      } else {
-        const snap = await getSnapshot();
-        const slot = ((roll && snap?.rollSlots) || snap?.slots)?.find((x) => x.percent === slotPercent);
-        if (slot && Number.isFinite(slot.perDay)) forecastImpressions = Math.round(slot.perDay * days);
-      }
-    } catch (_) { /* no forecast on record — closeFinishedCampaigns flags it for a human */ }
-    if (Number.isFinite(forecastImpressions) && shareOf > 1) {
-      forecastImpressions = Math.round(forecastImpressions / shareOf);
-    }
+    // What the inventory says this slot should deliver over the flight, recorded at
+    // BOOKING time: see forecastForBooking() for why, and why it is the share.
+    const { forecastImpressions, shareOf } = await forecastForBooking({
+      fmt, formatKey, slotPercent, requestedStart, days, minVideoSeconds, maxVideoSeconds,
+    });
 
     // Spend whatever balance they are carrying, and quote the difference. Capped at
     // the price: credit beyond what this flight costs stays on the balance for the
@@ -1229,239 +1313,16 @@ router.get('/creatives', featureVisible, async (req, res) => {
 });
 
 /* ─── POST /advertise/campaigns/:id/claim ─────────────────────────────── */
-// Verifies the on-chain payment and schedules the flight. Straight fork of
-// promote.js's claim: read the payment account's recent transfers, match the memo,
-// RESERVE each txid via the unique index before crediting anything, and value the
-// result only from what the chain says.
+// Verifies the on-chain payment and schedules the flight. The work is in
+// services/adPaymentClaim.js, shared with services/adPaymentWatch.js, which runs
+// the same claim on its own for every unpaid booking whose memo turns up on chain.
 router.post('/campaigns/:id/claim', featureVisible, express.json({ limit: '8kb' }), async (req, res) => {
   try {
-    await ensureAdIndexes();
     const id = oid(req.params.id);
     if (!id) return res.status(400).json({ success: false, error: 'Invalid campaign id' });
-
-    const db = getDb();
-    const campaign = await db.collection(AD_CAMPAIGNS_COLLECTION).findOne({ _id: id });
-    if (!campaign) return res.status(404).json({ success: false, error: 'Campaign not found' });
-    if (campaign.status === STATES.CANCELLED) {
-      return res.status(409).json({ success: false, error: 'That campaign was cancelled' });
-    }
-
-    /* 🚨 BOUNDED BY DATE, NOT BY COUNT.
-     *
-     * This read the last 1000 transfers in one call, which is the most a node will
-     * return. That is a moving window, and payouts leave the same account advertisers
-     * pay into, so every creator payout pushes older payments towards the edge of it.
-     * An advertiser who paid and came back to claim a day later could find their
-     * transfer had fallen off the end: money sent, nothing claimable, and no error
-     * that says why.
-     *
-     * The honest bound is time. A payment carrying `ad:<id>` cannot predate the
-     * campaign it names, so the scan only has to reach back to when the campaign was
-     * booked. An hour of margin covers clock skew between us and the chain, and the
-     * fallback covers a campaign with no createdAt — older than the booking expiry,
-     * so it still spans every window in which a payment could arrive and still count.
-     */
-    const bookedAtMs = Date.parse(campaign.createdAt);
-    const sinceMs = Number.isFinite(bookedAtMs)
-      ? bookedAtMs - 60 * 60 * 1000
-      : Date.now() - (AD_BOOKING_EXPIRY_DAYS + 1) * 24 * 60 * 60 * 1000;
-    const ops = await transfersSince(AD_PAYMENT_ACCOUNT, sinceMs);
-
-    const memoWanted = String(campaign.memo || `ad:${id}`).toLowerCase();
-    const matches = [];
-    for (const entry of ops) {
-      const op = entry?.[1]?.op;
-      const trxId = entry?.[1]?.trx_id;
-      if (!op || op[0] !== 'transfer' || !trxId) continue;
-      const t = op[1];
-      if (t.to !== AD_PAYMENT_ACCOUNT) continue;
-      if (String(t.memo || '').trim().toLowerCase() !== memoWanted) continue;
-      matches.push({ trxId, from: t.from, amount: t.amount });
-    }
-    if (!matches.length) {
-      return res.status(404).json({
-        success: false,
-        error: 'No matching transfer found yet',
-        expect: { to: AD_PAYMENT_ACCOUNT, memo: campaign.memo, amount: `${campaign.priceHbd.toFixed(3)} HBD` },
-      });
-    }
-
-    /* ─── who is allowed to pay ────────────────────────────────────────────
-     * A transfer only counts if it came FROM the account the campaign is booked
-     * under. Registration is deliberately unsigned — several 3Speak login methods
-     * cannot sign a message — so until this point nothing had ever proved that an
-     * applicant holds the account they claimed. Paying from it does: a transfer
-     * requires the ACTIVE key, which is strictly stronger proof than the posting
-     * signature the apply route treats as optional.
-     *
-     * So this is the ownership check, expressed as money rather than as a
-     * signature. A payment from anywhere else is refused and owed back.
-     *
-     * `campaign.hiveAccount` is written from the advertiser record at booking
-     * (routes/adCampaigns.js, campaign create), never from a request body — a
-     * client-supplied expected-payer would make this check decorative.
-     */
-    const expectedPayer = String(campaign.hiveAccount || '').trim().toLowerCase();
-    const sameAccount = (from) => !!expectedPayer && String(from || '').trim().toLowerCase() === expectedPayer;
-
-    // Reserve before crediting: a duplicate key here means another request already
-    // counted this payment, so it is skipped rather than credited twice. Refused
-    // transfers are reserved too — the unique index is what stops the same stray
-    // payment being queued for refund over and over on every claim retry.
-    const payments = db.collection(AD_PAYMENTS_COLLECTION);
-    const reserved = [];
-    const refused = [];
-    for (const m of matches) {
-      const ok = sameAccount(m.from);
-      const base = {
-        trx_id: m.trxId, campaignId: id, from: m.from, amount: m.amount, processedAt: new Date(),
-      };
-      try {
-        await payments.insertOne(ok ? { ...base, status: 'credited' } : {
-          ...base,
-          status: 'refused',
-          // An absent expected payer means the campaign has no account on it at
-          // all, which should not happen. Failing CLOSED is deliberate: crediting
-          // an unverifiable payment would defeat the whole point of the check, and
-          // the money is recorded and refundable either way.
-          reason: expectedPayer ? 'payer_mismatch' : 'advertiser_unknown',
-          expectedFrom: expectedPayer || null,
-          refundStatus: 'pending',
-          refundTo: m.from,
-          refundAmount: m.amount,
-        });
-        (ok ? reserved : refused).push(m);
-      } catch (e) {
-        if (e?.code !== 11000) throw e;
-      }
-    }
-
-    if (!reserved.length) {
-      const current = await db.collection(AD_CAMPAIGNS_COLLECTION).findOne({ _id: id });
-      const creative = current?.creativeEmbedId
-        ? await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: current.creativeEmbedId })
-        : null;
-      // Nothing creditable. Say WHICH of the two it is — "already credited" in
-      // front of somebody whose payment was just refused would be actively
-      // misleading about where their money went.
-      if (refused.length) {
-        console.warn(`[ad-campaigns] ${id} refused ${refused.length} transfer(s) from the wrong account (expected @${expectedPayer}): ${refused.map((m) => `@${m.from} ${m.amount}`).join(', ')}`);
-        return res.status(409).json({
-          success: false,
-          error: `That payment came from @${refused[0].from}, but this campaign is booked under @${campaign.hiveAccount}. Pay from @${campaign.hiveAccount} — that is how we confirm the account is yours. The transfer we received will be sent back.`,
-          refused: refused.map((m) => ({ from: m.from, amount: m.amount, willBeReturnedTo: m.from })),
-          expectedFrom: campaign.hiveAccount,
-        });
-      }
-      return res.json({ success: true, message: 'Already credited', campaign: publicCampaign(current, creative) });
-    }
-    if (refused.length) {
-      console.warn(`[ad-campaigns] ${id} refused ${refused.length} transfer(s) from the wrong account (expected @${expectedPayer})`);
-    }
-
-    const hbdPerHive = await getHbdPerHive();
-    let credited = 0;
-    /* What actually ARRIVED, in native units, alongside the HBD valuation.
-     *
-     * 🚨 `paidHbd` is a VALUATION, not a balance. It is what the flight is worth in
-     * HBD, and pricing, servability and under-delivery credit are all measured
-     * against it — but the tokens in the payout account are whatever the advertiser
-     * actually sent. Paying an HBD-denominated obligation out of a HIVE-funded
-     * campaign is not a treasury inconvenience, it is impossible: the transfer fails.
-     *
-     * So the mix is carried through to settlement and paid out IN KIND. No
-     * conversion, no exchange exposure, and creators receive exactly the asset that
-     * was paid for their inventory.
-     */
-    const assets = { ...(campaign.paidAssets || {}) };
-    for (const m of reserved) {
-      const { amount, symbol } = parseAsset(m.amount);
-      if (symbol === 'HBD') credited += amount;
-      else if (symbol === 'HIVE') credited += amount * hbdPerHive;
-      else continue;   // not valued above, so not banked here either
-      assets[symbol] = Math.round(((assets[symbol] || 0) + amount) * 1000) / 1000;
-    }
-
-    let paidHbd = Math.round(((campaign.paidHbd || 0) + credited) * 1000) / 1000;
-
-    /* ─── spend any balance they are carrying ──────────────────────────────
-     * A previous campaign that under-delivered leaves credit rather than a refund
-     * (utils/adBalance.js). This is where it gets spent — automatically, at the
-     * moment it would make a difference, because credit an advertiser has to know
-     * about and ask for is not really credit.
-     *
-     * Applied only to close a shortfall, never beyond it: overspending the balance
-     * on a flight that was already paid for would take money out of their account
-     * and give them nothing for it.
-     *
-     * Once per campaign (`creditAppliedHbd` must not already be set). That bound is
-     * what stops two concurrent claims each drawing the same balance — the worst
-     * case becomes "some credit was not spent on this booking", which is visible and
-     * recoverable, rather than "the balance went negative", which is not.
-     */
-    let creditApplied = 0;
-    if (paidHbd + 1e-6 < campaign.priceHbd && !campaign.creditAppliedHbd) {
-      const shortBy = Math.round((campaign.priceHbd - paidHbd) * 1000) / 1000;
-      const available = await balanceOf(db, campaign.advertiserRef);
-      const take = Math.min(available, shortBy);
-      if (take > 0) {
-        const applied = await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne(
-          { _id: id, creditAppliedHbd: { $exists: false } },
-          { $set: { creditAppliedHbd: take, creditAppliedAt: new Date() } },
-        );
-        if (applied.modifiedCount === 1) {
-          creditApplied = take;
-          paidHbd = Math.round((paidHbd + take) * 1000) / 1000;
-          console.log(`[ad-campaigns] ${id} applied ${take} HBD of credit for @${campaign.hiveAccount} (balance was ${available})`);
-        }
-      }
-    }
-
-    const fullyPaid = paidHbd + 1e-6 >= campaign.priceHbd;
-    const window = fullyPaid ? windowFrom(campaign.requestedStartAt, campaign.days) : {};
-
-    const update = { paidHbd, paidAssets: assets, updatedAt: new Date() };
-    if (fullyPaid) {
-      // The flight clock starts now (or at the requested start), never at booking —
-      // a campaign paid a week late should get its full run, not what is left of it.
-      update.startAt = window.startAt;
-      update.endAt = window.endAt;
-      update.status = STATES.SCHEDULED;
-    }
-
-    try {
-      await db.collection(AD_CAMPAIGNS_COLLECTION).updateOne({ _id: id }, { $set: update });
-    } catch (creditErr) {
-      // Never lose a real payment to a transient write failure — release the
-      // reservation so a retry can apply it.
-      await payments.deleteMany({ trx_id: { $in: reserved.map((m) => m.trxId) } }).catch(() => {});
-      throw creditErr;
-    }
-
-    const fresh = await db.collection(AD_CAMPAIGNS_COLLECTION).findOne({ _id: id });
-    const creative = fresh?.creativeEmbedId
-      ? await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: fresh.creativeEmbedId })
-      : null;
-    console.log(`[ad-campaigns] ${id} credited ${credited.toFixed(3)} HBD (total ${paidHbd}/${campaign.priceHbd})`);
-    res.json({
-      success: true,
-      message: fullyPaid ? 'Payment received, flight scheduled' : 'Partial payment received',
-      creditedHbd: credited,
-      // Say so when a balance covered part of it, or the numbers do not add up from
-      // the advertiser's side and it looks like they were charged the wrong amount.
-      ...(creditApplied > 0 ? {
-        creditAppliedHbd: creditApplied,
-        creditNote: `${creditApplied} HBD of credit from an earlier campaign that under-delivered was applied to this booking.`,
-      } : {}),
-      // A part-payment from the right account alongside a stray one from the wrong
-      // account still has to be told about, or the advertiser is left wondering why
-      // the total is short.
-      ...(refused.length ? {
-        refused: refused.map((m) => ({ from: m.from, amount: m.amount, willBeReturnedTo: m.from })),
-        refusedNote: `We could not count ${refused.length === 1 ? 'a transfer' : `${refused.length} transfers`} sent from another account. Pay from @${campaign.hiveAccount}; the rest will be sent back.`,
-      } : {}),
-      campaign: publicCampaign(fresh, creative),
-    });
+    const result = await claimCampaignPayment(getDb(), id);
+    const body = result.campaign ? { ...result.body, campaign: publicCampaign(result.campaign, result.creative) } : result.body;
+    res.status(result.status).json(body);
   } catch (err) {
     console.error('[ad-campaigns] claim failed:', err && err.message);
     res.status(500).json({ success: false, error: 'Internal server error' });
