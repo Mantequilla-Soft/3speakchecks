@@ -24,6 +24,7 @@ const { schedule: scheduleScheduledPosts } = require('./services/scheduledPosts'
 const { schedule: scheduleWatchRetention } = require('./services/watchRetention');
 const { scheduleRetention } = require('./services/retention');
 const adInventory = require('./services/adInventory');
+const adPaymentWatch = require('./services/adPaymentWatch');
 const susScan = require('./services/susScan');
 const podpingFeeds = require('./services/podpingFeeds');
 const adPayouts = require('./services/adPayouts');
@@ -395,6 +396,20 @@ async function startServer() {
         console.log(`Ad inventory forecast scheduled every ${AD_INVENTORY_INTERVAL_H}h (first run in 2 min)`);
     } else {
         console.log('Ad inventory forecast disabled (AD_INVENTORY_ENABLED=false)');
+    }
+
+    // Ad payments: credit unpaid bookings whose transfer has landed, without waiting
+    // for the advertiser to press "I have sent it". Main thread on purpose: claims
+    // share a per-campaign lock with the claim route.
+    if (adPaymentWatch.enabled()) {
+        const payIntervalMs = adPaymentWatch.INTERVAL_MIN * 60 * 1000;
+        setTimeout(() => {
+            adPaymentWatch.runOnce();
+            setInterval(() => adPaymentWatch.runOnce(), payIntervalMs);
+        }, 60 * 1000);   // 1 min after boot
+        console.log(`Ad payment watcher scheduled every ${adPaymentWatch.INTERVAL_MIN} min (first run in 1 min)`);
+    } else {
+        console.log('Ad payment watcher disabled');
     }
 
     // Suspicious views / ad impressions scanner: read-only aggregations, posts new
