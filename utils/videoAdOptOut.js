@@ -1,9 +1,10 @@
 /**
  * Per-video ad opt-out: a creator who carries ads in general turns them off on
- * ONE video.
+ * ONE video, or keeps only the overlays on it (banners and tickers, no rolls).
  *
  * The record of the choice is the Hive post itself. The uploader writes
- * `json_metadata["3speak"].ads = false` into the post, which the creator signs as
+ * `json_metadata["3speak"].ads = false` (no ads at all) or `.rolls = false` (no
+ * video rolls, overlays still welcome) into the post, which the creator signs as
  * part of publishing it, so nobody has to trust a claim made to this server: the
  * sync route reads the post off the chain and mirrors what it finds, and calling
  * it for someone else's video can only ever copy THEIR choice. No extra wallet
@@ -47,12 +48,21 @@ function parseMeta(raw) {
 }
 
 /**
- * Only a literal `false` is off, same rule as the account-level setting in the
- * frontend's utils/adSettings.js: anything malformed falls back to ads on.
+ * The choice a post carries: 'off' (no ads), 'no-rolls' (banners and tickers
+ * only) or null (all ads, the default). Only a literal `false` counts, same rule
+ * as the account-level setting in the frontend's utils/adSettings.js: anything
+ * malformed falls back to ads on.
  */
-function adsOffIn(meta) {
+function adModeIn(meta) {
   const ns = meta && meta[META_NS];
-  return !!ns && typeof ns === 'object' && ns.ads === false;
+  if (!ns || typeof ns !== 'object') return null;
+  if (ns.ads === false) return 'off';
+  if (ns.rolls === false) return 'no-rolls';
+  return null;
+}
+
+function adsOffIn(meta) {
+  return adModeIn(meta) === 'off';
 }
 
 /**
@@ -70,8 +80,8 @@ function assetOf(author, permlink, meta) {
 /**
  * Mirror one post's choice. `meta` is its json_metadata (string or object).
  *
- * Returns `{ owner, permlink, adsEnabled }`, or `{ refused }` when the post points
- * at an asset its author does not own.
+ * Returns `{ owner, permlink, adsEnabled, rollsEnabled, adMode }`, or `{ refused }`
+ * when the post points at an asset its author does not own.
  */
 async function applyVideoAdFlag(author, hivePermlink, meta) {
   const a = norm(author);
@@ -84,18 +94,19 @@ async function applyVideoAdFlag(author, hivePermlink, meta) {
   const coll = getDb().collection(AD_VIDEO_OPTOUTS_COLLECTION);
   const _id = keyOf(asset.owner, asset.permlink);
 
-  if (adsOffIn(parsed)) {
+  const mode = adModeIn(parsed);
+  if (mode) {
     await coll.updateOne(
       { _id },
-      { $set: { owner: asset.owner, permlink: asset.permlink, hiveAuthor: a, hivePermlink, updatedAt: new Date() } },
+      { $set: { owner: asset.owner, permlink: asset.permlink, mode, hiveAuthor: a, hivePermlink, updatedAt: new Date() } },
       { upsert: true },
     );
-    return { ...asset, adsEnabled: false };
+    return { ...asset, adsEnabled: mode !== 'off', rollsEnabled: false, adMode: mode };
   }
   // No flag means the default, ads on. Deleting rather than writing `true` keeps
   // the collection a list of exceptions, which is all the serve path reads.
   await coll.deleteOne({ _id });
-  return { ...asset, adsEnabled: true };
+  return { ...asset, adsEnabled: true, rollsEnabled: true, adMode: 'on' };
 }
 
 /**
@@ -119,12 +130,22 @@ async function syncVideoAdFlagFromChain(author, hivePermlink) {
   return applyVideoAdFlag(c.author, c.permlink, c.json_metadata);
 }
 
-/** Serve path: has this asset been opted out? A point read by _id. */
-async function videoOptedOut(owner, permlink) {
-  if (!owner || !permlink) return false;
+/**
+ * Serve path: this asset's own choice, 'off', 'no-rolls' or null (none). A point
+ * read by _id. Rows from before `mode` existed were all opt-outs, so a row
+ * without one is 'off'.
+ */
+async function videoAdMode(owner, permlink) {
+  if (!owner || !permlink) return null;
   const doc = await getDb().collection(AD_VIDEO_OPTOUTS_COLLECTION)
-    .findOne({ _id: keyOf(owner, permlink) }, { projection: { _id: 1 } });
-  return !!doc;
+    .findOne({ _id: keyOf(owner, permlink) }, { projection: { mode: 1 } });
+  if (!doc) return null;
+  return doc.mode === 'no-rolls' ? 'no-rolls' : 'off';
 }
 
-module.exports = { applyVideoAdFlag, syncVideoAdFlagFromChain, videoOptedOut, adsOffIn };
+/** Has this asset been opted out of ads entirely? */
+async function videoOptedOut(owner, permlink) {
+  return (await videoAdMode(owner, permlink)) === 'off';
+}
+
+module.exports = { applyVideoAdFlag, syncVideoAdFlagFromChain, videoAdMode, videoOptedOut, adsOffIn, adModeIn };

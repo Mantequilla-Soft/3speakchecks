@@ -278,8 +278,16 @@ const mineVouchMessage = (hiveAccount, timestamp) => ['3speak-ads', 'mine-vouch'
 // The community share is IN the signed message on purpose. It decides where money
 // goes, so a signature captured for one split must not authorise another — the same
 // reason the on/off state is in there rather than trusted from the request body.
-const prefsMessage = (hiveAccount, adsEnabled, communitySharePct, timestamp) =>
-  ['3speak-ads', 'creator-prefs', hiveAccount, adsEnabled ? 'on' : 'off',
+// The mode slot is 'on', 'off' or 'no-rolls' (banners and tickers only). A client
+// that predates 'no-rolls' never sends rollsEnabled, so it still signs 'on'/'off'.
+// 🚨 The 3Speak API server builds this same message when it signs for a creator
+// (/api/ads/opt-out-signature): change both or neither.
+const prefsMode = (adsEnabled, rollsEnabled) => {
+  if (!adsEnabled) return 'off';
+  return rollsEnabled === false ? 'no-rolls' : 'on';
+};
+const prefsMessage = (hiveAccount, adsEnabled, communitySharePct, timestamp, rollsEnabled = true) =>
+  ['3speak-ads', 'creator-prefs', hiveAccount, prefsMode(adsEnabled, rollsEnabled),
     String(communitySharePct), String(timestamp)].join('|');
 
 /**
@@ -893,10 +901,16 @@ router.get('/creator/prefs/:account', featureVisible, async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid account' });
     }
     const doc = await getDb().collection(AD_CREATOR_PREFS_COLLECTION).findOne({ _id: name });
+    const adsEnabled = doc ? doc.adsEnabled !== false : true;   // default ON
+    const rollsEnabled = doc ? doc.rollsEnabled !== false : true;
     res.json({
       success: true,
       account: name,
-      adsEnabled: doc ? doc.adsEnabled !== false : true,   // default ON
+      adsEnabled,
+      // Video rolls on top of banners and tickers. Kept as stored while ads are off,
+      // so turning ads back on offers the last choice again.
+      rollsEnabled,
+      adMode: prefsMode(adsEnabled, rollsEnabled),
       split: splitOf(doc),
       updatedAt: (doc && doc.updatedAt) || null,
     });
@@ -912,6 +926,8 @@ router.post('/creator/prefs', featureVisible, express.json({ limit: '8kb' }), as
     const b = req.body || {};
     const name = account(b.account);
     const adsEnabled = b.adsEnabled !== false;
+    // Only meaningful with ads on; an 'off' signature says nothing about rolls.
+    const rollsEnabled = !adsEnabled || b.rollsEnabled !== false;
     if (!HIVE_ACCOUNT_RE.test(name)) {
       return res.status(400).json({ success: false, error: 'Invalid account' });
     }
@@ -949,7 +965,7 @@ router.post('/creator/prefs', featureVisible, express.json({ limit: '8kb' }), as
         return res.status(401).json({
           success: false,
           error: 'Signature required',
-          expected_message: prefsMessage(name, adsEnabled, communitySharePct, '<ms>'),
+          expected_message: prefsMessage(name, adsEnabled, communitySharePct, '<ms>', rollsEnabled),
         });
       }
       const tsErr = badTimestamp(timestamp);
@@ -957,7 +973,7 @@ router.post('/creator/prefs', featureVisible, express.json({ limit: '8kb' }), as
       let verdict = { ok: false, signer: null };
       try {
         verdict = await verifyHiveAuthority({
-          message: prefsMessage(name, adsEnabled, communitySharePct, timestamp),
+          message: prefsMessage(name, adsEnabled, communitySharePct, timestamp, rollsEnabled),
           signature,
           username: name,
           allowedDelegates: AD_SIGNING_DELEGATES,
@@ -978,7 +994,8 @@ router.post('/creator/prefs', featureVisible, express.json({ limit: '8kb' }), as
         // `signedBy` is kept because "@threespeak set this on their behalf" and
         // "the account holder set this themselves" are different facts, and the
         // day someone disputes an ad running on their video is the day we need it.
-        $set: { adsEnabled, communitySharePct, signedBy, updatedAt: new Date() },
+        // rollsEnabled only when ads are on: that is the only time it was signed.
+        $set: { adsEnabled, ...(adsEnabled ? { rollsEnabled } : {}), communitySharePct, signedBy, updatedAt: new Date() },
         $setOnInsert: { createdAt: new Date() },
       },
       { upsert: true },
@@ -987,6 +1004,8 @@ router.post('/creator/prefs', featureVisible, express.json({ limit: '8kb' }), as
       success: true,
       account: name,
       adsEnabled,
+      rollsEnabled,
+      adMode: prefsMode(adsEnabled, rollsEnabled),
       signedBy,
       // Returned as the full split rather than one number, so nothing downstream
       // has to remember which side of the pool the stored figure refers to.
@@ -1038,7 +1057,10 @@ router.post('/creator/video-ads/sync', featureVisible, express.json({ limit: '2k
     if (out === null) return res.status(502).json({ success: false, error: 'Hive unreachable' });
     if (out.notFound) return res.status(404).json({ success: false, error: 'Post not found' });
     if (out.refused) return res.status(409).json({ success: false, error: out.refused });
-    res.json({ success: true, owner: out.owner, permlink: out.permlink, adsEnabled: out.adsEnabled });
+    res.json({
+      success: true, owner: out.owner, permlink: out.permlink,
+      adsEnabled: out.adsEnabled, rollsEnabled: out.rollsEnabled, adMode: out.adMode,
+    });
   } catch (err) {
     console.error('[advertise] video ads sync failed:', err && err.message);
     res.status(500).json({ success: false, error: 'Internal server error' });

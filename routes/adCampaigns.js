@@ -649,6 +649,9 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
       } catch (_) { /* fall back to the undivided figure rather than none */ }
     }
 
+    // A roll does not run on the videos of creators who take banners and tickers
+    // only, so it is quoted from the pool without them (rollSlots, `roll`).
+    const roll = formatKey === 'video_roll';
     let forecastImpressions = null;
     try {
       if (fmt.surface !== 'watch') {
@@ -659,11 +662,11 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
       } else if (minVideoSeconds || maxVideoSeconds) {
         // Narrowed by video length, so the network-wide rate card no longer
         // describes this booking. Measure the inventory that was actually bought.
-        const perDay = await forecastPerDay({ percent: slotPercent, minVideoSeconds, maxVideoSeconds });
+        const perDay = await forecastPerDay({ percent: slotPercent, minVideoSeconds, maxVideoSeconds, roll });
         if (Number.isFinite(perDay)) forecastImpressions = Math.round(perDay * days);
       } else {
         const snap = await getSnapshot();
-        const slot = snap?.slots?.find((x) => x.percent === slotPercent);
+        const slot = ((roll && snap?.rollSlots) || snap?.slots)?.find((x) => x.percent === slotPercent);
         if (slot && Number.isFinite(slot.perDay)) forecastImpressions = Math.round(slot.perDay * days);
       }
     } catch (_) { /* no forecast on record — closeFinishedCampaigns flags it for a human */ }

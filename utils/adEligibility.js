@@ -17,6 +17,10 @@
  *     them too, so nothing is sold that we have promised not to use.
  *   • The creator turned ads off on THIS video only (utils/videoAdOptOut.js).
  *
+ * A creator can also keep the overlays and refuse only the ROLLS (banners and
+ * tickers yes, a spot that interrupts the video no), for the account or for one
+ * video. That is not a refusal: the answer is `ads: true, rolls: false`, and the
+ * caller drops every roll format (video_roll, shorts_roll, the live pre-roll).
  * The premium set is read from the same `embed-users.premium` flag that
  * services/premiumSubsSync.js keeps in step with Okinoko subs every 60s, and that
  * utils/premiumBoost.js already uses for the creator ranking boost. Unlike that
@@ -30,7 +34,7 @@
  * answers "no ads" rather than risking an ad in front of a paying subscriber.
  */
 const { getDb } = require('./db');
-const { videoOptedOut } = require('./videoAdOptOut');
+const { videoAdMode } = require('./videoAdOptOut');
 const { PREMIUM_USERS_COLLECTION, AD_CREATOR_PREFS_COLLECTION, ADS_ALLOWED_OWNERS, AD_PREMIUM_OVERRIDE_ACCOUNTS , AD_SELF_VIEW_ALLOWED_ACCOUNTS } = require('./config');
 
 const TTL_MS = parseInt(process.env.AD_ELIGIBILITY_TTL_MS, 10) || 60 * 1000;
@@ -94,17 +98,31 @@ async function isPremiumViewer(username) {
   return expiresAt === null || expiresAt > Date.now();
 }
 
+/**
+ * The creator's account-wide choice for their own videos: 'on' (the default),
+ * 'no-rolls' (banners and tickers only) or 'off'. Only a literal false counts.
+ */
+async function creatorAdMode(owner) {
+  const o = norm(owner);
+  if (!o) return 'on';
+  const doc = await getDb().collection(AD_CREATOR_PREFS_COLLECTION)
+    .findOne({ _id: o }, { projection: { adsEnabled: 1, rollsEnabled: 1 } });
+  if (!doc) return 'on';
+  if (doc.adsEnabled === false) return 'off';
+  if (doc.rollsEnabled === false) return 'no-rolls';
+  return 'on';
+}
+
 /** Has this creator turned ads off on their own videos? */
 async function creatorOptedOut(owner) {
-  const o = norm(owner);
-  if (!o) return false;
-  const doc = await getDb().collection(AD_CREATOR_PREFS_COLLECTION)
-    .findOne({ _id: o }, { projection: { adsEnabled: 1 } });
-  return !!doc && doc.adsEnabled === false;
+  return (await creatorAdMode(owner)) === 'off';
 }
 
 /**
- * Should this playback carry an ad? `{ ads, reason }`.
+ * Should this playback carry an ad? `{ ads, reason, rolls, rollsReason }`.
+ *
+ * `rolls` is only meaningful when `ads` is true: false means the creator takes
+ * overlays but no rolls, and `rollsReason` says which switch did it.
  *
  * `reason` is always populated on a refusal so the caller can log or display why
  * without re-deriving it, and so "no ads because you pay for Pro" can be shown to
@@ -147,14 +165,17 @@ async function adDecision({ viewer, owner, permlink }) {
 
   // Both reads at once: they are independent point reads, and the second must not
   // add a Mongo round trip to every playback.
-  const [creatorOff, videoOff] = await Promise.all([
-    creatorOptedOut(owner),
-    videoOptedOut(owner, permlink),
+  const [creatorMode, videoMode] = await Promise.all([
+    creatorAdMode(owner),
+    videoAdMode(owner, permlink),
   ]);
-  if (creatorOff) return { ads: false, reason: 'creator_opted_out' };
-  if (videoOff) return { ads: false, reason: 'video_opted_out' };
+  if (creatorMode === 'off') return { ads: false, reason: 'creator_opted_out' };
+  if (videoMode === 'off') return { ads: false, reason: 'video_opted_out' };
+  // The stricter of the two wins: either switch saying "no rolls" is enough.
+  if (creatorMode === 'no-rolls') return { ads: true, reason: null, rolls: false, rollsReason: 'creator_no_rolls' };
+  if (videoMode === 'no-rolls') return { ads: true, reason: null, rolls: false, rollsReason: 'video_no_rolls' };
 
-  return { ads: true, reason: null };
+  return { ads: true, reason: null, rolls: true, rollsReason: null };
 }
 
-module.exports = { adDecision, isPremiumViewer, creatorOptedOut, ADS_ALLOWED_OWNERS };
+module.exports = { adDecision, isPremiumViewer, creatorOptedOut, creatorAdMode, ADS_ALLOWED_OWNERS };

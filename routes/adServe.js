@@ -1185,6 +1185,8 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // surface entirely or fire constantly depending on how fast they swipe. The two
     // surfaces keep their own cadence and do not block each other.
     if (surface === 'shorts') {
+      // A shorts spot is a roll, and this creator takes overlays only.
+      if (decision.rolls === false) return res.json({ ad: null, reason: decision.rollsReason });
       const watched = Math.max(0, parseInt(b.shortsWatched, 10) || 0);
       if (watched < AD_SHORTS_EVERY_N) {
         return res.json({ ad: null, reason: 'shorts_cadence', everyN: AD_SHORTS_EVERY_N, shortsWatched: watched });
@@ -1384,6 +1386,8 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       if (!c.advertiserRef || !approvedRefs.has(c.advertiserRef)) return false;
       const creative = byCampaign.get(String(c._id));
       if (servableReason(c, creative)) return false;
+      // The creator (or this video) takes banners and tickers but no rolls.
+      if (decision.rolls === false && formatOf(c).key === 'video_roll') return false;
       // Live: a roll only as the pre-roll (see the live note at the top), for a
       // page that can play one, booked at one of the allowed slots.
       if (surface === 'live' && formatOf(c).key === 'video_roll'
