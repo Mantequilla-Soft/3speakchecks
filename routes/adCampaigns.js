@@ -29,7 +29,7 @@ const { promisify } = require('util');
 const execFileP = promisify(require('child_process').execFile);
 const {
   ADVERTISERS_COLLECTION, AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION,
-  AD_PAYMENT_ACCOUNT,
+  AD_PAYMENT_ACCOUNT, AD_IMPRESSIONS_COLLECTION,
   AD_MIN_CAMPAIGN_DAYS, AD_MAX_CAMPAIGN_DAYS, AD_SLOT_PERCENTS, AD_LENGTH_SECONDS,
   AD_PRODUCTION_FEE_HBD, ADS_STAGE, AD_SLOT_MAX_SHARES, AD_SLOT_HOLD_HOURS, AD_DAY_CURVE_K,
   AD_TICKER_MAX_CHARS, AD_TICKER_MAX_SECONDS,
@@ -296,8 +296,44 @@ function publicCreative(cr) {
   };
 }
 
+/**
+ * How long people actually sat through each flight's spot.
+ *
+ * Only a video spot reports watch time (the /m/:sid/w beat writes `watchedSeconds` as
+ * a high-water mark); a banner or ticker is counted as shown or not, so those flights
+ * simply have no entry. "To the end" allows a second of slack, the same drift between
+ * a creative's declared length and its real one that /w already absorbs.
+ */
+async function watchStatsByCampaign(db, camps, byCampaign) {
+  const ids = camps.map((c) => c._id);
+  if (!ids.length) return new Map();
+  // Per-flight spot length, for "watched to the end". Branches only for flights that
+  // have one; anything else falls to a length nobody reaches, so it counts no full watches.
+  const branches = camps.map((c) => {
+    const len = Number(byCampaign.get(String(c._id))?.durationSeconds) || Number(c.spotSeconds) || 0;
+    return len > 0 ? { case: { $eq: ['$campaignId', c._id] }, then: Math.max(1, len - 1) } : null;
+  }).filter(Boolean);
+  const fullAt = branches.length ? { $switch: { branches, default: Infinity } } : Infinity;
+  const rows = await db.collection(AD_IMPRESSIONS_COLLECTION).aggregate([
+    { $match: { campaignId: { $in: ids }, watchedSeconds: { $gt: 0 } } },
+    {
+      $group: {
+        _id: '$campaignId',
+        avg: { $avg: '$watchedSeconds' },
+        n: { $sum: 1 },
+        full: { $sum: { $cond: [{ $gte: ['$watchedSeconds', fullAt] }, 1, 0] } },
+      },
+    },
+  ]).toArray();
+  return new Map(rows.map((r) => [String(r._id), {
+    avgSeconds: Math.round(r.avg * 10) / 10,
+    views: r.n,
+    toEndShare: r.n ? Math.round((r.full / r.n) * 1000) / 1000 : null,
+  }]));
+}
+
 /** What the advertiser is allowed to see about their own campaign. */
-function publicCampaign(c, creative) {
+function publicCampaign(c, creative, watch = null) {
   return {
     id: String(c._id),
     name: c.name,
@@ -360,12 +396,16 @@ function publicCampaign(c, creative) {
     // asks for too much money or reports a paid flight as unpaid.
     amountDueHbd: c.amountDueHbd ?? c.priceHbd ?? null,
     outstandingHbd: Math.max(0, Math.round(((c.priceHbd || 0) - (c.paidHbd || 0)) * 1000) / 1000),
-    creative: creative ? {
-      status: creative.status,
-      durationSeconds: creative.durationSeconds,
-      embedId: creative.embedId,
-      note: creative.reviewNote || null,
-    } : null,
+    // Followed through the advertiser's link, counted once per playback by /m/:sid/c,
+    // /bc and /tc. Plays without clicks is half the answer to "is this working".
+    clicks: c.clicks || 0,
+    createdAt: c.createdAt || null,
+    // The whole creative as the advertiser's own list sees it, so a flight can show
+    // WHAT it runs (the banner, the ticker line, the spot) rather than only its id.
+    creative: publicCreative(creative),
+    // Average seconds of the spot actually watched, and the share watched to the end.
+    // Null for banners and tickers, which have no watch time to report.
+    watch,
     // The single answer to "why is my campaign not running". Derived in one place
     // (adModel.servableReason) so the console can never disagree with the server.
     blockedBy: servableReason(c, creative),
@@ -868,6 +908,11 @@ router.get('/campaigns', featureVisible, async (req, res) => {
       .find({ advertiserRef: advertiser.reference }).sort({ createdAt: -1 }).limit(100).toArray();
     // Not readyOnly: a spot still in review is the thing this list exists to report.
     const byCampaign = await creativesByCampaign(db, camps, { readyOnly: false });
+    // A stats read that fails leaves the list without watch time, not without the list.
+    const watchBy = await watchStatsByCampaign(db, camps, byCampaign).catch((e) => {
+      console.error('[ad-campaigns] watch stats failed:', e && e.message);
+      return new Map();
+    });
 
     res.set('Cache-Control', 'no-store');
     res.json({
@@ -877,7 +922,9 @@ router.get('/campaigns', featureVisible, async (req, res) => {
       // they will never spend, which would make "credit instead of a refund" a way
       // of keeping the money rather than an alternative to sending it back.
       ...(await ledgerOf(db, advertiser.reference)),
-      campaigns: camps.map((c) => publicCampaign(c, byCampaign.get(String(c._id)) || null)),
+      campaigns: camps.map((c) => publicCampaign(
+        c, byCampaign.get(String(c._id)) || null, watchBy.get(String(c._id)) || null,
+      )),
     });
   } catch (err) {
     console.error('[ad-campaigns] list failed:', err && err.message);
