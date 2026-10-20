@@ -292,8 +292,44 @@ async function creativesByCampaign(db, campaigns, { readyOnly = true } = {}) {
   return out;
 }
 
+/**
+ * "Have us make the ad", by kind of ad. Each tier is either a flat fee or a price per
+ * started 5 seconds of the BOOKED length (spotSeconds), so a 12s spot is three blocks.
+ * The booked length rather than a creative's, because we are the ones making the
+ * creative and it is made to fit the slot that was bought.
+ *
+ * `formats` is what each tier can be made for: a still or a moving banner for a player
+ * banner, a commercial for the formats that run a video spot. A ticker is text the
+ * advertiser types, so nothing here applies to it.
+ *
+ * Sent to the page as-is (pricing.productionTiers) so the quote and the charge come
+ * from the same table.
+ */
+const SPOT_FORMATS = ['video_roll', 'upload_gate', 'shorts_roll'];
+const AD_PRODUCTION_TIERS = [
+  { key: 'static_banner', flatHbd: 5, formats: ['video_banner'] },
+  { key: 'animated_banner', perFiveSecondsHbd: 10, formats: ['video_banner'] },
+  { key: 'ai_commercial', perFiveSecondsHbd: 25, formats: SPOT_FORMATS },
+  { key: 'human_commercial', perFiveSecondsHbd: 40, formats: SPOT_FORMATS },
+];
+
+/**
+ * The production fee for a tier at a booked length, or null when the tier does not
+ * exist or cannot be made for that format. Same guard as priceForDays: a missing
+ * length bills the format's full slot, never zero.
+ */
+function productionFeeFor(tierKey, formatKey, spotSeconds) {
+  const tier = AD_PRODUCTION_TIERS.find((x) => x.key === tierKey);
+  if (!tier || !tier.formats.includes(formatKey)) return null;
+  if (tier.flatHbd != null) return tier.flatHbd;
+  const seconds = Number(spotSeconds);
+  const secs = Number.isFinite(seconds) && seconds > 0 ? seconds : AD_LENGTH_SECONDS;
+  return Math.ceil(secs / 5) * tier.perFiveSecondsHbd;
+}
+
 module.exports = {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, DAY_MS,
+  AD_PRODUCTION_TIERS, productionFeeFor,
   ensureAdIndexes, priceForDays, ratePerDayFor, validDayCount, windowFrom, servableReason,
   isMotionBanner,
   missingAssetFor,

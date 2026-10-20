@@ -37,6 +37,7 @@ const {
 const {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, DAY_MS, ensureAdIndexes, priceForDays, ratePerDayFor,
   validDayCount, windowFrom, servableReason, creativesByCampaign,
+  AD_PRODUCTION_TIERS, productionFeeFor,
 } = require('../utils/adModel');
 const { getSnapshot, forecastPerDay } = require('../services/adInventory');
 const { videoShapeFromManifest } = require('../utils/videoDuration');
@@ -366,6 +367,7 @@ function publicCampaign(c, creative, watch = null) {
     production: c.productionRequested ? {
       requested: true,
       brief: c.productionBrief || null,
+      tier: c.productionTier || null,
       status: c.productionStatus || 'requested',
     } : null,
     paidHbd: c.paidHbd || 0,
@@ -458,6 +460,9 @@ router.get('/pricing', featureVisible, async (req, res) => {
       slotPercents: AD_SLOT_PERCENTS,
       maxCreativeSeconds: AD_LENGTH_SECONDS,
       productionFeeHbd: AD_PRODUCTION_FEE_HBD,
+      // The kinds of ad we make, each flat or per started 5 seconds of the booked
+      // length. `productionFeeHbd` above stays for a page that predates the tiers.
+      productionTiers: AD_PRODUCTION_TIERS,
       // How long a booking holds its position before payment. Sent rather than
       // written into the page's copy, because a number in prose goes stale
       // silently: the note there used to say slots were settled at approval,
@@ -720,7 +725,6 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
         error: 'Tell us what the spot should say (at least 20 characters) so we can make it.',
       });
     }
-    const productionFeeHbd = productionRequested ? AD_PRODUCTION_FEE_HBD : 0;
 
     // Read from the advertiser, then WRITTEN ONTO THE CAMPAIGN below. An admin can
     // change someone's rate at any time, and a flight already booked must keep the
@@ -737,6 +741,24 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
         success: false,
         error: `spotSeconds must be a whole number of seconds between 1 and ${fmt.maxSeconds} for a ${fmt.label.toLowerCase()}`,
       });
+    }
+
+    // Priced by the kind of ad asked for, at the length booked above. A request with
+    // no tier comes from a page that predates the tiers and pays the old flat fee.
+    const productionTier = productionRequested ? (str(b.production?.tier, 40) || null) : null;
+    let productionFeeHbd = 0;
+    if (productionRequested) {
+      if (productionTier) {
+        productionFeeHbd = productionFeeFor(productionTier, formatKey, spotSeconds);
+        if (productionFeeHbd == null) {
+          return res.status(400).json({
+            success: false,
+            error: `We cannot make that kind of ad for a ${fmt.label.toLowerCase()}.`,
+          });
+        }
+      } else {
+        productionFeeHbd = AD_PRODUCTION_FEE_HBD;
+      }
     }
 
     // Video-length targeting. Both optional and both open-ended: 0 or absent means
@@ -826,6 +848,7 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
       pricePerSecondDayHbd,
       productionFeeHbd,
       productionRequested,
+      productionTier,
       productionBrief: productionRequested ? productionBrief : null,
       productionStatus: productionRequested ? 'requested' : null,
       // Credit from an earlier flight that under-delivered, spent HERE rather than
