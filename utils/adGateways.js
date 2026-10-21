@@ -28,6 +28,10 @@ const GATEWAY_HOSTS = [
   // anything cold, and utils/videoDuration.js already ordered it this way.
   'ipfs.3speak.tv',
   'hotipfs-3speak-1.b-cdn.net',
+  // The audio zone (Cloudflare in front of the same IPFS), behind everything else on
+  // purpose: it is here as the open-CORS fallback for pages ipfs.3speak.tv will not
+  // answer (see openCorsSiblings), not as a first choice for anyone.
+  'ipfs-audio.3speak.tv',
 ];
 
 /**
@@ -40,7 +44,7 @@ const GATEWAY_HOSTS = [
  * only consumer was a playlist validator sitting on top of a retry loop, and became
  * the bug above the day something started handing single urls to pages.
  */
-const CORS_HOSTS = ['ipfs-3speak.b-cdn.net', 'hotipfs-3speak-1.b-cdn.net'];
+const CORS_HOSTS = ['ipfs-3speak.b-cdn.net', 'hotipfs-3speak-1.b-cdn.net', 'ipfs-audio.3speak.tv'];
 
 /**
  * And the ones measured to serve content that is NOT already in their cache.
@@ -253,6 +257,18 @@ function gatewaySiblings(url) {
   }
 }
 
+/**
+ * The same object on gateways a page on `origin` CAN read, in order.
+ *
+ * For when the gateway that answered a server-side read is one this page cannot use:
+ * with both Bunny zones down every read lands on ipfs.3speak.tv, which answers only
+ * 3speak.tv and play.3speak.tv, so www, preview, dev-player and other sites got the
+ * plain video instead of a stitched one. ipfs-audio.3speak.tv answers everyone.
+ */
+function openCorsSiblings(url, origin = null) {
+  return urlsHealthFirst(gatewaySiblings(url).filter((u) => corsAllows(hostOf(u), origin)));
+}
+
 /** Do these two URLs address the same content through interchangeable gateways? */
 function sameContentScope(a, b) {
   try {
@@ -266,6 +282,7 @@ function sameContentScope(a, b) {
 }
 
 module.exports = {
+  openCorsSiblings,
   GATEWAY_HOSTS,
   CORS_HOSTS,
   COLD_CAPABLE_HOSTS,

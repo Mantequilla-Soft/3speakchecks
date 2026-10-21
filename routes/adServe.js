@@ -423,7 +423,7 @@ async function ensureSessionIndexes() {
  */
 const {
   isBrowserSafe, isRedirectSafe, browserAssetUrl, gatewaySiblings, sameContentScope, creativeManifestUrl,
-  markGatewayDown, urlsHealthFirst, startGatewayProbe,
+  markGatewayDown, urlsHealthFirst, startGatewayProbe, openCorsSiblings,
 } = require('../utils/adGateways');
 const { relayedSegment } = require('../services/adSegmentRelay');
 
@@ -458,6 +458,16 @@ async function fetchText(url) {
     }
   }
   throw firstErr || new Error('unreachable');
+}
+
+/** The same playlist from a gateway a page on `origin` can read, or null if none answers. */
+async function fetchTextFor(url, origin) {
+  for (const candidate of openCorsSiblings(url, origin)) {
+    try {
+      return await fetchOnce(candidate);
+    } catch (_) { /* the next one */ }
+  }
+  return null;
 }
 
 const isMaster = (text) => /#EXT-X-STREAM-INF/i.test(text);
@@ -1700,7 +1710,7 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
       target = abs.href;
     }
 
-    const content = await fetchText(target);
+    let content = await fetchText(target);
     // We may have read this through a fallback gateway. That is fine for reading and
     // fatal for serving: every URL below is absolutised against content.url and handed
     // to a browser, so if the gateway that answered will not send CORS headers there is
@@ -1713,7 +1723,13 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
     // what the gateway sees.
     const pageOrigin = str(req.headers.origin, 200) || null;
     if (!isBrowserSafe(content.url, pageOrigin)) {
-      throw new Error(`gateway ${new URL(content.url).hostname} sends no CORS headers for ${pageOrigin || 'this page'}`);
+      // Read it again from a gateway this page CAN use (ipfs-audio.3speak.tv answers
+      // everyone), so the segments below are absolutised onto that one instead.
+      const readable = await fetchTextFor(content.url, pageOrigin);
+      if (!readable) {
+        throw new Error(`gateway ${new URL(content.url).hostname} sends no CORS headers for ${pageOrigin || 'this page'}`);
+      }
+      content = readable;
     }
     const publicBase = publicBaseOf(req);
     res.set('Content-Type', 'application/vnd.apple.mpegurl');
