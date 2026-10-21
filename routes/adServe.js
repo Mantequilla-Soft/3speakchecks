@@ -48,7 +48,7 @@ const {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, servableReason, ensureAdIndexes, slotSecondsFor,
   creativesByCampaign,
 } = require('../utils/adModel');
-const { knownShape, warmShape, differs, conformedSegment } = require('../services/adConform');
+const { knownShape, shapeWithin, targetFor, conformedSegment, conformOn } = require('../services/adConform');
 const { formatOf } = require('../utils/adFormats');
 const { burnSegment } = require('../services/adBurner');
 const { isDatacenterIp } = require('../utils/datacenterIp');
@@ -423,7 +423,7 @@ async function ensureSessionIndexes() {
  */
 const {
   isBrowserSafe, isRedirectSafe, browserAssetUrl, gatewaySiblings, sameContentScope, creativeManifestUrl,
-  markGatewayDown, urlsHealthFirst, startGatewayProbe,
+  markGatewayDown, urlsHealthFirst, startGatewayProbe, openCorsSiblings,
 } = require('../utils/adGateways');
 const { relayedSegment } = require('../services/adSegmentRelay');
 
@@ -458,6 +458,16 @@ async function fetchText(url) {
     }
   }
   throw firstErr || new Error('unreachable');
+}
+
+/** The same playlist from a gateway a page on `origin` can read, or null if none answers. */
+async function fetchTextFor(url, origin) {
+  for (const candidate of openCorsSiblings(url, origin)) {
+    try {
+      return await fetchOnce(candidate);
+    } catch (_) { /* the next one */ }
+  }
+  return null;
 }
 
 const isMaster = (text) => /#EXT-X-STREAM-INF/i.test(text);
@@ -1700,7 +1710,7 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
       target = abs.href;
     }
 
-    const content = await fetchText(target);
+    let content = await fetchText(target);
     // We may have read this through a fallback gateway. That is fine for reading and
     // fatal for serving: every URL below is absolutised against content.url and handed
     // to a browser, so if the gateway that answered will not send CORS headers there is
@@ -1713,7 +1723,13 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
     // what the gateway sees.
     const pageOrigin = str(req.headers.origin, 200) || null;
     if (!isBrowserSafe(content.url, pageOrigin)) {
-      throw new Error(`gateway ${new URL(content.url).hostname} sends no CORS headers for ${pageOrigin || 'this page'}`);
+      // Read it again from a gateway this page CAN use (ipfs-audio.3speak.tv answers
+      // everyone), so the segments below are absolutised onto that one instead.
+      const readable = await fetchTextFor(content.url, pageOrigin);
+      if (!readable) {
+        throw new Error(`gateway ${new URL(content.url).hostname} sends no CORS headers for ${pageOrigin || 'this page'}`);
+      }
+      content = readable;
     }
     const publicBase = publicBaseOf(req);
     res.set('Content-Type', 'application/vnd.apple.mpegurl');
@@ -1737,6 +1753,7 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
 
     let text = absolutise(content.text, content.url);
     const mark = {};
+    let warmSpot = null;
 
     // BANNER FIRST — see applyBanner. Its window is content-relative, and splicing a
     // roll in ahead of it would move it.
@@ -1802,23 +1819,37 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
         if (!isRedirectSafe(s.url)) relayedSegment(s.url).catch(() => {});
       }
 
-      /* 🚨 DOES THIS SPOT'S AUDIO MATCH THE VIDEO IT IS GOING INTO?
+      /* 🚨 WHAT IS THE SPOT RE-ENCODED TO? (see targetFor: the video's shape, a
+       * landscape frame for a portrait video, or only its audio for the gain)
        *
-       * Both answers come from the cache only. Probing costs a round trip to the CDN
-       * and this is the request the viewer is waiting on to start playing, so an
-       * unknown rate means serve exactly as before and warm the answer in the
-       * background — the next playback of that video gets it right. Being wrong here
-       * costs one Chrome viewer one spot; blocking here costs everybody the start of
-       * their video. */
+       * Decided here when both shapes are already in memory. When they are not, as for
+       * the first viewer of a video after a restart, this reply does NOT wait for a
+       * probe: the viewer is waiting on it to start playing. The playlist still routes
+       * every spot segment through us (it would anyway, for the gain), records what to
+       * probe, and the decision is made when the first spot segment is asked for (see
+       * lateConformTarget). The probe starts now, so it is done long before a mid-roll
+       * is reached, and a pre-roll waits at most LATE_PROBE_MS for it. */
       const contentShape = knownShape(content.url);
       const adShape = knownShape(session.adManifestUrl);
-      if (contentShape === undefined) warmShape(content.url);
-      if (adShape === undefined) warmShape(session.adManifestUrl);
-      const conform = differs(contentShape, adShape);
+      const shapesKnown = contentShape !== undefined && adShape !== undefined;
+      const target = shapesKnown ? targetFor(contentShape, adShape, { viewer: session.viewer }) : null;
+      const conform = shapesKnown ? !!target : conformOn;
       /* The segment route obeys this rather than deciding again: the playlist it was
        * reached from is what says whether those bytes need re-encoding, and the shape
        * is recorded so the encode and the cache key cannot drift from the decision. */
-      mark.adConformTo = conform ? contentShape : null;
+      mark.adConformTo = target;
+      mark.adConformFrom = !shapesKnown && conform ? { content: content.url, ad: session.adManifestUrl } : null;
+      // Encoded in the background once this reply's record is written (below), so a
+      // spot that has not met this shape before is ready by the time the playhead
+      // reaches it. Cached after that. After the write, because an unknown shape is
+      // recorded as `adConformTo: null` and would otherwise erase a decision made here.
+      if (conform) {
+        warmSpot = async () => {
+          const t = target || await lateConformTarget({ ...session, ...mark, sid });
+          if (!t) return;
+          for (const s of adSegments) await conformedSegment(s.url, t).catch(() => null);
+        };
+      }
 
       const spliced = splice(text, content.url, adSegments, session, sid, publicBase, conform);
       text = spliced.text;
@@ -1832,6 +1863,7 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
       await getDb().collection(SESSIONS).updateOne({ sid }, { $set: mark })
         .catch(() => { /* the manifest still serves without it */ });
     }
+    if (warmSpot) warmSpot().catch(() => {});
     return res.send(text);
   } catch (err) {
     console.error('[ad-serve] manifest failed:', err && err.message);
@@ -2690,8 +2722,44 @@ router.post('/:sid/dismiss', servingVisible, express.json({ limit: '1kb' }), asy
  * the redirect still happens. A spot that fails to render on one browser is a smaller
  * failure than a segment that does not arrive at all.
  */
+// How long a spot segment waits on a shape probe the playlist started (see above).
+// Normally a Mongo hit or a finished ffprobe; this only bounds a gateway that hangs.
+const LATE_PROBE_MS = 5000;
+
+/**
+ * The re-encode target for a session whose playlist went out before the shapes were
+ * known. Decided ONCE and saved on the session, so every segment of the spot is
+ * encoded the same way: a spot whose segments disagree would change shape part way
+ * through, which is the thing conforming exists to prevent. A probe that has not
+ * answered in time decides with what there is (the gain alone), for the same reason.
+ */
+async function lateConformTarget(session) {
+  const from = session.adConformFrom;
+  if (!from) return null;
+  const [c, a] = await Promise.all([
+    shapeWithin(from.content, LATE_PROBE_MS),
+    shapeWithin(from.ad, LATE_PROBE_MS),
+  ]);
+  const target = targetFor(c || null, a || null, { viewer: session.viewer });
+  // First writer wins; a later caller reading a saved target never gets here.
+  const r = await getDb().collection(SESSIONS).findOneAndUpdate(
+    { sid: session.sid, adConformTo: null },
+    { $set: { adConformTo: target } },
+    { returnDocument: 'after' },
+  ).catch(() => null);
+  const saved = r && (r.value !== undefined ? r.value : r);
+  if (saved && saved.adConformTo) return saved.adConformTo;
+  if (!saved) {
+    // Someone else decided first: use theirs.
+    const cur = await getDb().collection(SESSIONS).findOne({ sid: session.sid }, { projection: { adConformTo: 1 } })
+      .catch(() => null);
+    if (cur && cur.adConformTo) return cur.adConformTo;
+  }
+  return target;
+}
+
 async function sendSegment(res, seg, session) {
-  const target = session.adConformTo || null;
+  const target = session.adConformTo || await lateConformTarget(session).catch(() => null);
   if (target) {
     const file = await conformedSegment(seg.url, target).catch(() => null);
     if (file) {
