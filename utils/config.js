@@ -981,6 +981,15 @@ module.exports = {
      * 44100 — so without this a spot silently fails to render on Chrome whenever the
      * two disagree. Off means the old behaviour: serve the creative untouched. */
     AD_AUDIO_NORMALISE: process.env.AD_AUDIO_NORMALISE !== 'false',
+    /* How much quieter a spot plays than its creative, in dB (negative is quieter).
+     * Spots are mixed louder than the videos they interrupt; 0 turns it off. Applied
+     * in the same re-encode as the conform, so it only runs while that is on. */
+    AD_GAIN_DB: Number.isFinite(parseFloat(process.env.AD_GAIN_DB)) ? parseFloat(process.env.AD_GAIN_DB) : -2,
+    /* A landscape spot going into a PORTRAIT video is encoded landscape rather than
+     * letterboxed into the portrait frame, so it fills the player's 16:9 box instead of
+     * playing as a postage stamp inside the pillarbox. 'all', or a comma list of viewer
+     * accounts while it is being tried out; empty is off. */
+    AD_LANDSCAPE_ON_PORTRAIT: (process.env.AD_LANDSCAPE_ON_PORTRAIT || '').trim().toLowerCase(),
     AD_BURN_CACHE_MAX_MB: parseInt(process.env.AD_BURN_CACHE_MAX_MB) || 2048,
     AD_BURN_TIMEOUT_MS: parseInt(process.env.AD_BURN_TIMEOUT_MS) || 30000,
     // Banner geometry, as a percentage of the frame it is composited into — the same

@@ -48,7 +48,7 @@ const {
   STATES, CREATIVE_STATES, CREATIVE_KINDS, servableReason, ensureAdIndexes, slotSecondsFor,
   creativesByCampaign,
 } = require('../utils/adModel');
-const { knownShape, warmShape, differs, conformedSegment } = require('../services/adConform');
+const { knownShape, warmShape, targetFor, conformedSegment } = require('../services/adConform');
 const { formatOf } = require('../utils/adFormats');
 const { burnSegment } = require('../services/adBurner');
 const { isDatacenterIp } = require('../utils/datacenterIp');
@@ -1814,11 +1814,21 @@ router.get('/:sid.m3u8', servingVisible, async (req, res) => {
       const adShape = knownShape(session.adManifestUrl);
       if (contentShape === undefined) warmShape(content.url);
       if (adShape === undefined) warmShape(session.adManifestUrl);
-      const conform = differs(contentShape, adShape);
+      /* What the spot is re-encoded to: the video's shape, a landscape frame for a
+       * portrait video, or only its audio for the gain (see targetFor). */
+      const target = targetFor(contentShape, adShape, { viewer: session.viewer });
+      const conform = !!target;
       /* The segment route obeys this rather than deciding again: the playlist it was
        * reached from is what says whether those bytes need re-encoding, and the shape
        * is recorded so the encode and the cache key cannot drift from the decision. */
-      mark.adConformTo = conform ? contentShape : null;
+      mark.adConformTo = target;
+      // Encoded now, one at a time in the background, so a spot that has not met this
+      // shape before is ready by the time the playhead reaches it. Cached after that.
+      if (target) {
+        (async () => {
+          for (const s of adSegments) await conformedSegment(s.url, target).catch(() => null);
+        })();
+      }
 
       const spliced = splice(text, content.url, adSegments, session, sid, publicBase, conform);
       text = spliced.text;

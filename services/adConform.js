@@ -49,7 +49,7 @@ const { promisify } = require('util');
 const execFileP = promisify(execFile);
 
 const {
-  AD_BURN_CACHE_DIR, AD_BURN_TIMEOUT_MS, AD_AUDIO_NORMALISE,
+  AD_BURN_CACHE_DIR, AD_BURN_TIMEOUT_MS, AD_AUDIO_NORMALISE, AD_GAIN_DB, AD_LANDSCAPE_ON_PORTRAIT,
 } = require('../utils/config');
 
 const AD_CONFORM = AD_AUDIO_NORMALISE;
@@ -152,11 +152,91 @@ function warmRate(url) {
   profileOf(url).catch(() => { /* it will be tried again next time */ });
 }
 
+/* H.264 level limits (Table A-1): max frame size in macroblocks, and macroblocks per
+ * second. Keyed by ffprobe's integer level. */
+const LEVEL_LIMITS = {
+  10: { fs: 99, mbps: 1485 }, 11: { fs: 396, mbps: 3000 }, 12: { fs: 396, mbps: 6000 },
+  13: { fs: 396, mbps: 11880 }, 20: { fs: 396, mbps: 11880 }, 21: { fs: 792, mbps: 19800 },
+  22: { fs: 1620, mbps: 20250 }, 30: { fs: 1620, mbps: 40500 }, 31: { fs: 3600, mbps: 108000 },
+  32: { fs: 5120, mbps: 216000 }, 40: { fs: 8192, mbps: 245760 }, 41: { fs: 8192, mbps: 245760 },
+  42: { fs: 8704, mbps: 522240 }, 50: { fs: 22080, mbps: 589824 }, 51: { fs: 36864, mbps: 983040 },
+  52: { fs: 36864, mbps: 2073600 },
+};
+
+/** Is the landscape-on-portrait encode on for this viewer? See AD_LANDSCAPE_ON_PORTRAIT. */
+function landscapeAllowedFor(viewer) {
+  if (!AD_LANDSCAPE_ON_PORTRAIT) return false;
+  if (AD_LANDSCAPE_ON_PORTRAIT === 'all') return true;
+  const v = String(viewer || '').toLowerCase();
+  return !!v && AD_LANDSCAPE_ON_PORTRAIT.split(',').map((s) => s.trim()).includes(v);
+}
+
+/**
+ * The shape a LANDSCAPE spot is encoded at when it goes into a PORTRAIT video, or null
+ * when that does not apply.
+ *
+ * Letterboxing it into the video's own frame is what made it a postage stamp: the
+ * player shows a portrait video pillarboxed in a 16:9 box, and the spot was then
+ * letterboxed again inside that pillar (a 268x480 video gave the spot 268x151 pixels
+ * of picture). Encoded landscape, it fills the box like any landscape video.
+ *
+ * The join still carries no codec change: profile, level and audio rate are the
+ * video's, and only the resolution differs, which is what every quality switch in an
+ * HLS ladder already does inside one SourceBuffer. The size is the video's long side
+ * as the height (a "480p" portrait video gets a 480p landscape spot), never taller
+ * than the creative, and shrunk until it fits the video's level, so the stream never
+ * claims a level it exceeds.
+ */
+function landscapeTarget(content, spot) {
+  if (!content || !spot) return null;
+  const { width: cw, height: ch } = content;
+  const { width: sw, height: sh } = spot;
+  if (!(cw > 0 && ch > 0 && sw > 0 && sh > 0)) return null;
+  if (ch <= cw || sw <= sh) return null;
+  const aspect = sw / sh;
+  const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+  const lim = LEVEL_LIMITS[content.level];
+  const fits = (w, h) => {
+    // Level unknown: no more pixels than the video itself has, which its level allowed.
+    if (!lim) return w * h <= cw * ch;
+    const mbW = Math.ceil(w / 16);
+    const mbH = Math.ceil(h / 16);
+    const maxDim = Math.sqrt(8 * lim.fs);
+    // 30 fps assumed for the rate limit, which is what the creatives are made at.
+    return mbW * mbH <= lim.fs && mbW <= maxDim && mbH <= maxDim && mbW * mbH * 30 <= lim.mbps;
+  };
+  let h = Math.min(ch, sh);
+  while (h > 64 && !fits(even(h * aspect), even(h))) h -= 8;
+  if (!fits(even(h * aspect), even(h))) return null;
+  return { ...content, width: even(h * aspect), height: even(h) };
+}
+
+/**
+ * What this spot is re-encoded to before it is served, or null to serve it untouched.
+ *
+ * - a portrait video and a landscape spot, for a viewer it is on for: landscapeTarget()
+ * - any other shape mismatch: the video's exact shape, letterboxed, as before
+ * - shapes that match, or are not probed yet: the audio only, for the gain, with the
+ *   video copied through (`gainOnly`), so the spot is equally quiet on every playback
+ */
+function targetFor(content, spot, { viewer } = {}) {
+  if (!AD_CONFORM) return null;
+  const wide = landscapeAllowedFor(viewer) ? landscapeTarget(content, spot) : null;
+  if (wide) return wide;
+  if (differs(content, spot)) return content;
+  return AD_GAIN_DB ? { gainOnly: true } : null;
+}
+
 /** ffprobe's integer level to the string x264 wants: 32 -> "3.2", 50 -> "5.0". */
 function levelArg(level) {
   if (!Number.isFinite(level) || level <= 0) return null;
   return (Math.floor(level / 10) + '.' + (level % 10));
 }
+
+// Encodes in flight by cache key. The playlist warms a spot's segments in the
+// background while the player may already be asking for the first of them; both must
+// share one ffmpeg, or the two would write the same temp file over each other.
+const inflight = new Map();
 
 /**
  * A copy of one spot segment encoded to the content's shape, or null if that failed.
@@ -173,8 +253,10 @@ function levelArg(level) {
  */
 async function conformedSegment(segmentUrl, target) {
   if (!AD_CONFORM || !segmentUrl || !target) return null;
+  const gainOnly = target.gainOnly === true;
   const { width, height, profile, level, sampleRate } = target;
-  if (!(width > 0 && height > 0)) return null;
+  if (!gainOnly && !(width > 0 && height > 0)) return null;
+  if (gainOnly && !AD_GAIN_DB) return null;
   await ensureDir();
 
   const lvl = levelArg(level);
@@ -189,26 +271,41 @@ async function conformedSegment(segmentUrl, target) {
     : profile.includes('high') ? 'high'
     : profile.includes('main') ? 'main'
     : 'high';
-  const key = `cf-${keyOf(segmentUrl)}-${width}x${height}-${prof}-${lvl || 'auto'}-${sampleRate || 'na'}`;
+  // The gain is part of the key, so changing AD_GAIN_DB re-encodes instead of serving
+  // spots at the old level; at 0 the keys are the ones written before it existed.
+  const gainKey = AD_GAIN_DB ? `-g${AD_GAIN_DB}` : '';
+  const key = gainOnly
+    ? `cg-${keyOf(segmentUrl)}${gainKey}`
+    : `cf-${keyOf(segmentUrl)}-${width}x${height}-${prof}-${lvl || 'auto'}-${sampleRate || 'na'}${gainKey}`;
   const out = path.join(CACHE_DIR, `${key}.ts`);
   try {
     const st = await fsp.stat(out);
     if (st.size > 0) return out;
   } catch (_) { /* not encoded yet */ }
+  if (inflight.has(key)) return inflight.get(key);
 
   const tmp = path.join(CACHE_DIR, `.${key}.tmp.ts`);
-  const args = [
-    '-hide_banner', '-loglevel', 'error', '-y',
-    '-i', segmentUrl,
-    '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease,`
-      + `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
-    '-c:v', 'libx264', '-profile:v', prof, '-pix_fmt', 'yuv420p',
-    '-preset', 'veryfast', '-crf', '23',
-  ];
-  if (lvl) args.push('-level:v', lvl);
+  const gain = AD_GAIN_DB ? ['-af', `volume=${AD_GAIN_DB}dB`] : [];
+  const args = ['-hide_banner', '-loglevel', 'error', '-y', '-i', segmentUrl];
+  if (gainOnly) {
+    // Nothing about the shape needs changing, so the picture is copied through and
+    // only the audio is re-encoded, at its own rate and channel count.
+    args.push('-c:v', 'copy', ...gain, '-c:a', 'aac', '-b:a', '128k');
+  } else {
+    args.push(
+      '-vf', `scale=${width}:${height}:force_original_aspect_ratio=decrease,`
+        + `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
+      '-c:v', 'libx264', '-profile:v', prof, '-pix_fmt', 'yuv420p',
+      '-preset', 'veryfast', '-crf', '23',
+    );
+    if (lvl) args.push('-level:v', lvl);
+    args.push(
+      ...gain,
+      '-c:a', 'aac', '-ac', '2', '-b:a', '128k',
+      ...(sampleRate > 0 ? ['-ar', String(sampleRate)] : []),
+    );
+  }
   args.push(
-    '-c:a', 'aac', '-ac', '2', '-b:a', '128k',
-    ...(sampleRate > 0 ? ['-ar', String(sampleRate)] : []),
     // Keep the original timestamps. The stitched playlist declares this segment's
     // length from the creative's own manifest, and re-basing the clock here would put
     // the declared and real durations even further apart than they already are.
@@ -216,17 +313,25 @@ async function conformedSegment(segmentUrl, target) {
     '-f', 'mpegts', tmp,
   );
 
-  try {
-    await execFileP('ffmpeg', args, { timeout: CONFORM_TIMEOUT_MS, maxBuffer: 1 << 20 });
-    const st = await fsp.stat(tmp);
-    if (!st.size) throw new Error('ffmpeg produced nothing');
-    await fsp.rename(tmp, out);
-    return out;
-  } catch (err) {
-    console.error('[ad-conform] encode failed:', err && err.message);
-    await fsp.unlink(tmp).catch(() => {});
-    return null;
-  }
+  const job = (async () => {
+    try {
+      await execFileP('ffmpeg', args, { timeout: CONFORM_TIMEOUT_MS, maxBuffer: 1 << 20 });
+      const st = await fsp.stat(tmp);
+      if (!st.size) throw new Error('ffmpeg produced nothing');
+      await fsp.rename(tmp, out);
+      return out;
+    } catch (err) {
+      console.error('[ad-conform] encode failed:', err && err.message);
+      await fsp.unlink(tmp).catch(() => {});
+      return null;
+    } finally {
+      inflight.delete(key);
+    }
+  })();
+  inflight.set(key, job);
+  return job;
 }
 
-module.exports = { profileOf, knownShape: knownRate, warmShape: warmRate, differs, conformedSegment };
+module.exports = {
+  profileOf, knownShape: knownRate, warmShape: warmRate, differs, targetFor, landscapeTarget, conformedSegment,
+};
