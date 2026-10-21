@@ -1436,7 +1436,19 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // ads at once. They are picked independently so a banner is never displaced by a
     // roll that happened to sort first.
     const pickFor = (key) => eligible.find((c) => formatOf(c).key === key) || null;
-    const campaign = pickFor('video_roll');
+    /* A stream shows ONE roll, before it starts, so on live the earliest booked
+     * position wins: a buyer of the 0% slot bought the pre-roll and comes before one
+     * whose 75% slot is playing there as a bonus. Least-delivered still decides among
+     * rolls booked at the same position (the sort is stable). */
+    const liveSlotOf = (c) => {
+      const pct = Number(c.slotPercent);
+      if (c.slotPercent != null && Number.isFinite(pct)) return pct;
+      return (Number(c.slotPosition) || 0) === 0 ? 0 : 100;
+    };
+    const campaign = surface === 'live'
+      ? (eligible.filter((c) => formatOf(c).key === 'video_roll')
+        .sort((a, b2) => liveSlotOf(a) - liveSlotOf(b2))[0] || null)
+      : pickFor('video_roll');
     const bannerCampaign = pickFor('video_banner');
     const tickerCampaign = pickFor('video_ticker');
     if (!campaign && !bannerCampaign && !tickerCampaign) return res.json({ ad: null, reason: 'no_eligible_campaign' });
