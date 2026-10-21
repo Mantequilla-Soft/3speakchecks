@@ -78,9 +78,7 @@ async function ensureDir() {
  * master playlist, picks a variant and stops once it has the stream headers, which is
  * far less than downloading a segment to inspect it.
  */
-async function profileOf(url) {
-  if (!url) return null;
-  if (memo.has(url)) return memo.get(url);
+async function probeShape(url) {
 
   const key = keyOf(url);
   try {
@@ -123,6 +121,30 @@ async function profileOf(url) {
     .updateOne({ _id: key }, { $set: { url, shape, at: new Date() } }, { upsert: true })
     .catch(() => { /* the in-process memo still holds it */ });
   return shape;
+}
+
+// Probes in flight by url, so the playlist's background probe and a segment that has
+// to wait for it share one ffprobe instead of starting a second.
+const probing = new Map();
+
+async function profileOf(url) {
+  if (!url) return null;
+  if (memo.has(url)) return memo.get(url);
+  if (probing.has(url)) return probing.get(url);
+  const job = probeShape(url).finally(() => probing.delete(url));
+  probing.set(url, job);
+  return job;
+}
+
+/** The shape, waiting at most `ms` for a probe; `undefined` if none answered in time. */
+async function shapeWithin(url, ms) {
+  let timer = null;
+  const late = new Promise((resolve) => { timer = setTimeout(() => resolve(undefined), ms); });
+  try {
+    return await Promise.race([profileOf(url).catch(() => null), late]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -333,5 +355,6 @@ async function conformedSegment(segmentUrl, target) {
 }
 
 module.exports = {
-  profileOf, knownShape: knownRate, warmShape: warmRate, differs, targetFor, landscapeTarget, conformedSegment,
+  profileOf, shapeWithin, knownShape: knownRate, warmShape: warmRate, differs, targetFor, landscapeTarget,
+  conformedSegment, conformOn: AD_CONFORM,
 };
