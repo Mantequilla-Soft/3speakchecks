@@ -1402,6 +1402,9 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
       // page that can play one, booked at one of the allowed slots.
       if (surface === 'live' && formatOf(c).key === 'video_roll'
         && !(wantsPreroll && liveRollSlotAllowed(c))) return false;
+      // Live: no banners. A stream gets its opening roll and the ticker only (owner,
+      // 2026-10-21); a banner over a live picture covers what is happening now.
+      if (surface === 'live' && formatOf(c).key === 'video_banner') return false;
       // A format only a page can draw goes only to a page that asked for it, and a
       // ticker only onto content its beta list allows.
       if (formatOf(c).overlayOnly && (!wantsTicker || !tickerAllowedOn(owner))) return false;
