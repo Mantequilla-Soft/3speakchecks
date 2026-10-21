@@ -605,20 +605,40 @@ function adSecondsFor(creative, campaign) {
 
 const extinfSeconds = (seg) => parseFloat((String(seg.extinf).match(/#EXTINF:\s*([\d.]+)/i) || [])[1]) || 0;
 
-async function loadAdSegments(adManifestUrl, trimToSeconds = null) {
+/**
+ * The creative's renditions, HIGHEST bandwidth first, each with its own
+ * #EXT-X-STREAM-INF line. Empty when the creative's manifest is not a master.
+ * An index into this list is what `?v=` means on the standalone spot's urls.
+ */
+async function adVariants(adManifestUrl) {
   const master = await fetchText(adManifestUrl);
-  let mediaUrl = master.url;
+  const variants = [];
   if (isMaster(master.text)) {
     const lines = master.text.split(/\r?\n/);
-    let best = null;
     for (let i = 0; i < lines.length; i += 1) {
       if (!/^#EXT-X-STREAM-INF/i.test(lines[i])) continue;
       const bw = parseInt((lines[i].match(/BANDWIDTH=(\d+)/i) || [])[1], 10) || 0;
       const uri = (lines[i + 1] || '').trim();
-      if (uri && !uri.startsWith('#') && (!best || bw > best.bw)) best = { bw, uri };
+      if (uri && !uri.startsWith('#')) variants.push({ bw, inf: lines[i].trim(), url: new URL(uri, master.url).href });
     }
-    if (!best) throw new Error('no variant in creative manifest');
-    mediaUrl = new URL(best.uri, master.url).href;
+    variants.sort((a, b) => b.bw - a.bw);
+  }
+  return { master, variants };
+}
+
+/** `?v=` off a request: an index into adVariants(), or null for the default (highest). */
+const variantParam = (req) => {
+  const v = Number(req.query && req.query.v);
+  return Number.isInteger(v) && v >= 0 && v < 10 ? v : null;
+};
+
+async function loadAdSegments(adManifestUrl, trimToSeconds = null, variant = null) {
+  const { master, variants } = await adVariants(adManifestUrl);
+  let mediaUrl = master.url;
+  if (isMaster(master.text)) {
+    if (!variants.length) throw new Error('no variant in creative manifest');
+    // The highest rendition unless a standalone spot's player chose one (`?v=`).
+    mediaUrl = (variant != null && variants[variant] ? variants[variant] : variants[0]).url;
   }
 
   const media = await fetchText(mediaUrl);
@@ -2373,10 +2393,46 @@ router.get('/:sid/short.m3u8', servingVisible, async (req, res) => {
     }
     if (!session.adManifestUrl) return res.status(404).send('no spot on this session');
 
-    const segments = await loadAdSegments(session.adManifestUrl, session.adTrimSeconds);
-    if (!segments.length) return res.status(502).send('unavailable');
-
     const publicBase = publicBaseOf(req);
+    /* 🚨 EVERY RENDITION, not the highest one. This playlist plays on its own (a live
+     * stream's pre-roll, a shorts spot, the upload gate), mostly on phones, and handing
+     * over only the 1080p rendition (6.5 Mbps) made the spot stall on any middling
+     * mobile connection. Without `?v=` it is a master listing each rendition, so the
+     * player adapts like it does for any video; `?v=<i>` is that rendition's own list.
+     *
+     * The rendition nearest 720p (the highest at or under START_BANDWIDTH) is listed
+     * FIRST, because players start on the first variant and a spot is too short to
+     * climb up from 480p or to recover from starting at 1080p on a weak link. */
+    const variant = variantParam(req);
+    if (variant == null) {
+      const { variants } = await adVariants(session.adManifestUrl);
+      if (variants.length > 1) {
+        const START_BANDWIDTH = 4000000;
+        const startIdx = Math.max(0, variants.findIndex((x) => x.bw <= START_BANDWIDTH));
+        const order = [startIdx, ...variants.map((_, i) => i).filter((i) => i !== startIdx)];
+        const lines = ['#EXTM3U', '#EXT-X-VERSION:3'];
+        for (const i of order) {
+          lines.push(variants[i].inf);
+          lines.push(`${publicBase}/m/${sid}/short.m3u8?v=${i}`);
+        }
+        res.set('Content-Type', 'application/vnd.apple.mpegurl');
+        res.set('Cache-Control', 'no-store');
+        return res.send(lines.join('\n'));
+      }
+    }
+
+    const segments = await loadAdSegments(session.adManifestUrl, session.adTrimSeconds, variant);
+    if (!segments.length) return res.status(502).send('unavailable');
+    // The measured segments come through us; on a gateway a browser cannot follow a
+    // redirect to, that means relayed bytes. Fetched now, in the background, so a
+    // first viewer does not wait on a cold gateway fetch the moment the spot starts.
+    segments.forEach((seg, i) => {
+      const measured = i === 0 || i === segments.length - 1;
+      if (measured && !isRedirectSafe(seg.url)) relayedSegment(seg.url).catch(() => {});
+    });
+    // The measured segments carry the rendition too, so /:sid/:n serves the bytes of
+    // the rendition the player is actually on.
+    const vq = variant != null ? `?v=${variant}` : '';
     // loadAdSegments hands back the raw `#EXTINF:` LINE, not a number — it is reused
     // verbatim so the spot's timing is byte-for-byte the encoder's own. (Reading a
     // `duration` field off it instead produced #EXTINF:0.000000 on every segment,
@@ -2393,7 +2449,7 @@ router.get('/:sid/short.m3u8', servingVisible, async (req, res) => {
         ? 'ab'
         : (i === 0 ? 'a' : (i === segments.length - 1 ? 'b' : null));
       lines.push(seg.extinf);
-      lines.push(key ? `${publicBase}/m/${sid}/${key}` : seg.url);
+      lines.push(key ? `${publicBase}/m/${sid}/${key}${vq}` : seg.url);
     });
     lines.push('#EXT-X-ENDLIST');
 
@@ -2807,7 +2863,8 @@ router.get('/:sid/:n', servingVisible, async (req, res) => {
     if (!session) return res.status(404).send('expired');
 
     if (!session.adManifestUrl) return res.status(404).send('no spot on this session');
-    const segments = await loadAdSegments(session.adManifestUrl, session.adTrimSeconds);
+    // `?v=`: the rendition a standalone spot's player is on (see short.m3u8).
+    const segments = await loadAdSegments(session.adManifestUrl, session.adTrimSeconds, variantParam(req));
     const mid = n.startsWith('am') ? parseInt(n.slice(2), 10) : null;
     const seg = mid != null ? segments[mid] : (n === 'a' ? segments[0] : segments[segments.length - 1]);
     if (!seg) return res.status(404).send('no such segment');
