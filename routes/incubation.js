@@ -25,6 +25,7 @@ const { hashForHiveUsername } = require('../utils/hash');
 const { call, qs } = require('../utils/incubationHosted');
 const { fetchAiFlagsBatch } = require('../utils/transcriptionTags');
 const { isHiddenFromFeed } = require('../utils/hiddenFromFeed');
+const { hiveRpcBatch } = require('../utils/hive');
 
 /** Pass the service's answer through, or 502 if it did not answer. */
 function relay(res, cache) {
@@ -152,6 +153,40 @@ async function filterByAsset(items) {
         return items;
     }
 }
+// Only people still in their warm-up (owner 2026-10-20). Once someone has their
+// own Hive account, butrauth reports them `graduated`, and whatever they did not
+// replay onto the chain stays off-chain forever: it must not keep showing up as
+// a warm-up post. Erased or unknown authors (`author: null`) go too. The service
+// caches the answer for 30s, so it takes effect within a minute of graduating.
+const stillWarmingUp = (items) => items.filter((it) => it.author?.status === 'incubating');
+// Not everyone graduates through butrauth: some make their own Hive account
+// elsewhere (Ecency, diyhub) under the warm-up handle and post there, so butrauth
+// still says `incubating` and the warm-up copy would sit next to the real one
+// (waceggyha, gusna, 2026-10-22). A handle that exists on Hive is out of the feed.
+// Found accounts are cached for a day (they never go away), misses for 10 min.
+// Fail-open: a Hive outage leaves the feed as it was.
+const onHiveCache = new Map(); // handle -> { onHive, at }
+const ON_HIVE_TTL = 24 * 60 * 60 * 1000;
+const NOT_ON_HIVE_TTL = 10 * 60 * 1000;
+async function dropHiveOwned(items) {
+    const handleOf = (it) => String(it.author?.handle || it.handle || '').toLowerCase();
+    const now = Date.now();
+    const fresh = (c) => c && now - c.at < (c.onHive ? ON_HIVE_TTL : NOT_ON_HIVE_TTL);
+    const unknown = [...new Set(items.map(handleOf).filter(Boolean))].filter((h) => !fresh(onHiveCache.get(h)));
+    if (unknown.length) {
+        try {
+            const [r] = await hiveRpcBatch([{
+                jsonrpc: '2.0', id: 1, method: 'condenser_api.get_accounts', params: [unknown],
+            }]);
+            if (!Array.isArray(r?.result)) throw new Error(r?.error?.message || 'no answer');
+            const found = new Set(r.result.map((a) => a.name));
+            for (const h of unknown) onHiveCache.set(h, { onHive: found.has(h), at: now });
+        } catch (e) {
+            console.warn('[incubation] Hive account lookup failed, feed unfiltered:', e.message);
+        }
+    }
+    return items.filter((it) => !onHiveCache.get(handleOf(it))?.onHive);
+}
 // Only a share of the warm-up posts per load, a fresh random pick each time
 // (owner 2026-10-12: 50%). Drawn from the whole pool the service will give (its
 // cap is 50), not just the newest `limit`, so older posts get their turn too.
@@ -188,7 +223,7 @@ router.get('/feed', (req, res) => {
     call('GET', `/public/feed${qs({ limit: sampling ? WARMUP_FEED_POOL : shownLimit, maxAgeDays, contentType })}`)
         .then(async (r) => {
             if (r.status === 200 && Array.isArray(r.body?.items)) {
-                const items = r.body.items.filter((it) => new Date(it.created).getTime() >= sinceMs);
+                const items = await dropHiveOwned(stillWarmingUp(r.body.items.filter((it) => new Date(it.created).getTime() >= sinceMs)));
                 const shown = await dropAiFlagged(await filterByAsset(items));
                 r.body.items = sampleShare(shown).slice(0, shownLimit);
             }
