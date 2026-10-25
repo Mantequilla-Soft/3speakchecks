@@ -4,7 +4,7 @@ const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
 const { unavailableMatch } = require('../utils/unavailable');
 const { hiddenFromFeedMatch } = require('../utils/hiddenFromFeed');
-const { nsfwFilterHiveTags } = require('../utils/filters');
+const { isNsfwAllowed, nsfwFilterHiveTags } = require('../utils/filters');
 const { hiddenListSync } = require('../utils/hiddenCreators');
 const { HIDDEN_AUTHORS, SHORT_SORT_INTERVAL, REWARD_WEIGHT, RESHARE_WEIGHT, ENABLE_MONGO_WRITES, RELATED_TOPIC_MULT, SHORTS_WINDOW_DAYS, SHORTS_FOLLOW_WINDOW_DAYS, SHORTS_RECENCY_BOOST, SHORTS_RECENCY_HALFLIFE_H } = require('../utils/config');
 const { recencyBoost, ageHours } = require('../utils/discoverScore');
@@ -18,6 +18,7 @@ const { applyRetention } = require('../utils/retentionRank');
 const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
 const { getFollowSet, applyFollowBoost } = require('../utils/followBoost');
 const { getPremiumSet, applyPremiumBoost } = require('../utils/premiumBoost');
+const { getShortsPool } = require('../utils/feedPools');
 
 // Endpoint to get shorts feed (original)
 router.get('/shorts', async (req, res) => {
@@ -476,50 +477,25 @@ router.get('/shortssorted', async (req, res) => {
         } else {
             // Full pipeline: MongoDB query → dedup → rewards → filter → score → sort
 
-            // Query the embed-video collection
-            const embedVideoCollection = db.collection('embed-video');
-
-            // Build query for published shorts inside the candidate window. The follow
-            // feed gets a LONGER window: it filters the pool down to one user's
-            // following list further below, and the global 14-day window leaves most
-            // users with too few shorts to fill even a single rail (see
-            // SHORTS_FOLLOW_WINDOW_DAYS).
+            // Every published short in the window, with its Hive data, comes from a
+            // pool shared by all viewers (utils/feedPools.js). The follow feed gets a
+            // LONGER window: it filters the pool down to one user's following list
+            // further below, and the global 14-day window leaves most users with too
+            // few shorts to fill even a single rail (see SHORTS_FOLLOW_WINDOW_DAYS).
             const windowDays = followedBy ? SHORTS_FOLLOW_WINDOW_DAYS : SHORTS_WINDOW_DAYS;
             const windowStart = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+            const pool = await getShortsPool(db, windowDays, isNsfwAllowed(req));
 
-            const query = {
-                short: true,
-                status: 'published',
-                processed: true,
-                listed_on_3speak: { $ne: false }, // hide unlisted shorts (matches the video feeds)
-                embed_url: { $exists: true, $ne: null },
-                createdAt: { $gte: windowStart },
-                owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
-                // The main /shortssorted feed. hiddenFromFeed = the author's opt-out;
-                // unavailableMatch was missing here (the two simpler shorts endpoints
-                // above both carry it) — a pre-existing gap, added for consistency.
-                ...unavailableMatch(), ...hiddenFromFeedMatch(),
-                ...nsfwFilterHiveTags(req)
-            };
-
-            // Add optional app filter
+            // What the old per-miss query filtered in Mongo, applied to the pool:
+            // hidden creators (the list changes live), the optional app filter, and the
+            // window edge (the pool can be a few minutes older than `windowStart`).
             if (appFilter) {
-                query.frontend_app = appFilter;
                 console.log(`Fetching sorted shorts for app: ${appFilter}`);
             }
-
-            // Fetch recent shorts sorted by newest first. Projected to the fields this
-            // pipeline reads: the window is weeks of shorts and the full docs carry a
-            // lot this route never looks at. (hive_* are filled from Hive below.)
-            const shortsData = await embedVideoCollection
-                .find(query, {
-                    projection: {
-                        owner: 1, author: 1, permlink: 1, embed_url: 1, thumbnail_url: 1,
-                        embed_title: 1, frontend_app: 1, createdAt: 1, views: 1,
-                    },
-                })
-                .sort({ createdAt: -1 })
-                .toArray();
+            const hidden = new Set(hiddenListSync());
+            const shortsData = pool.shorts.filter((s) => !hidden.has(s.owner)
+                && (!appFilter || s.frontend_app === appFilter)
+                && new Date(s.createdAt) >= windowStart);
 
             // Deduplicate: Keep only the most recent short for each user+thumbnail combination
             const seenVideos = new Map();
@@ -533,38 +509,11 @@ router.get('/shortssorted', async (req, res) => {
                 }
             }
 
-            // Fetch Hive content data via RPC (extract author/permlink from embed_url "@author/permlink")
-            const authorPerms = deduplicatedShorts
-                .filter(s => s.embed_url)
-                .map(s => {
-                    const parts = s.embed_url.replace(/^@/, '').split('/');
-                    return { author: parts[0], permlink: parts[1] };
-                });
-            // Fetch reward values for sorting (cached 15min)
-            const hiveRewards = await fetchHiveRewards(authorPerms);
-
-            // Attach reward + content data to each short and filter out low-reputation authors
-            const filteredShorts = [];
-            for (const short of deduplicatedShorts) {
-                if (short.embed_url) {
-                    const parts = short.embed_url.replace(/^@/, '').split('/');
-                    const hiveData = hiveRewards.get(`${parts[0]}/${parts[1]}`) || { reward: 0, title: '', body: '', tags: [] };
-                    short.hive_reward = hiveData.reward;
-                    short.hive_title = hiveData.title;
-                    short.hive_body = hiveData.body;
-                    short.hive_tags = hiveData.tags;
-                    short.hive_sound = hiveData.sound || null;
-                    // Filter out authors with reputation <= 15 (spam/low-quality)
-                    const cachedRep = reputationCache.get(parts[0]);
-                    if (cachedRep && cachedRep.reputation <= 15) continue;
-                } else {
-                    short.hive_reward = 0;
-                    short.hive_title = '';
-                    short.hive_body = '';
-                    short.hive_tags = [];
-                }
-                filteredShorts.push(short);
-            }
+            // Drop authors with reputation <= 15 (spam/low-quality), then copy: the pool
+            // is shared and everything below writes scores onto these objects.
+            const filteredShorts = deduplicatedShorts
+                .filter((s) => !pool.lowRep.has(s))
+                .map((s) => ({ ...s }));
 
             // All three manual votes (reshares / playlist saves / viewer tags) come from
             // the one cached curation map — keyed by HIVE author+permlink, which for a

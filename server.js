@@ -159,6 +159,10 @@ async function startServer() {
     // first hit, leaving a sub-second fail-open window after a restart).
     require('./utils/hiddenCreators').getHiddenSet().catch(() => {});
 
+    // Build the trending / new / shorts candidate pools now and keep them fresh, so
+    // no viewer waits on a cold one (each costs seconds of Mongo + Hive to build).
+    require('./utils/feedPools').startFeedPoolWarmer(getDb);
+
     // GDPR request retention. A closed request still holds the requester's email +
     // message. We keep it a short window after fulfilment (audit / appeal) then
     // delete it — otherwise, for someone whose data we just ERASED, we'd be sitting
