@@ -1,4 +1,52 @@
-const { HIVE_RPC_ENDPOINTS } = require('./config');
+const { HIVE_RPC_ENDPOINTS, HIVE_RPC_TIMEOUT_MS, HIVE_RPC_HEAVY_TIMEOUT_MS, HIVE_NODE_COOLDOWN_MS } = require('./config');
+
+/* ── Node health ────────────────────────────────────────────────────────────
+ * A node that times out costs every request that reaches it the whole timeout
+ * before the next node is tried. Measured 2026-10-25: api.deathwing.me (first in
+ * the prod list) failed 135 times in 24h, 114 of them timeouts and mostly inside
+ * one 45-minute window, and with a 10s timeout each of those requests sat for 10s.
+ * Healthy, it answers a 20-post get_content batch in 0.15-0.25s, 0.43s at most
+ * with 32 such batches in flight at once.
+ *
+ * So normal calls get a short timeout, and a node that failed is tried LAST until
+ * its cooldown ends, so the requests after the first go straight to one that works.
+ * Only a transport failure (timeout, network error, a non-JSON body such as an
+ * HTML error page) counts. A JSON error from a node that can't serve one method
+ * (hiveRpcCall) is not an outage.
+ *
+ * Heavy calls keep the old behaviour: config order, the long timeout, and they
+ * neither read nor write node health. A 1000-entry get_account_history took
+ * 7.8-15.4s on a cold query on every node in the list, so being slow there is
+ * normal, not a sign the node is down.
+ */
+const downUntil = new Map();   // endpoint -> ms timestamp its cooldown ends
+
+const HEAVY_METHOD = /get_account_history$/;
+const isHeavyBatch = (rpcBatch) => rpcBatch.some((r) => HEAVY_METHOD.test(String(r && r.method)));
+
+// Nodes not cooling down first, in config order. Cooling nodes stay at the end,
+// soonest back first, so a total outage still tries every node.
+function endpointsInOrder() {
+    const now = Date.now();
+    const up = [];
+    const down = [];
+    for (const e of HIVE_RPC_ENDPOINTS) ((downUntil.get(e) || 0) > now ? down : up).push(e);
+    down.sort((a, b) => downUntil.get(a) - downUntil.get(b));
+    return [...up, ...down];
+}
+
+function markDown(endpoint) {
+    downUntil.set(endpoint, Date.now() + HIVE_NODE_COOLDOWN_MS);
+}
+
+function markUp(endpoint) {
+    downUntil.delete(endpoint);
+}
+
+/** Test/ops hook. Forgets every node failure. */
+function resetNodeHealth() {
+    downUntil.clear();
+}
 
 // Caches
 const rewardCache = new Map();
@@ -14,19 +62,24 @@ const followingCache = new Map();
 const FOLLOWING_CACHE_TTL = 10 * 60 * 1000;
 
 // Send a batch RPC request, trying each endpoint in order until one succeeds
+// (healthy nodes first, see "Node health" above)
 async function hiveRpcBatch(rpcBatch) {
-    for (const endpoint of HIVE_RPC_ENDPOINTS) {
+    const heavy = isHeavyBatch(rpcBatch);
+    const endpoints = heavy ? HIVE_RPC_ENDPOINTS : endpointsInOrder();
+    for (const endpoint of endpoints) {
         try {
             const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(rpcBatch),
-                signal: AbortSignal.timeout(10000)
+                signal: AbortSignal.timeout(heavy ? HIVE_RPC_HEAVY_TIMEOUT_MS : HIVE_RPC_TIMEOUT_MS)
             });
             const results = await response.json();
+            if (!heavy) markUp(endpoint);
             return Array.isArray(results) ? results : [results];
         } catch (error) {
-            console.error(`Hive RPC failed for ${endpoint}:`, error.message);
+            if (!heavy) markDown(endpoint);
+            console.error(`Hive RPC failed for ${endpoint}:`, error.message, heavy ? '' : `(tried last for ${HIVE_NODE_COOLDOWN_MS / 1000}s)`);
         }
     }
     return [];
@@ -461,20 +514,23 @@ async function fetchCommentReplyCounts(authorPerms, { batchSize = 20 } = {}) {
  * in the other direction.
  */
 async function hiveRpcCall(method, params) {
-    for (const endpoint of HIVE_RPC_ENDPOINTS) {
+    const heavy = HEAVY_METHOD.test(String(method));
+    for (const endpoint of heavy ? HIVE_RPC_ENDPOINTS : endpointsInOrder()) {
         try {
             const response = await fetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
-                signal: AbortSignal.timeout(15000),
+                signal: AbortSignal.timeout(heavy ? HIVE_RPC_HEAVY_TIMEOUT_MS : HIVE_RPC_TIMEOUT_MS),
             });
             const json = await response.json();
+            if (!heavy) markUp(endpoint);                // it answered: the node is up
             if (json && json.error) continue;            // node answered, but can't serve this
             if (json && json.result !== undefined) return json.result;
         } catch (error) {
             // Try the next endpoint. A total outage returns null, which every caller
             // treats as "no data", never as "the answer is empty".
+            if (!heavy) markDown(endpoint);
         }
     }
     return null;
@@ -548,6 +604,7 @@ module.exports = {
     hiveRpcCall,
     fetchAccountComments,
     hiveRpcBatch,
+    resetNodeHealth,
     hiveReputationToScore,
     fetchHiveRewards,
     fetchHiveVideoStats,

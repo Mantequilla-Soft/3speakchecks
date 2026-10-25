@@ -100,6 +100,13 @@ module.exports = {
     SHORT_SORT_INTERVAL: parseInt(process.env.SHORT_SORT_INTERVAL) || 2,
     HIVE_RPC_ENDPOINTS: (process.env.HIVE_RPC_ENDPOINTS || process.env.HIVE_RPC_ENDPOINT || 'https://techcoderx.com,https://api.deathwing.me,https://api.hive.blog')
         .split(',').map(s => s.trim()).filter(Boolean),
+    // Hive node failover (utils/hive.js, "Node health"). A healthy node answers a
+    // normal call in well under 1s (0.43s worst seen under load), so 3s is a real
+    // failure, and the node is then tried last for the cooldown. Heavy calls
+    // (get_account_history) keep the old 10s and never mark a node down.
+    HIVE_RPC_TIMEOUT_MS: parseInt(process.env.HIVE_RPC_TIMEOUT_MS ?? '') || 3000,
+    HIVE_RPC_HEAVY_TIMEOUT_MS: parseInt(process.env.HIVE_RPC_HEAVY_TIMEOUT_MS ?? '') || 10000,
+    HIVE_NODE_COOLDOWN_MS: parseInt(process.env.HIVE_NODE_COOLDOWN_MS ?? '') || 60 * 1000,
     REWARD_WEIGHT: parseFloat(process.env.REWARD_WEIGHT) || 0.7,
     RESHARE_WEIGHT: parseFloat(process.env.RESHARE_WEIGHT) || 0.15,
     TRENDING_VIEWS_WEIGHT: parseFloat(process.env.TRENDING_VIEWS_WEIGHT) || 1,
