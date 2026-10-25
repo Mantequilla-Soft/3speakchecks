@@ -205,6 +205,30 @@ function sampleShare(items) {
     // Back in the service's order (newest first) once picked.
     return idx.slice(0, keep).sort((a, b) => a - b).map((i) => items[i]);
 }
+// One post per warm-up account per load (owner 2026-10-25: one account with 14
+// posts filled most of the Discover lead). Which one is a fresh random pick, so
+// their older posts get their turn too. Runs BEFORE sampleShare, so the 50% draw
+// is over accounts, not posts. WARMUP_FEED_PER_ACCOUNT=0 turns it off.
+const WARMUP_FEED_PER_ACCOUNT = Math.max(parseInt(process.env.WARMUP_FEED_PER_ACCOUNT ?? '1', 10) || 0, 0);
+function capPerAccount(items) {
+    if (!WARMUP_FEED_PER_ACCOUNT) return items;
+    const byAccount = new Map();
+    items.forEach((it, i) => {
+        const h = String(it.author?.handle || it.handle || '').toLowerCase();
+        if (!byAccount.has(h)) byAccount.set(h, []);
+        byAccount.get(h).push(i);
+    });
+    const kept = [];
+    for (const idx of byAccount.values()) {
+        for (let i = idx.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [idx[i], idx[j]] = [idx[j], idx[i]];
+        }
+        kept.push(...idx.slice(0, WARMUP_FEED_PER_ACCOUNT));
+    }
+    // Back in the service's order (newest first).
+    return kept.sort((a, b) => a - b).map((i) => items[i]);
+}
 const WARMUP_FEED_SINCE = new Date(process.env.WARMUP_FEED_SINCE || '2026-10-09T00:00:00Z');
 const WARMUP_FEED_MAX_AGE_DAYS = (() => {
     const v = parseFloat(process.env.WARMUP_FEED_MAX_AGE_DAYS);
@@ -219,13 +243,13 @@ router.get('/feed', (req, res) => {
     // The caller's limit applies to what is shown, after the draw; the service is
     // asked for the whole pool. Same default as the service when none is given.
     const shownLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), WARMUP_FEED_POOL);
-    const sampling = WARMUP_FEED_SHARE < 1;
+    const sampling = WARMUP_FEED_SHARE < 1 || WARMUP_FEED_PER_ACCOUNT > 0;
     call('GET', `/public/feed${qs({ limit: sampling ? WARMUP_FEED_POOL : shownLimit, maxAgeDays, contentType })}`)
         .then(async (r) => {
             if (r.status === 200 && Array.isArray(r.body?.items)) {
                 const items = await dropHiveOwned(stillWarmingUp(r.body.items.filter((it) => new Date(it.created).getTime() >= sinceMs)));
                 const shown = await dropAiFlagged(await filterByAsset(items));
-                r.body.items = sampleShare(shown).slice(0, shownLimit);
+                r.body.items = sampleShare(capPerAccount(shown)).slice(0, shownLimit);
             }
             // A random pick must not be cached, or everyone gets the same half.
             relay(res, sampling ? 'no-store' : 'public, max-age=30')(r);
