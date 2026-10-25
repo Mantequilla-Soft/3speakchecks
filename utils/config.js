@@ -435,6 +435,17 @@ module.exports = {
     // snap or interacting with one still takes effect on the very next request --
     // the TTL only bounds how stale a NEW snap from another process can be.
     SNAP_FEED_CACHE_MS: parseInt(process.env.SNAP_FEED_CACHE_MS ?? '') || 60 * 1000,
+    // Viewer-independent candidate pools (utils/feedPools.js) for /feeds/trendingSorted,
+    // /feeds/new and /shortssorted. Building one costs 0.75-1.1s of Mongo transfer plus
+    // Hive reward lookups (3-8.6s cold), measured 2026-10-25, and it used to happen per
+    // request. The TTL bounds how late a new upload, an unpublish or a reward change
+    // shows up in that feed; a stale pool is served while the next one builds.
+    TRENDING_POOL_CACHE_MS: parseInt(process.env.TRENDING_POOL_CACHE_MS ?? '') || 60 * 1000,
+    NEW_POOL_CACHE_MS: parseInt(process.env.NEW_POOL_CACHE_MS ?? '') || 30 * 1000,
+    // How many of each source (/feeds/new merges legacy + embed) the pool holds. Pages
+    // deeper than this (page * limit > NEW_POOL_SIZE) go to Mongo as before.
+    NEW_POOL_SIZE: parseInt(process.env.NEW_POOL_SIZE ?? '') || 200,
+    SHORTS_POOL_CACHE_MS: parseInt(process.env.SHORTS_POOL_CACHE_MS ?? '') || 2 * 60 * 1000,
     // Spam filter for the home feed's scope=all (Discover + New): a snap only shows
     // there when its author has at least this many Hive followers. Profile and
     // community pages are NOT filtered. 0 turns the filter off, so it is parsed

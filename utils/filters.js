@@ -22,4 +22,4 @@ function nsfwFilterHiveTags(req) {
     return { ...BANNED_FILTER, hive_tags: { $nin: ['nsfw', 'NSFW'] }, isNsfwContent: { $ne: true } };
 }
 
-module.exports = { BANNED_FILTER, nsfwFilter, nsfwFilterTags, nsfwFilterHiveTags };
+module.exports = { BANNED_FILTER, isNsfwAllowed, nsfwFilter, nsfwFilterTags, nsfwFilterHiveTags };

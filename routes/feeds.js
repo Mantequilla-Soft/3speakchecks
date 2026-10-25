@@ -4,7 +4,7 @@ const { getDb } = require('../utils/db');
 const { feedAgeMatch, recommendAgeMatch } = require('../utils/feedAge');
 const { unavailableMatch } = require('../utils/unavailable');
 const { hiddenFromFeedMatch } = require('../utils/hiddenFromFeed');
-const { nsfwFilterTags, nsfwFilterHiveTags } = require('../utils/filters');
+const { isNsfwAllowed, nsfwFilterTags, nsfwFilterHiveTags } = require('../utils/filters');
 const { hiddenListSync } = require('../utils/hiddenCreators');
 const { HIDDEN_AUTHORS, TRENDING_CANDIDATE_LIMIT, TRENDING_VIEWS_WEIGHT, TRENDING_VOTES_WEIGHT, TRENDING_COMMENTS_WEIGHT, TRENDING_REWARD_WEIGHT, TRENDING_RESHARE_WEIGHT, RESHARE_WEIGHT } = require('../utils/config');
 const { fetchHiveRewards, fetchLivePageData, mulberry32, getFollowingList } = require('../utils/hive');
@@ -52,6 +52,7 @@ const { getEngagementAffinity, applyEngagementBoost } = require('../utils/engage
 const { getSuggestedCreators } = require('../utils/suggestedCreators');
 const { attachTopicTags } = require('../utils/topicTag');
 const { getCached } = require('../utils/feedCache');
+const { getTrendingPool, getNewSources } = require('../utils/feedPools');
 const { SUGGEST_MAX_LIMIT } = require('../utils/config');
 const { getPool, hydrate } = require('../utils/discoverPool');
 const { getInterestPool } = require('../utils/interestPool');
@@ -762,72 +763,19 @@ router.get('/new', async (req, res) => {
         const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 100);
         const skip = (page - 1) * limit;
 
-        const videosCollection = db.collection('videos');
-        const embedVideoCollection = db.collection('embed-video');
-
-        // Query for new content (exclude first uploads and trending)
-        const query = {
-            ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
-            status: 'published',
-            owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
-            firstUpload: { $ne: true },
-            trending: { $ne: true },
-            publishFailed: { $ne: true },
-            ...nsfwFilterTags(req)
-        };
-
-        // Fetch legacy and embed videos in parallel
-        const [legacyVideos, embedVideosRaw] = await Promise.all([
-            videosCollection.find(query).sort({ created: -1 }).limit(limit + skip).toArray(),
-            embedVideoCollection.find({
-                ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
-                status: 'published',
-                short: false,
-                listed_on_3speak: true,
-                hive_author: { $nin: [null, ...HIDDEN_AUTHORS, ...hiddenListSync()] },
-                hive_permlink: { $ne: null },
-                ...nsfwFilterHiveTags(req)
-            }).sort({ createdAt: -1 }).limit(limit + skip).toArray()
-        ]);
-
-        // Transform embed videos to match legacy format
-        const embedVideos = embedVideosRaw.map(ev => ({
-            owner: ev.owner,
-            author: ev.hive_author,
-            permlink: ev.hive_permlink,
-            title: ev.hive_title || ev.originalFilename || '',
-            body: ev.hive_body || '',
-            status: 'published',
-            created: ev.createdAt,
-            created_at: ev.createdAt,
-            duration: ev.duration || 0,
-            tags: ev.hive_tags || [],
-            tags_v2: (ev.hive_tags || []).map(t => t.toLowerCase()),
-            images: {
-                thumbnail: ev.thumbnail_url || `https://img.3speak.tv/${ev.permlink}/thumbnail.png`,
-                poster: ev.thumbnail_url || `https://img.3speak.tv/${ev.permlink}/poster.jpg`
-            },
-            spkvideo: {
-                duration: ev.duration || 0,
-                video_v2: ev.permlink,
-                play_url: ev.manifest_cid ? `https://ipfs.3speak.tv/ipfs/${ev.manifest_cid}` : null
-            },
-            _source: 'embed',
-            _sortDate: new Date(ev.createdAt || 0).getTime()
-        }));
-
-        // Add sort dates to legacy videos
-        const legacyWithDate = legacyVideos.map(v => ({
-            ...v,
-            _sortDate: new Date(v.created || v.created_at || 0).getTime()
-        }));
+        // The newest limit+skip of each source, as the old per-request queries
+        // returned them. Usually served from a shared pool (utils/feedPools.js), which
+        // re-applies hidden creators live; deep pages still go to Mongo.
+        const { legacy: legacyWithDate, embed: embedVideos } =
+            await getNewSources(db, isNsfwAllowed(req), limit + skip);
 
         // Deduplicate: remove embed videos that already exist in legacy
         const legacyKeys = new Set(legacyWithDate.map(v => `${v.author || v.owner}/${v.permlink}`));
         const uniqueEmbed = embedVideos.filter(ev => !legacyKeys.has(`${ev.author}/${ev.permlink}`));
 
-        // Merge and sort by date descending
-        const merged = [...legacyWithDate, ...uniqueEmbed];
+        // Merge and sort by date descending. Copies: the sources may be pool items,
+        // and this route and the response middleware both write to what it returns.
+        const merged = [...legacyWithDate, ...uniqueEmbed].map((v) => ({ ...v }));
         merged.sort((a, b) => b._sortDate - a._sortDate);
 
         // This feed stays purely chronological — no interest/retention ranking — but
@@ -926,157 +874,14 @@ router.get('/trendingSorted', async (req, res) => {
         const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 100);
         const skip = (page - 1) * limit;
 
-        const videosCollection = db.collection('videos');
-        const embedVideoCollection = db.collection('embed-video');
-        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-
-        // Fetch legacy candidate videos (without reward in base_score — reward will be fetched live from Hive)
-        const [legacyCandidates, embedCandidatesRaw] = await Promise.all([
-            videosCollection.aggregate([
-                {
-                    $match: {
-                        status: 'published',
-                        owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
-                        publishFailed: { $ne: true },
-                        created: { $gte: sevenDaysAgo },
-                        // hiddenFromFeed = author opt-out. unavailableMatch mirrors the
-                        // embed candidate query below (it was missing on the legacy side
-                        // — pre-existing gap). The 7-day window already covers feedAge.
-                        ...unavailableMatch(), ...hiddenFromFeedMatch(),
-                        ...nsfwFilterTags(req)
-                    }
-                },
-                {
-                    $addFields: {
-                        base_score: {
-                            $add: [
-                                { $multiply: [{ $ifNull: ['$views', 0] }, TRENDING_VIEWS_WEIGHT] },
-                                { $multiply: [{ $ifNull: ['$stats.num_votes', 0] }, TRENDING_VOTES_WEIGHT] },
-                                { $multiply: [{ $ifNull: ['$stats.num_comments', 0] }, TRENDING_COMMENTS_WEIGHT] }
-                            ]
-                        }
-                    }
-                },
-                { $sort: { base_score: -1 } },
-                { $limit: TRENDING_CANDIDATE_LIMIT }
-            ]).toArray(),
-            // Fetch published embed videos (non-shorts) from last 7 days with Hive links
-            embedVideoCollection.find({
-                ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
-                status: 'published',
-                short: false,
-                listed_on_3speak: true,
-                hive_author: { $ne: null },
-                hive_permlink: { $ne: null },
-                createdAt: { $gte: sevenDaysAgo },
-                ...nsfwFilterHiveTags(req)
-            }).sort({ createdAt: -1 }).limit(TRENDING_CANDIDATE_LIMIT).toArray()
-        ]);
-
-        // Enrich legacy videos with live Hive reward data (stats.total_hive_reward in MongoDB is unreliable)
-        const legacyAuthorPerms = legacyCandidates
-            .filter(v => (v.author || v.owner) && v.permlink)
-            .map(v => ({ author: v.author || v.owner, permlink: v.permlink }));
-
-        // Embed candidates' Hive author/permlink (already on the doc).
-        const embedAuthorPerms = embedCandidatesRaw
-            .filter(ev => ev.hive_author && ev.hive_permlink)
-            .map(ev => ({ author: ev.hive_author, permlink: ev.hive_permlink }));
-
-        // Both Hive-rewards lookups can run in parallel — they don't depend
-        // on each other. Combined with the inner batch parallelisation in
-        // fetchHiveRewards, this is now ~1 RPC roundtrip instead of ~20.
-        const [legacyHiveData, embedHiveData] = await Promise.all([
-            legacyAuthorPerms.length > 0 ? fetchHiveRewards(legacyAuthorPerms) : Promise.resolve(new Map()),
-            embedAuthorPerms.length > 0 ? fetchHiveRewards(embedAuthorPerms) : Promise.resolve(new Map()),
-        ]);
-
-        // Recalculate base_score for legacy videos with live reward data
-        for (const video of legacyCandidates) {
-            const hiveKey = `${video.author || video.owner}/${video.permlink}`;
-            const hive = legacyHiveData.get(hiveKey);
-            const liveReward = hive ? (hive.reward || 0) : 0;
-            video.base_score = (video.base_score || 0) + liveReward * TRENDING_REWARD_WEIGHT;
-        }
-
-        // Transform embed videos into candidate format matching legacy videos
-        const embedCandidates = embedCandidatesRaw
-            .filter(ev => ev.hive_author && ev.hive_permlink)
-            .map(ev => {
-                const hiveKey = `${ev.hive_author}/${ev.hive_permlink}`;
-                const hive = embedHiveData.get(hiveKey) || { reward: 0, title: '', body: '', tags: [] };
-                const base_score = (ev.views || 0) * TRENDING_VIEWS_WEIGHT +
-                    (hive.reward || 0) * TRENDING_REWARD_WEIGHT;
-                return {
-                    owner: ev.owner,
-                    author: ev.hive_author,
-                    permlink: ev.hive_permlink,
-                    title: ev.hive_title || hive.title || '',
-                    body: ev.hive_body || hive.body || '',
-                    status: 'published',
-                    created: ev.createdAt,
-                    created_at: ev.createdAt,
-                    duration: ev.duration || 0,
-                    tags: ev.hive_tags || hive.tags || [],
-                    images: {
-                        thumbnail: ev.thumbnail_url || `https://img.3speak.tv/${ev.permlink}/thumbnail.png`,
-                        poster: ev.thumbnail_url || `https://img.3speak.tv/${ev.permlink}/poster.jpg`
-                    },
-                    spkvideo: {
-                        duration: ev.duration || 0,
-                        video_v2: ev.permlink,
-                        play_url: ev.manifest_cid ? `https://ipfs.3speak.tv/ipfs/${ev.manifest_cid}` : null
-                    },
-                    stats: {
-                        total_hive_reward: hive.reward || 0,
-                        num_votes: 0,
-                        num_comments: 0
-                    },
-                    views: ev.views || 0,
-                    base_score,
-                    _source: 'embed',
-                    _embedPermlink: ev.permlink
-                };
-            });
-
-        // Deduplicate: remove embed videos that already exist in legacy (by hive author+permlink)
-        const legacyKeys = new Set(legacyCandidates.map(v => `${v.author || v.owner}/${v.permlink}`));
-        const uniqueEmbedCandidates = embedCandidates.filter(ev => !legacyKeys.has(`${ev.author}/${ev.permlink}`));
-
-        // Merge all candidates
-        const candidateVideos = [...legacyCandidates, ...uniqueEmbedCandidates];
-
-        // Look up embed-video records to get Hive permlinks for reshare matching (for legacy videos)
-        const embedDocs = legacyCandidates.length > 0
-            ? await embedVideoCollection.find(
-                { $or: legacyCandidates.map(v => ({ owner: v.owner, permlink: v.permlink })) },
-                { projection: { owner: 1, permlink: 1, embed_url: 1 } }
-              ).toArray()
-            : [];
-
-        // Build map: "owner/shortPermlink" -> hive permlink from embed_url
-        const hivePermlinkMap = new Map();
-        for (const doc of embedDocs) {
-            if (doc.embed_url) {
-                const parts = doc.embed_url.replace(/^@/, '').split('/');
-                if (parts.length === 2) {
-                    hivePermlinkMap.set(`${doc.owner}/${doc.permlink}`, { author: parts[0], permlink: parts[1] });
-                }
-            }
-        }
-        // Embed videos already have hive author/permlink directly
-        for (const ev of uniqueEmbedCandidates) {
-            hivePermlinkMap.set(`${ev.owner}/${ev._embedPermlink || ev.permlink}`, { author: ev.author, permlink: ev.permlink });
-        }
-
-        // The HIVE identity of a candidate — what reshares / playlist saves / viewer
-        // tags are all keyed by. Legacy videos post under their own owner/permlink,
-        // so that's the fallback when there's no embed doc to map through. (The old
-        // reshare lookup dropped candidates that missed the map, which is why a
-        // reshared legacy video with no embed doc used to score 0 reshares.)
-        const hiveKeyOf = (v) => (v._source === 'embed'
-            ? { author: v.author, permlink: v.permlink }
-            : (hivePermlinkMap.get(`${v.owner}/${v.permlink}`) || { author: v.owner, permlink: v.permlink }));
+        // Candidates, live Hive rewards and HIVE identities are the same for every
+        // viewer, so they come from a shared pool (utils/feedPools.js). Copy before
+        // scoring: the pool is shared. Hidden creators are re-checked here because the
+        // list changes live (the pool's legacy query used the list at load time).
+        const hidden = new Set(hiddenListSync());
+        const entries = (await getTrendingPool(db, isNsfwAllowed(req)))
+            .filter(({ video }) => video._source === 'embed' || !hidden.has(video.owner));
+        const candidateVideos = entries.map(({ video }) => ({ ...video }));
 
         // ALL THREE manual votes come from the one cached curation map (utils/curation.js).
         // This used to be a per-request `reshares` aggregation, which was both redundant
@@ -1084,8 +889,8 @@ router.get('/trendingSorted', async (req, res) => {
         // counted ROWS and included an author's reshares of their OWN video — the exact
         // lever the curation map's self-exclusion exists to close. One source, one meaning.
         const curationCounts = await getCurationCounts(db);
-        for (const video of candidateVideos) {
-            const hivePl = hiveKeyOf(video);
+        candidateVideos.forEach((video, i) => {
+            const hivePl = entries[i].hive;
             const counts = curationCounts.get(keyOf(hivePl.author, hivePl.permlink)) || EMPTY;
 
             video.reshare_count = counts.reshares;
@@ -1097,7 +902,7 @@ router.get('/trendingSorted', async (req, res) => {
             // same act twice would double-dip.
             video.trending_score = (video.base_score || 0) + counts.reshares * TRENDING_RESHARE_WEIGHT;
             video.trending_score *= curationBoost(counts, { reshareWeight: 0 });
-        }
+        });
 
         // Interest weighting (WINNER-ONLY): multiply the score of videos whose
         // single winning topic (viewer votes + auto tags) matches the caller's
