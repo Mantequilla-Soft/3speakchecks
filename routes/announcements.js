@@ -18,6 +18,8 @@
 //     canRespond: false,                      // optional, true = show a reply box
 //     active:     true,                       // optional, false = never shown (default shown)
 //     username:   "alice",                    // optional, ONLY @alice gets it; also ["alice","bob"]
+//                                             // a warm-up user: "~handle", or the bare handle while
+//                                             // no Hive account of that name exists (see isAddressedTo)
 //     createdAt:  ISODate(...)                // optional, for the admin's own sorting
 //   }
 //
@@ -44,6 +46,7 @@ const router = express.Router();
 const { getDb } = require('../utils/db');
 const { verifyDelegateVouch } = require('../utils/hiveAuth');
 const { AD_SIGNING_DELEGATES } = require('../utils/config');
+const { hiveRpcCall } = require('../utils/hive');
 
 const COLLECTION = 'announcements';
 const REPLIES = 'announcement_replies';
@@ -86,6 +89,34 @@ function targetsOf(doc) {
   return raw
     .map((u) => (typeof u === 'string' ? u.trim().toLowerCase().replace(/^@/, '') : ''))
     .filter(Boolean);
+}
+
+// Does this Hive account exist? true / false, or null when no node answered. An
+// account never goes away, so "exists" is kept for good; "missing" only briefly,
+// since somebody may register the name at any time.
+const MISSING_TTL_MS = 10 * 60 * 1000;
+const hiveAccountCache = new Map(); // name -> { exists, at }
+
+async function isHiveAccount(name) {
+  const hit = hiveAccountCache.get(name);
+  if (hit && (hit.exists || Date.now() - hit.at < MISSING_TTL_MS)) return hit.exists;
+  const result = await hiveRpcCall('condenser_api.get_accounts', [[name]]);
+  if (!Array.isArray(result)) return null;
+  const exists = result.length > 0;
+  hiveAccountCache.set(name, { exists, at: Date.now() });
+  return exists;
+}
+
+// Is an announcement with these targets addressed to the proven account? The admin
+// tool addresses warm-up users by their bare handle, so a bare name also reaches
+// `~name` as long as no Hive account has that name. Once someone registers it on
+// Hive the name is theirs, and the warm-up user stops matching. Unknown (Hive
+// unreachable) is no match: a private message is never shown on a guess.
+async function isAddressedTo(targets, account) {
+  if (targets.includes(account)) return true;
+  if (!account.startsWith('~')) return false;
+  const bare = account.slice(1);
+  return targets.includes(bare) && (await isHiveAccount(bare)) === false;
 }
 
 // The account a vouch proves, or null. Never throws: a bad proof is just no proof.
@@ -203,7 +234,12 @@ router.post('/announcements/latest', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     const { general, addressed } = await snapshot();
     const { proven } = await provenAccount(req.body || {}, readVouchMessage);
-    const mine = proven ? addressed.find((a) => a.targets.includes(proven)) : null;
+    let mine = null;
+    if (proven) {
+      for (const a of addressed) {
+        if (await isAddressedTo(a.targets, proven)) { mine = a; break; }
+      }
+    }
     res.json({ announcement: general, personal: mine ? mine.shown : null });
   } catch (e) {
     console.error('POST /announcements/latest failed:', e.message);
@@ -236,7 +272,7 @@ router.post('/announcements/:number/replies', async (req, res) => {
     // An addressed announcement takes replies from its recipients only, and to
     // anyone else it does not exist (same 404 as a wrong number).
     const targets = targetsOf(ann);
-    if (targets.length && !(username && targets.includes(username))) {
+    if (targets.length && !(username && await isAddressedTo(targets, username))) {
       return res.status(404).json({ error: 'announcement not found' });
     }
     if (ann.canRespond !== true) return res.status(403).json({ error: 'this announcement does not take replies' });
