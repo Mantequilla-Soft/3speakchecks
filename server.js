@@ -145,6 +145,7 @@ app.use('/push', pushRoutes);             // same ordering rule as above
 app.use('/incubation', incubationRoutes); // same ordering rule as above
 app.use('/badges', badgeRoutes);          // same ordering rule as above
 app.use('/', announcementRoutes);         // same ordering rule as above
+app.use('/', require('./routes/stories')); // 24h stories row + follower notifications; same ordering rule
 app.use('/', streamStatsRoutes);
 
 // Track whether heavy sync tasks are running
