@@ -295,6 +295,16 @@ router.get('/shorts/:username', async (req, res) => {
         if (!includeUnlisted) {
             query.listed_on_3speak = { $ne: false }; // hide unlisted shorts (matches the video feeds)
         }
+        // Stories (routes/stories.js) are listed with the creator's shorts only while
+        // they are live; once the 24h are over they would only play the expired
+        // placeholder, so they drop out. ?story=1 is the story viewer asking for the
+        // live stories alone.
+        if (req.query.story === '1') {
+            query.story = true;
+            query.story_expires_at = { $gt: new Date() };
+        } else {
+            query.$or = [{ story: { $ne: true } }, { story_expires_at: { $gt: new Date() } }];
+        }
 
         const [total, shortsData] = await Promise.all([
             embedVideoCollection.countDocuments(query),
