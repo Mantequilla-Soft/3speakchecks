@@ -120,9 +120,12 @@ async function connectToMongo() {
                 // Community "Top" (routes/feeds.js /community/:id/top): all-time
                 // most-viewed in a community scanned ~123k legacy videos without it.
                 ['videos', { community: 1, views: -1 }],
+                // 24h stories (routes/stories.js): streaks read every story of the
+                // last 60 days. Partial: only the few rows that ever were a story.
+                ['embed-video', { story_posted_at: 1 }, { partialFilterExpression: { story_posted_at: { $exists: true } } }],
             ];
-            for (const [coll, key] of wanted) {
-                try { await db.collection(coll).createIndex(key, { background: true }); }
+            for (const [coll, key, opts] of wanted) {
+                try { await db.collection(coll).createIndex(key, { background: true, ...opts }); }
                 catch (e) { console.warn(`[idx] ${coll} ${JSON.stringify(key)}: ${e.message}`); }
             }
             console.log('Ranking/feed indexes ensured');
