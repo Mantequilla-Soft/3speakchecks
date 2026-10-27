@@ -20,6 +20,12 @@
  * "expired story" placeholder (snapievideoplayer, server.js), and these routes
  * stop listing it.
  *
+ * While it is live, the author can keep a story as an ordinary short
+ * (POST /stories/keep, signed like the comment pins): `story` turns false,
+ * `story_expires_at` goes, `story_kept_at` is stamped. `story_posted_at` stays, so
+ * it still counts as a story posted (streaks here, the leaderboard's story_uploads
+ * and story_streak, which an external rollup job writes).
+ *
  * Env (read here, not in utils/config.js):
  *   STORIES_ALLOWED_OWNERS  comma list of who may post stories; EMPTY = everyone.
  *                           Unset = the closed trial (badadib,meno,tibfox). Keep in
@@ -33,7 +39,8 @@ const { unavailableMatch } = require('../utils/unavailable');
 const { nsfwFilterHiveTags, isNsfwAllowed } = require('../utils/filters');
 const { hiddenListSync } = require('../utils/hiddenCreators');
 const { getUserFilters, applyUserFilters } = require('../utils/userFilters');
-const { ENABLE_MONGO_WRITES } = require('../utils/config');
+const { ENABLE_MONGO_WRITES, SIGNATURE_TIMESTAMP_TOLERANCE_MS, AD_SIGNING_DELEGATES } = require('../utils/config');
+const { verifyHiveAuthority } = require('../utils/hiveAuth');
 const { postReferencesAsset } = require('../services/videoHiveSync');
 
 const router = express.Router();
@@ -136,21 +143,67 @@ const storyCard = (d, seen) => ({
     seen,
 });
 
+// ─── Streaks ────────────────────────────────────────────────────────────────
+// A creator's streak is the run of consecutive UTC days with at least one story,
+// ending today or yesterday: a story yesterday and none yet today keeps it alive
+// until midnight UTC. Kept stories count (story_posted_at stays). Built for every
+// creator from the last STREAK_LOOKBACK_DAYS at once, so a streak caps there.
+const DAY_MS = 24 * 60 * 60 * 1000;
+const STREAK_TTL_MS = 5 * 60 * 1000;
+const STREAK_LOOKBACK_DAYS = 60;
+let streakCache = null; // { at, byOwner: Map(owner -> { streak, postedToday }) }
+
+const utcDay = (d) => Math.floor(new Date(d).getTime() / DAY_MS);
+
+async function streaks(db) {
+    if (streakCache && Date.now() - streakCache.at < STREAK_TTL_MS) return streakCache.byOwner;
+    const since = new Date(Date.now() - STREAK_LOOKBACK_DAYS * DAY_MS);
+    // `$exists` matches the partial index on story_posted_at (utils/db.js).
+    const docs = await db.collection('embed-video')
+        .find({ story_posted_at: { $exists: true, $gte: since } }, { projection: { owner: 1, story_posted_at: 1 } })
+        .toArray();
+    const days = new Map();
+    for (const d of docs) {
+        if (!days.has(d.owner)) days.set(d.owner, new Set());
+        days.get(d.owner).add(utcDay(d.story_posted_at));
+    }
+    const today = utcDay(Date.now());
+    const byOwner = new Map();
+    for (const [owner, set] of days) {
+        let day = set.has(today) ? today : today - 1;
+        let streak = 0;
+        while (set.has(day)) { streak += 1; day -= 1; }
+        if (streak > 0) byOwner.set(owner, { streak, postedToday: set.has(today) });
+    }
+    streakCache = { at: Date.now(), byOwner };
+    return byOwner;
+}
+
+const streakOf = (byOwner, owner) => (byOwner.get(owner) || { streak: 0 }).streak;
+
+// Something about a story changed: the row and the streaks rebuild on next read.
+function storiesChanged() {
+    activeCache.clear();
+    streakCache = null;
+}
+
 /**
  * GET /stories?currentuser=&nsfw=
  * Creators with a live story, for the row on the home page. Unseen first, then
  * newest. { success, currentUserHasStory, creators: [{ username, story_count,
- * unseen_count, latest_at, latest_expires_at, followed }] }. The row draws its
- * countdown ring from the newest story's latest_at -> latest_expires_at.
+ * unseen_count, latest_at, latest_expires_at, followed, streak }],
+ * currentUserStreak }. The row draws its countdown ring from the newest story's
+ * latest_at -> latest_expires_at.
  */
 router.get('/stories', async (req, res) => {
     try {
         const db = getDb();
         const currentuser = ACCOUNT_RE.test(String(req.query.currentuser || '')) ? req.query.currentuser : null;
         const docs = await visibleStories(db, req, currentuser);
-        const [seen, following] = await Promise.all([
+        const [seen, following, byOwner] = await Promise.all([
             seenSet(db, currentuser, docs),
             currentuser ? getFollowingList(currentuser).catch(() => []) : [],
+            streaks(db),
         ]);
         const followingSet = new Set(following || []);
 
@@ -162,6 +215,7 @@ router.get('/stories', async (req, res) => {
                     // docs are newest first, so the first one per owner is the newest
                     latest_at: d.story_posted_at, latest_expires_at: d.story_expires_at,
                     followed: followingSet.has(d.owner),
+                    streak: streakOf(byOwner, d.owner),
                 });
             }
             const c = byCreator.get(d.owner);
@@ -175,6 +229,7 @@ router.get('/stories', async (req, res) => {
         res.json({
             success: true,
             currentUserHasStory: !!currentuser && byCreator.has(currentuser),
+            ...(currentuser ? { currentUserStreak: streakOf(byOwner, currentuser) } : {}),
             creators: creators.filter((c) => c.username !== currentuser),
         });
     } catch (error) {
@@ -211,6 +266,157 @@ router.get('/stories/following', async (req, res) => {
         });
     } catch (error) {
         console.error('[stories] following failed:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+/**
+ * GET /stories/streak/:user
+ * { success, streak, postedToday }: the creator's current story streak in days.
+ */
+router.get('/stories/streak/:user', async (req, res) => {
+    const user = String(req.params.user || '').toLowerCase();
+    if (!ACCOUNT_RE.test(user)) return res.status(400).json({ success: false, error: 'invalid user' });
+    try {
+        const s = (await streaks(getDb())).get(user) || { streak: 0, postedToday: false };
+        res.json({ success: true, streak: s.streak, postedToday: s.postedToday });
+    } catch (error) {
+        console.error('[stories] streak failed:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+/**
+ * GET /stories/seen?author=&permlink=   (the HIVE permlink)
+ * Who watched a story: { success, count, viewers: [{ username, at }] }, newest first,
+ * the author left out, at most SEEN_MAX names (count is all of them). Read from
+ * watch_history, which is public already (routes/watchedFeed.js), so this is public
+ * too; the frontend only shows it to the author. Viewers with watch history off
+ * never appear.
+ */
+const SEEN_MAX = 200;
+const SEEN_SCAN = 2000; // rows read per story; a viewer can have one per permlink
+const SEEN_TTL_MS = 30 * 1000;
+const seenCache = new Map(); // 'author/permlink' -> { at, payload }
+
+router.get('/stories/seen', async (req, res) => {
+    const author = String(req.query.author || '').toLowerCase();
+    const permlink = String(req.query.permlink || '');
+    if (!ACCOUNT_RE.test(author) || !PERMLINK_RE.test(permlink)) {
+        return res.status(400).json({ success: false, error: 'invalid author or permlink' });
+    }
+    const key = `${author}/${permlink}`;
+    const hit = seenCache.get(key);
+    if (hit && Date.now() - hit.at < SEEN_TTL_MS) return res.json(hit.payload);
+
+    try {
+        const db = getDb();
+        const doc = await db.collection('embed-video').findOne(
+            { owner: author, $or: [{ hive_permlink: permlink }, { permlink }], story_posted_at: { $exists: true } },
+            { projection: { permlink: 1, hive_permlink: 1, embed_url: 1 } },
+        );
+        if (!doc) return res.status(404).json({ success: false, error: 'story not found' });
+
+        // History rows carry whichever permlink the player had: the Hive one or the
+        // asset id. Both are read, and a viewer with both rows counts once.
+        const permlinks = [...new Set([hivePermlinkOf(doc), doc.permlink])];
+        const rows = await db.collection('watch_history')
+            .find({ author, permlink: { $in: permlinks }, username: { $ne: author } },
+                { projection: { _id: 0, username: 1, last_watched_at: 1, watched_at: 1 } })
+            .sort({ last_watched_at: -1 })
+            .limit(SEEN_SCAN)
+            .toArray();
+        const byUser = new Map();
+        for (const r of rows) {
+            if (r.username && !byUser.has(r.username)) {
+                byUser.set(r.username, { username: r.username, at: r.last_watched_at || r.watched_at || null });
+            }
+        }
+        const payload = { success: true, count: byUser.size, viewers: [...byUser.values()].slice(0, SEEN_MAX) };
+
+        if (seenCache.size >= 500) seenCache.clear();
+        seenCache.set(key, { at: Date.now(), payload });
+        res.json(payload);
+    } catch (error) {
+        console.error('[stories] seen failed:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
+// Must match keepMessage() in the frontend (src/lib/stories.js) and the signer in
+// its server/index.cjs exactly.
+const keepMessage = (author, permlink, timestamp) =>
+    ['3speak-stories', 'keep', author, permlink, String(timestamp)].join('|');
+
+/**
+ * POST /stories/keep { author, permlink, signature, timestamp }   (the HIVE permlink)
+ * The author keeps a live story as an ordinary short. Proof of authorship is the
+ * comment pins' shape (routes/commentPins.js): a signature over keepMessage() from
+ * the author's posting key or a delegate we sign with (@threespeak). Only a live
+ * story can be kept; an expired one is gone from 3Speak already.
+ */
+router.post('/stories/keep', express.json({ limit: '4kb' }), async (req, res) => {
+    if (!ENABLE_MONGO_WRITES) {
+        return res.status(503).json({ success: false, error: 'Writes disabled' });
+    }
+    const b = req.body || {};
+    const author = String(b.author || '').toLowerCase();
+    const permlink = String(b.permlink || '');
+    if (!ACCOUNT_RE.test(author) || !PERMLINK_RE.test(permlink)) {
+        return res.status(400).json({ success: false, error: 'invalid author or permlink' });
+    }
+
+    const signature = typeof b.signature === 'string' ? b.signature.slice(0, 200) : '';
+    const timestamp = parseInt(b.timestamp, 10);
+    if (!signature || !Number.isFinite(timestamp)) {
+        return res.status(401).json({
+            success: false,
+            error: 'Signature required',
+            expected_message: keepMessage(author, permlink, '<ms>'),
+        });
+    }
+    if (Math.abs(Date.now() - timestamp) > SIGNATURE_TIMESTAMP_TOLERANCE_MS) {
+        return res.status(401).json({ success: false, error: 'timestamp out of tolerance' });
+    }
+
+    let verdict = { ok: false, signer: null };
+    try {
+        verdict = await verifyHiveAuthority({
+            message: keepMessage(author, permlink, timestamp),
+            signature,
+            username: author,
+            allowedDelegates: AD_SIGNING_DELEGATES,
+        });
+    } catch (err) {
+        if (err && err.code === 'HIVE_ACCOUNT_NOT_FOUND') {
+            return res.status(404).json({ success: false, error: 'Hive account not found' });
+        }
+    }
+    if (!verdict.ok) return res.status(401).json({ success: false, error: 'Invalid signature' });
+
+    try {
+        const embed = getDb().collection('embed-video');
+        const doc = await embed.findOne(
+            { owner: author, $or: [{ hive_permlink: permlink }, { permlink }] },
+            { projection: { permlink: 1, hive_permlink: 1, embed_url: 1, story: 1, story_expires_at: 1 } },
+        );
+        if (!doc) return res.status(404).json({ success: false, error: 'story not found' });
+        const live = doc.story === true && doc.story_expires_at && new Date(doc.story_expires_at) > new Date();
+        if (!live) return res.status(409).json({ success: false, error: 'not a live story' });
+
+        // story_expires_at must GO, not just `story`: the feeds' liveStoryMatch() and
+        // the player's placeholder both key on it. story_posted_at stays (streaks,
+        // leaderboard).
+        await embed.updateOne({ _id: doc._id }, {
+            $set: { story: false, story_kept_at: new Date() },
+            $unset: { story_expires_at: '' },
+        });
+        storiesChanged();
+
+        console.log(`[stories] kept ${author}/${doc.permlink} as a short (signer ${verdict.signer || author})`);
+        res.json({ success: true, kept: { owner: author, permlink: doc.permlink, hive_permlink: hivePermlinkOf(doc) } });
+    } catch (error) {
+        console.error('[stories] keep failed:', error);
         res.status(500).json({ success: false, error: 'Internal server error' });
     }
 });
@@ -265,6 +471,11 @@ router.post('/stories/register', express.json({ limit: '4kb' }), async (req, res
         if (doc.short !== true) {
             return res.status(400).json({ success: false, error: 'only vertical shorts can be stories' });
         }
+        // The author kept it as a short. Registering again would bring the post's own
+        // story flag back and hide it, and register needs no signature.
+        if (doc.story_kept_at) {
+            return res.status(409).json({ success: false, error: 'kept as a short' });
+        }
 
         const postedAt = hiveDate(post.created);
         const expiresAt = new Date(postedAt.getTime() + STORY_TTL_MS);
@@ -283,7 +494,7 @@ router.post('/stories/register', express.json({ limit: '4kb' }), async (req, res
             if (tags.length) set.hive_tags = tags;
         }
         await embed.updateOne({ _id: doc._id }, { $set: set });
-        activeCache.clear();
+        storiesChanged();
 
         console.log(`[stories] registered ${author}/${assetPermlink} -> @${author}/${post.permlink}, expires ${expiresAt.toISOString()}`);
         res.json({ success: true, story: { owner: author, permlink: assetPermlink, hive_permlink: post.permlink, expires_at: expiresAt } });
@@ -295,3 +506,4 @@ router.post('/stories/register', express.json({ limit: '4kb' }), async (req, res
 
 module.exports = router;
 module.exports.STORY_TTL_MS = STORY_TTL_MS;
+module.exports._test = { keepMessage };

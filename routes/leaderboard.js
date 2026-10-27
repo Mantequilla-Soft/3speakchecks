@@ -46,6 +46,11 @@ const METRICS = [
   'boost_amount_received',
   'boosts_given',
   'boost_amount_given',
+  // 24h stories: stories posted, and the longest run of consecutive UTC days with
+  // one inside the window. Written by the external rollup job (handoff:
+  // /home/dockeruser/story-leaderboard-rollup-handoff.md); read 0 until it does.
+  'story_uploads',
+  'story_streak',
 ];
 
 // Watch-duration tracking only started on this date, so for the 30d/365d/all
