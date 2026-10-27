@@ -3,7 +3,7 @@ const router = express.Router();
 const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
 const { unavailableMatch } = require('../utils/unavailable');
-const { hiddenFromFeedMatch } = require('../utils/hiddenFromFeed');
+const { hiddenFromFeedMatch, isExpiredStory } = require('../utils/hiddenFromFeed');
 const { isNsfwAllowed, nsfwFilterHiveTags } = require('../utils/filters');
 const { hiddenListSync } = require('../utils/hiddenCreators');
 const { HIDDEN_AUTHORS, SHORT_SORT_INTERVAL, REWARD_WEIGHT, RESHARE_WEIGHT, ENABLE_MONGO_WRITES, RELATED_TOPIC_MULT, SHORTS_WINDOW_DAYS, SHORTS_FOLLOW_WINDOW_DAYS, SHORTS_RECENCY_BOOST, SHORTS_RECENCY_HALFLIFE_H } = require('../utils/config');
@@ -100,6 +100,8 @@ router.get('/shorts', async (req, res) => {
                     thumbnail_url: short.thumbnail_url,
                     embed_url: short.embed_url,
                     embed_title: short.embed_title,
+                    // A live 24h story: the player shows a "Story" badge with time left.
+                    ...(short.story === true ? { story: true, story_expires_at: short.story_expires_at } : {}),
                     // false only when explicitly unlisted; lets the owner's profile badge it.
                     listed_on_3speak: short.listed_on_3speak !== false,
                     unlisted: short.listed_on_3speak === false
@@ -378,6 +380,8 @@ router.get('/shorts/:username', async (req, res) => {
                     thumbnail_url: short.thumbnail_url,
                     embed_url: short.embed_url,
                     embed_title: short.embed_title,
+                    // A live 24h story: the player shows a "Story" badge with time left.
+                    ...(short.story === true ? { story: true, story_expires_at: short.story_expires_at } : {}),
                     // false only when explicitly unlisted; lets the owner's profile badge it.
                     listed_on_3speak: short.listed_on_3speak !== false,
                     unlisted: short.listed_on_3speak === false
@@ -749,8 +753,11 @@ router.get('/shortssorted', async (req, res) => {
                 (s) => ({ owner: s.owner, permlink: getHivePermlink(s) }));
         }
 
-        // Apply pagination to sorted results
-        const paginatedShorts = sortedShorts.slice(skip, skip + limit);
+        // Apply pagination to sorted results. A 24h story can expire while the pool
+        // and the sorted list above are still cached (minutes), so it is dropped from
+        // the page here, AFTER slicing: the page comes back one short rather than
+        // shifting every later page by one.
+        const paginatedShorts = sortedShorts.slice(skip, skip + limit).filter((s) => !isExpiredStory(s));
 
         // Fetch all display data for this page only (live from RPC, no post-level cache)
         const pageAuthorPerms = paginatedShorts
@@ -798,6 +805,8 @@ router.get('/shortssorted', async (req, res) => {
                     thumbnail_url: short.thumbnail_url,
                     embed_url: short.embed_url,
                     embed_title: short.embed_title,
+                    // A live 24h story: the player shows a "Story" badge with time left.
+                    ...(short.story === true ? { story: true, story_expires_at: short.story_expires_at } : {}),
                     // false only when explicitly unlisted; lets the owner's profile badge it.
                     listed_on_3speak: short.listed_on_3speak !== false,
                     unlisted: short.listed_on_3speak === false

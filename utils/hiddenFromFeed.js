@@ -34,12 +34,33 @@ const HIDE_FROM_FEED_ENABLED =
  * per-collection field argument is needed (unlike feedAgeMatch).
  */
 function hiddenFromFeedMatch() {
-  return HIDE_FROM_FEED_ENABLED ? { hiddenFromFeed: { $ne: true } } : {};
+  return {
+    ...(HIDE_FROM_FEED_ENABLED ? { hiddenFromFeed: { $ne: true } } : {}),
+    ...liveStoryMatch(),
+  };
+}
+
+/**
+ * 24h stories (routes/stories.js) are shorts like any other while they are live,
+ * so they show in the shorts feeds; once `story_expires_at` has passed they are
+ * gone from 3Speak, so every feed that hides opted-out videos drops them too.
+ * Only stories carry the field, and `$not: {$lte}` matches a missing one, so
+ * every other doc passes. Not behind HIDE_FROM_FEED_ENABLED: expiry is not an
+ * author preference that can be switched off.
+ */
+function liveStoryMatch() {
+  return { story_expires_at: { $not: { $lte: new Date() } } };
+}
+
+/** In-memory twin of liveStoryMatch, for docs out of a cache that may be minutes old. */
+function isExpiredStory(doc) {
+  return !!doc && doc.story === true && !!doc.story_expires_at
+    && new Date(doc.story_expires_at).getTime() <= Date.now();
 }
 
 /** In-memory equivalent, for filtering an already-fetched doc (e.g. in hydrate()). */
 function isHiddenFromFeed(doc) {
-  return HIDE_FROM_FEED_ENABLED && !!doc && doc.hiddenFromFeed === true;
+  return (HIDE_FROM_FEED_ENABLED && !!doc && doc.hiddenFromFeed === true) || isExpiredStory(doc);
 }
 
-module.exports = { HIDE_FROM_FEED_ENABLED, hiddenFromFeedMatch, isHiddenFromFeed };
+module.exports = { HIDE_FROM_FEED_ENABLED, hiddenFromFeedMatch, isHiddenFromFeed, isExpiredStory };

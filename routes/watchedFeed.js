@@ -183,6 +183,10 @@ router.get('/watched/:username', async (req, res) => {
       const legacy = ev ? null : legacyByKey.get(key);
       // A video we no longer hold anywhere is left out, as the page always did.
       if (!ev && !legacy) continue;
+      // A 24h story is gone from 3Speak once it expires (routes/stories.js), so it
+      // leaves the history too. The tab counts still include it: they are plain
+      // history counts, and a page just comes back one card short.
+      if (ev && ev.story === true && ev.story_expires_at && new Date(ev.story_expires_at) <= new Date()) continue;
       const card = ev ? embedCard(ev) : { ...legacy, author: legacy.author || legacy.owner };
       videos.push({
         ...card,

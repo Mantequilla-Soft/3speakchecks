@@ -143,10 +143,12 @@ router.get('/user/:username/counts', async (req, res) => {
         owner: username, status: 'published', short: false, listed_on_3speak: true,
         hive_author: { $ne: null }, hive_permlink: { $ne: null }, ...BANNED_FILTER,
       }),
-      // shorts — as /shorts/:username counts them (embed_url, NOT hive_permlink)
+      // shorts — as /shorts/:username counts them (embed_url, NOT hive_permlink),
+      // so a 24h story counts only while it is live (routes/stories.js)
       tally(embedVideoCollection, {
         owner: username, status: 'published', short: true, processed: true,
         embed_url: { $exists: true, $ne: null }, listed_on_3speak: { $ne: false },
+        $or: [{ story: { $ne: true } }, { story_expires_at: { $gt: new Date() } }],
       }),
       // legacy — /api/my-videos also excludes failed publishes
       tally(db.collection('videos'), {

@@ -8,9 +8,8 @@
  *
  *   story: true, story_posted_at, story_expires_at   the 24h window, anchored on
  *                                                     the Hive post's created time
- *   hiddenFromFeed: true                              keeps it out of every shorts /
- *                                                     discovery feed (utils/hiddenFromFeed.js);
- *                                                     stories have their own row
+ * While live it is an ordinary short in every shorts feed (with a "Story" badge
+ * in the player); once expired, utils/hiddenFromFeed.js drops it from them all.
  *
  * Nobody signs anything extra for this. POST /stories/register only repeats what
  * the author's post already says: it reads the post from Hive, and acts only when
@@ -273,7 +272,6 @@ router.post('/stories/register', express.json({ limit: '4kb' }), async (req, res
             story: true,
             story_posted_at: postedAt,
             story_expires_at: expiresAt,
-            hiddenFromFeed: true,
             hive_author: author,
             hive_permlink: post.permlink,
             embed_url: `@${author}/${post.permlink}`,

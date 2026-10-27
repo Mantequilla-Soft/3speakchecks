@@ -344,6 +344,9 @@ async function loadShortsPool(db, windowDays, nsfwAllowed) {
             projection: {
                 owner: 1, author: 1, permlink: 1, embed_url: 1, thumbnail_url: 1,
                 embed_title: 1, frontend_app: 1, createdAt: 1, views: 1,
+                // 24h stories: /shortssorted drops expired ones per request and the
+                // player badges live ones (routes/stories.js).
+                story: 1, story_expires_at: 1,
             },
         })
         .sort({ createdAt: -1 })
