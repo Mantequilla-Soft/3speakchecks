@@ -668,31 +668,47 @@ router.get('/shortssorted', async (req, res) => {
                 ? [...candidateShorts].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
                 : [...candidateShorts].sort((a, b) => b.sort_score - a.sort_score);
 
+            // Live 24h stories (routes/stories.js) lead the feed, in every mode but the
+            // watch page's topic rail: followed creators' stories first, then the
+            // newest. They skip the same-author rule below, which DROPS a short rather
+            // than moving it, so a creator's second story would vanish. Watched stories
+            // still go to the back with everything else (the hideWatched freeze below).
+            const isLiveStory = (s) => s.story === true && !isExpiredStory(s);
+            const stories = topic ? [] : scoreSorted.filter(isLiveStory);
+            const followsAuthor = (s) => (followSet && followSet.has(hiveAuthor(s)) ? 1 : 0);
+            stories.sort((a, b) => (followsAuthor(b) - followsAuthor(a))
+                || (new Date(b.story_expires_at) - new Date(a.story_expires_at)));
+            const rest = stories.length ? scoreSorted.filter((s) => !isLiveStory(s)) : scoreSorted;
+
+            // Store identifiers + content data for the cache
+            const cacheEntry = (short) => ({
+                owner: short.owner,
+                permlink: short.permlink,
+                embed_url: short.embed_url,
+                thumbnail_url: short.thumbnail_url,
+                embed_title: short.embed_title,
+                frontend_app: short.frontend_app,
+                createdAt: short.createdAt,
+                views: short.views,
+                hive_title: short.hive_title || '',
+                hive_body: short.hive_body || '',
+                hive_tags: short.hive_tags || [],
+                hive_sound: short.hive_sound || null,
+                reshare_count: short.reshare_count || 0,
+                saves: short.saves || 0,
+                viewer_tags: short.viewer_tags || 0,
+                // Carried through the cache so the response can expose it.
+                winner_tag: short.winner_tag || null,
+                // The response badges a live story and the page drops an expired one.
+                ...(short.story === true ? { story: true, story_expires_at: short.story_expires_at } : {})
+            });
+
             // Remove consecutive shorts by the same author (keep first, skip until a different author appears)
-            sortedShorts = [];
-            let lastOwner = null;
-            for (const short of scoreSorted) {
+            sortedShorts = stories.map(cacheEntry);
+            let lastOwner = stories.length ? stories[stories.length - 1].owner : null;
+            for (const short of rest) {
                 if (short.owner !== lastOwner) {
-                    // Store identifiers + content data for the cache
-                    sortedShorts.push({
-                        owner: short.owner,
-                        permlink: short.permlink,
-                        embed_url: short.embed_url,
-                        thumbnail_url: short.thumbnail_url,
-                        embed_title: short.embed_title,
-                        frontend_app: short.frontend_app,
-                        createdAt: short.createdAt,
-                        views: short.views,
-                        hive_title: short.hive_title || '',
-                        hive_body: short.hive_body || '',
-                        hive_tags: short.hive_tags || [],
-                        hive_sound: short.hive_sound || null,
-                        reshare_count: short.reshare_count || 0,
-                        saves: short.saves || 0,
-                        viewer_tags: short.viewer_tags || 0,
-                        // Carried through the cache so the response can expose it.
-                        winner_tag: short.winner_tag || null
-                    });
+                    sortedShorts.push(cacheEntry(short));
                     lastOwner = short.owner;
                 }
             }
