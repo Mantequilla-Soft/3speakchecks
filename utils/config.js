@@ -1180,8 +1180,9 @@ module.exports = {
     // has said since ads existed: "If shorts ever carry ads it needs its own slot
     // type, not the mid-roll rules borrowed" — putting a 15s roll in front of a 12s
     // short delivers an impression to someone who never wanted the content.
-    // Kept low while the shorts audience is small. 5s over 7 days = 17.5 HBD.
-    AD_SHORTS_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_SHORTS_PRICE_PER_SECOND_DAY_HBD) || 0.2,
+    // Kept low while the shorts audience is small. 5s over 7 days = 4.18 HBD (with the
+    // day curve, see AD_DAY_CURVE_K). 0.16 is the standard rate from 2026-11-01 (owner).
+    AD_SHORTS_PRICE_PER_SECOND_DAY_HBD: parseFloat(process.env.AD_SHORTS_PRICE_PER_SECOND_DAY_HBD) || 0.16,
     // Shorter than a watch-page roll on purpose: the whole surface is built on quick
     // swipes and the tolerance for a spot is correspondingly lower.
     AD_SHORTS_MAX_SECONDS: parseInt(process.env.AD_SHORTS_MAX_SECONDS) || 10,
