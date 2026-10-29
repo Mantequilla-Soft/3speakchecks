@@ -27,6 +27,7 @@ const adInventory = require('./services/adInventory');
 const adPaymentWatch = require('./services/adPaymentWatch');
 const susScan = require('./services/susScan');
 const podpingFeeds = require('./services/podpingFeeds');
+const lightningSupports = require('./services/lightningSupports');
 const adPayouts = require('./services/adPayouts');
 const adCreativeSync = require('./services/adCreativeSync');
 const adSettings = require('./utils/adSettings');
@@ -432,6 +433,19 @@ async function startServer() {
 
     // Podping: announce channel feeds that gained an episode, via the local
     // podping-hivepinger. Each run is a no-op while hivepinger is not up.
+    // Lightning tips: @v4vapp credits whose memo links a 3Speak post become
+    // supports. Main thread, see services/lightningSupports.js.
+    if (lightningSupports.enabled()) {
+        const lnIntervalMs = lightningSupports.INTERVAL_MIN * 60 * 1000;
+        setTimeout(() => {
+            lightningSupports.runOnce();
+            setInterval(() => lightningSupports.runOnce(), lnIntervalMs);
+        }, 90 * 1000);   // 1.5 min after boot
+        console.log(`Lightning supports watcher scheduled every ${lightningSupports.INTERVAL_MIN} min (first run in 1.5 min)`);
+    } else {
+        console.log('Lightning supports watcher disabled');
+    }
+
     if (podpingFeeds.enabled()) {
         const podpingIntervalMs = podpingFeeds.INTERVAL_MIN * 60 * 1000;
         setTimeout(() => {
