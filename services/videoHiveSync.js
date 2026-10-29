@@ -187,6 +187,25 @@ function deadOp(doc) {
     };
 }
 
+// Mark a linked doc `processed`. Every shorts list (/shorts/:user, /shortssorted,
+// search, the user rails) requires processed: true, and only two things ever set
+// it: the embed service's POST /video/:permlink/hive, which a client calls after
+// broadcasting (3speak.tv and most Ecency uploads do), and an off-box enricher
+// that also stamped processedAt. That enricher last wrote on 2026-10-05 10:08 UTC,
+// so every Snapie, Snapie mobile and hive-react-kit short since then was linked
+// here but stayed invisible on 3Speak (@seckorama's report, 143 docs by
+// 2026-10-29). A link this worker has just verified is exactly what the flag
+// meant, so set it, and stamp processedAt the way the enricher did. The filter
+// keeps it a one-time write per doc.
+function processedOp(doc) {
+    return {
+        updateOne: {
+            filter: { _id: doc._id, processed: { $ne: true } },
+            update: { $set: { processed: true, processedAt: new Date() } },
+        },
+    };
+}
+
 // Stamp a miss so a doc whose post we cannot find stops being re-fetched every run.
 function stampOp(doc) {
     return {
@@ -273,7 +292,7 @@ async function verifyLinkedDocs(ev) {
             { hive_link_verified_at: { $lt: staleCutoff } },
         ],
     })
-        .project({ owner: 1, permlink: 1, hive_author: 1, hive_permlink: 1, hive_title: 1, hive_body: 1, hive_tags: 1, createdAt: 1 })
+        .project({ owner: 1, permlink: 1, hive_author: 1, hive_permlink: 1, hive_title: 1, hive_body: 1, hive_tags: 1, processed: 1, createdAt: 1 })
         .sort({ createdAt: -1 })   // a fresh rot is the one still worth repairing
         .limit(VIDEO_HIVE_SYNC_VERIFY_BATCH)
         .toArray();
@@ -307,6 +326,7 @@ async function verifyLinkedDocs(ev) {
                 // alone deliberately: postReferencesAsset is a heuristic, and
                 // acting on it here would unlink rows that are perfectly fine.
                 ops.push(verifiedOp(doc));
+                if (doc.processed !== true) ops.push(processedOp(doc));
                 out.verified++;
                 continue;
             }
@@ -340,6 +360,7 @@ async function verifyLinkedDocs(ev) {
             }
             if (live) {
                 ops.push(repairOp(doc, live));
+                if (doc.processed !== true) ops.push(processedOp(doc));
                 out.repaired++;
                 console.log(`[videoHiveSync] repaired ${doc.owner}/${doc.permlink}: @${doc.hive_author || doc.owner}/${doc.hive_permlink} is gone -> @${live.author}/${live.permlink}`);
             } else {
@@ -391,7 +412,7 @@ async function syncVideoHiveLinks() {
             },
         ],
     })
-        .project({ owner: 1, permlink: 1, embed_url: 1, hive_title: 1, hive_body: 1, hive_tags: 1, createdAt: 1 })
+        .project({ owner: 1, permlink: 1, embed_url: 1, hive_title: 1, hive_body: 1, hive_tags: 1, processed: 1, createdAt: 1 })
         .sort({ createdAt: -1 })   // newest first: a just-published short links soonest
         .limit(VIDEO_HIVE_SYNC_BATCH)
         .toArray();
@@ -455,6 +476,7 @@ async function syncVideoHiveLinks() {
                 continue;
             }
             ops.push(linkOp(entry.doc, post));
+            if (entry.doc.processed !== true) ops.push(processedOp(entry.doc));
             linked++;
         }
     }
@@ -479,6 +501,7 @@ async function syncVideoHiveLinks() {
                 const match = await pickLivePost(posts, doc.permlink);
                 if (match) {
                     ops.push(linkOp(doc, match));
+                    if (doc.processed !== true) ops.push(processedOp(doc));
                     linked++;
                 } else {
                     ops.push(stampOp(doc));
