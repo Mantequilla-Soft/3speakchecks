@@ -900,11 +900,16 @@ router.get('/playlists', async (req, res) => {
     try {
         const db = getDb();
         const perGroup = Math.min(Math.max(parseInt(req.query.limit) || 24, 1), 60);
+        // ?owner=<user>: one creator's albums/playlists only (profile pages).
+        const owner = String(req.query.owner || '').trim().toLowerCase();
+        if (owner && !/^[a-z][a-z0-9.-]{2,15}$/.test(owner)) {
+            return res.json({ by_artist: [], by_listeners: [] });
+        }
 
         // Recent public playlists that actually have items.
         const candidates = await db.collection('playlists').find({
             access: 'public',
-            owner: { $type: 'string', $ne: '' },
+            owner: owner || { $type: 'string', $ne: '' },
             'items.0': { $exists: true },
         }).sort({ last_modified_block: -1, _id: -1 }).limit(400).toArray();
 
