@@ -50,12 +50,16 @@ describe('parseFeed', () => {
     expect(episodes[0].value).toBeUndefined();
   });
 
-  test('keeps only the newest 50, and copes with an oldest-first feed', () => {
+  test('a routine poll reads the newest items, a full read all of them, oldest-first feeds too', () => {
     const many = Array.from({ length: 80 }, (_, i) => item(i, new Date(Date.UTC(2020, 0, 1 + i)).toUTCString())).join('');
-    const { episodes, itemCount } = parseFeed(feed(many));
-    expect(itemCount).toBe(80);
-    expect(episodes).toHaveLength(50);
-    expect(episodes[0].guid).toBe('ep-79');
+    const quick = parseFeed(feed(many));
+    expect(quick.itemCount).toBe(80);
+    expect(quick.episodes).toHaveLength(60);
+    expect(quick.episodes[0].guid).toBe('ep-79');
+    expect(quick.complete).toBe(false);
+    const full = parseFeed(feed(many), { all: true });
+    expect(full.episodes).toHaveLength(80);
+    expect(full.complete).toBe(true);
   });
 
   test('skips items without playable media, refuses non-RSS', () => {
@@ -135,5 +139,26 @@ describe('cover art tokens', () => {
     expect(urlFromToken('nonsense')).toBeNull();
     expect(artToken('')).toBe('');
     expect(artToken('ftp://x/y.jpg')).toBe('');
+  });
+});
+
+describe('show art fallback', () => {
+  test('a show without a cover takes its newest episode art', () => {
+    const xml = `<?xml version="1.0"?><rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>No cover</title>
+      <item><title>Old</title><guid>o</guid><pubDate>Mon, 19 Oct 2026 10:00:00 GMT</pubDate><enclosure url="https://c/o.mp3" type="audio/mpeg"/><itunes:image href="https://c/old.jpg"/></item>
+      <item><title>New, no art</title><guid>n</guid><pubDate>Wed, 21 Oct 2026 10:00:00 GMT</pubDate><enclosure url="https://c/n.mp3" type="audio/mpeg"/></item>
+      <item><title>A</title><guid>a</guid><pubDate>Tue, 20 Oct 2026 10:00:00 GMT</pubDate><enclosure url="https://c/a.mp3" type="audio/mpeg"/><itunes:image href="https://c/a.jpg"/></item>
+    </channel></rss>`;
+    const { show, episodes } = parseFeed(xml, { all: true });
+    // The most recent episode WITH art, not the first one in the file.
+    expect(show.image).toBe('https://c/a.jpg');
+    expect(episodes.find((e) => e.guid === 'a').image).toBeUndefined();
+    expect(episodes.find((e) => e.guid === 'o').image).toBe('https://c/old.jpg');
+  });
+
+  test('no art anywhere: no image (the page shows its placeholder)', () => {
+    const xml = `<?xml version="1.0"?><rss><channel><title>Bare</title>
+      <item><title>A</title><guid>a</guid><enclosure url="https://c/a.mp3" type="audio/mpeg"/></item></channel></rss>`;
+    expect(parseFeed(xml).show.image).toBe('');
   });
 });

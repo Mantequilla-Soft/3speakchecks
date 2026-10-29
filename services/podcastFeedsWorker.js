@@ -6,19 +6,22 @@
  *
  *   { id, type: 'tick' }                  poll every feed that is due
  *   { id, type: 'probe', url }            someone added a URL: fetch it now, store it
- *   { id, type: 'older', feed_id, offset } "load older": episodes past the 50 we keep
  *
  * and replies { id, ok, ... }. Parsing a big feed is synchronous CPU work, which is
  * why none of this happens on the thread that answers HTTP requests.
  *
+ * Every episode is kept (up to MAX_ALL_ITEMS per show). A new feed is read in
+ * full; after that a poll reads only the newest items to find new episodes, and
+ * at most once a day (FULL_EVERY) a changed feed is read in full again, which is
+ * also when episodes the host removed are dropped.
+ *
  * What a poll costs Mongo: nothing when the host answers 304 or the body hash is
- * unchanged, apart from the schedule fields on the feed row. Only a feed that
- * really changed rewrites its (at most 50) episode rows, and MongoDB treats an
+ * unchanged, apart from the schedule fields on the feed row. MongoDB treats an
  * update that sets the same values as a no-op.
  */
 const crypto = require('crypto');
 const { parentPort } = require('worker_threads');
-const { MongoClient, ObjectId } = require('mongodb');
+const { MongoClient } = require('mongodb');
 const { MONGODB_URI, DATABASE_NAME } = require('../utils/config');
 const { safeFetch } = require('../utils/safeFetch');
 const { parseFeed, urlKey, episodeId } = require('../utils/podcastParse');
@@ -39,12 +42,10 @@ const PER_HOST = 2;
 // are stored quietly instead of buzzing every subscriber.
 const NOTIFY_MAX_NEW = 5;
 const NOTIFY_MAX_AGE = 7 * DAY;
-const OLDER_TTL = 10 * MIN;
-const OLDER_CACHE_MAX = 8;
+const FULL_EVERY = DAY;
 
 let client;
 let db;
-const olderCache = new Map();
 
 async function connect() {
   if (db) return db;
@@ -81,7 +82,7 @@ function showSet(show) {
 }
 
 /** Write a parsed feed's episodes; returns the ones that count as new for notifications. */
-async function writeEpisodes(feed, episodes, { firstFetch }) {
+async function writeEpisodes(feed, episodes, { firstFetch, prune }) {
   const feedHex = feed._id.toHexString();
   const col = db.collection(EPISODES);
   const rows = episodes.map((e) => ({ ...e, _id: episodeId(feedHex, e.guid) }));
@@ -105,10 +106,9 @@ async function writeEpisodes(feed, episodes, { firstFetch }) {
     if (Object.keys(unset).length) update.$unset = unset;
     return { updateOne: { filter: { _id }, update, upsert: true } };
   });
-  await col.bulkWrite(ops, { ordered: false });
-  // The rolling window: whatever fell out of the newest 50 (or was deleted by the
-  // host) goes. "Load older" reads those straight from the feed.
-  await col.deleteMany({ feed_id: feed._id, _id: { $nin: ids } });
+  for (let i = 0; i < ops.length; i += 500) await col.bulkWrite(ops.slice(i, i + 500), { ordered: false });
+  // Only a read of the whole feed knows what the host removed.
+  if (prune) await col.deleteMany({ feed_id: feed._id, _id: { $nin: ids } });
   return announce.map((r) => ({ id: r._id, title: r.title }));
 }
 
@@ -175,7 +175,8 @@ async function pollFeed(feed, { force = false } = {}) {
       return { feed_id: feed._id, status: 'unchanged' };
     }
 
-    const { show, episodes, itemCount } = parseFeed(res.body.toString('utf8'));
+    const full = force || firstFetch || !feed.last_full_at || Date.now() - new Date(feed.last_full_at).getTime() > FULL_EVERY;
+    const { show, episodes, itemCount, complete } = parseFeed(res.body.toString('utf8'), { all: full });
     if (!episodes.length) {
       const e = new Error('no playable episodes');
       e.code = 'no_episodes';
@@ -192,6 +193,7 @@ async function pollFeed(feed, { force = false } = {}) {
     }
 
     const set = { ...showSet(show).set, ...cond, body_hash: hash, item_count: itemCount, status: 'ok', last_fetch_at: now, last_ok_at: now, error_count: 0 };
+    if (full) set.last_full_at = now;
     const unset = { ...showSet(show).unset, error: '' };
     const addKeys = [];
     // The feed really moved (all redirects permanent, or itunes:new-feed-url).
@@ -211,7 +213,7 @@ async function pollFeed(feed, { force = false } = {}) {
     if (newest) set.last_episode_at = newest.published_at;
     set.next_poll_at = new Date(Date.now() + jitter(pollInterval()));
 
-    const announce = await writeEpisodes(feed, episodes, { firstFetch });
+    const announce = await writeEpisodes(feed, episodes, { firstFetch, prune: full && complete });
     const update = { $set: set, $unset: unset };
     if (addKeys.length) update.$addToSet = { alt_keys: { $each: addKeys } };
     try {
@@ -258,7 +260,9 @@ async function tick() {
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, batch.length) }, async () => {
     while (i < batch.length) {
       const feed = batch[i++];
-      results.push(await pollFeed(feed));
+      // No cover yet: read it in full (no 304 / hash shortcut) so the show can
+      // take its newest episode's art (utils/podcastParse.js).
+      results.push(await pollFeed(feed, { force: feed.status === 'ok' && !feed.image }));
     }
   }));
   const announce = results
@@ -302,25 +306,6 @@ async function probe(url) {
   return { feed_id: (r.merged || feed._id).toHexString(), existed: !!r.merged };
 }
 
-/** Episodes beyond the 50 in Mongo, read live from the feed and cached for a while. */
-async function older(feedId, offset, limit) {
-  await connect();
-  let hit = olderCache.get(feedId);
-  if (!hit || Date.now() - hit.at > OLDER_TTL) {
-    const feed = await db.collection(FEEDS).findOne({ _id: new ObjectId(feedId) }, { projection: { url: 1 } });
-    if (!feed) return { error: 'not_found' };
-    const res = await safeFetch(feed.url, { timeoutMs: 25000, maxBytes: 32 * 1024 * 1024 });
-    const { episodes } = parseFeed(res.body.toString('utf8'), { all: true });
-    hit = {
-      at: Date.now(),
-      episodes: episodes.map(({ guid, ...e }) => ({ ...e, _id: episodeId(feedId, guid), feed_id: feedId })),
-    };
-    olderCache.set(feedId, hit);
-    while (olderCache.size > OLDER_CACHE_MAX) olderCache.delete(olderCache.keys().next().value);
-  }
-  return { episodes: hit.episodes.slice(offset, offset + limit), total: hit.episodes.length };
-}
-
 let ticking = false;
 // Required by the tests outside a worker, where there is no parent to talk to.
 if (parentPort) parentPort.on('message', async (msg) => {
@@ -332,9 +317,6 @@ if (parentPort) parentPort.on('message', async (msg) => {
       try { reply({ ok: true, ...(await tick()) }); } finally { ticking = false; }
     } else if (msg.type === 'probe') {
       const r = await probe(msg.url);
-      reply(r.error ? { ok: false, code: r.error } : { ok: true, ...r });
-    } else if (msg.type === 'older') {
-      const r = await older(msg.feed_id, Math.max(0, msg.offset | 0), Math.min(100, Math.max(1, msg.limit | 0 || 50)));
       reply(r.error ? { ok: false, code: r.error } : { ok: true, ...r });
     } else {
       reply({ ok: false, code: 'unknown_message' });

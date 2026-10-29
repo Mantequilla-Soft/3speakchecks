@@ -6,12 +6,14 @@
  *   GET  /podcasts/subscriptions?user=
  *   GET  /podcasts/latest?user=&before=&limit=     newest episodes of everything followed
  *   GET  /podcasts/notifications?user=             new episodes since each follow (bell)
- *   GET  /podcasts/feed/:id                        a show and its stored episodes
- *   GET  /podcasts/feed/:id/older?offset=          past the 50 we keep, read live
+ *   GET  /podcasts/feed/:id?since=&limit=          a show and its newest episodes
+ *   GET  /podcasts/feed/:id/older?offset=&since=   the next page of them
  *   GET  /podcasts/episode/:id
  *   GET  /podcasts/search?q=                       Podcast Index, when a key is set
  *   GET  /podcasts/discover                        most followed + recently followed shows
  *   GET  /podcasts/art/:token/:px.jpg              cover art, see utils/podcastArt.js
+ *   GET  /podcasts/progress?user=&ids=|&feed=      how far the user got in episodes
+ *   POST /podcasts/progress                        save that (session vouch, below)
  *
  * Writes, signed:
  *   POST /podcasts/subscribe   { user, urls: [..], titles?: [..], signature, timestamp }
@@ -44,7 +46,7 @@ const { artToken, urlFromToken, renderArt, SIZES } = require('../utils/podcastAr
 const podcastFeeds = require('../services/podcastFeeds');
 
 const router = express.Router();
-const { FEEDS, EPISODES, SUBS } = podcastFeeds.collections;
+const { FEEDS, EPISODES, SUBS, PROGRESS } = podcastFeeds.collections;
 
 const USER_RE = /^~?[a-z0-9][a-z0-9.-]{1,31}$/;
 const ID_RE = /^[0-9a-f]{24}$/;
@@ -87,16 +89,17 @@ async function proveUser(b, action, payload) {
 }
 
 // Every write is a database write; this keeps one account from making it a hobby.
-const recent = new Map();
-function tooMany(user, max = 60) {
+function tooManyIn(map, user, max) {
   const now = Date.now();
-  const list = (recent.get(user) || []).filter((t) => now - t < 60 * 60 * 1000);
+  const list = (map.get(user) || []).filter((t) => now - t < 60 * 60 * 1000);
   if (list.length >= max) return true;
   list.push(now);
-  recent.set(user, list);
-  if (recent.size > 5000) recent.delete(recent.keys().next().value);
+  map.set(user, list);
+  if (map.size > 5000) map.delete(map.keys().next().value);
   return false;
 }
+const recent = new Map();
+const tooMany = (user, max = 60) => tooManyIn(recent, user, max);
 
 function presentFeed(f, extra = {}) {
   if (!f) return null;
@@ -221,19 +224,35 @@ router.get('/notifications', async (req, res) => {
   }
 });
 
+// Every episode is stored, so a show pages straight from Mongo, newest first.
+// `since` (ISO date) is the date filter on the show page.
+function episodePage(req) {
+  const _id = new ObjectId(req.params.id);
+  const q = { feed_id: _id };
+  const since = req.query.since ? new Date(String(req.query.since)) : null;
+  if (since && !Number.isNaN(since.getTime())) q.published_at = { $gte: since };
+  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+  return { _id, q, limit, offset };
+}
+
 router.get('/feed/:id', async (req, res) => {
   if (!ID_RE.test(req.params.id)) return res.status(400).json({ success: false, error: 'invalid id' });
   try {
     const db = getDb();
-    const _id = new ObjectId(req.params.id);
+    const { _id, q, limit } = episodePage(req);
     const feed = await db.collection(FEEDS).findOne({ _id });
     if (!feed) return res.status(404).json({ success: false, error: 'not found' });
-    const eps = await db.collection(EPISODES).find({ feed_id: _id }).sort({ published_at: -1 }).limit(50).toArray();
+    const [eps, total] = await Promise.all([
+      db.collection(EPISODES).find(q).sort({ published_at: -1 }).limit(limit).toArray(),
+      db.collection(EPISODES).countDocuments(q),
+    ]);
     res.json({
       success: true,
       feed: presentFeed(feed, { subscribers: feed.subscribers || 0 }),
       episodes: eps.map(presentEpisode),
-      older_available: (feed.item_count || 0) > eps.length,
+      total,
+      older_available: total > eps.length,
     });
   } catch (err) {
     console.error('[podcasts] feed:', err.message);
@@ -243,11 +262,18 @@ router.get('/feed/:id', async (req, res) => {
 
 router.get('/feed/:id/older', async (req, res) => {
   if (!ID_RE.test(req.params.id)) return res.status(400).json({ success: false, error: 'invalid id' });
-  if (!podcastFeeds.enabled()) return disabled(res);
-  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
-  const r = await podcastFeeds.ask('older', { feed_id: req.params.id, offset, limit: 50 }, 40000);
-  if (!r.ok) return res.status(r.code === 'not_found' ? 404 : 502).json({ success: false, error: 'could not read the feed', code: r.code });
-  res.json({ success: true, episodes: r.episodes.map(presentEpisode), total: r.total, next_offset: offset + r.episodes.length });
+  try {
+    const { q, limit, offset } = episodePage(req);
+    const col = getDb().collection(EPISODES);
+    const [eps, total] = await Promise.all([
+      col.find(q).sort({ published_at: -1 }).skip(offset).limit(limit).toArray(),
+      col.countDocuments(q),
+    ]);
+    res.json({ success: true, episodes: eps.map(presentEpisode), total, next_offset: offset + eps.length });
+  } catch (err) {
+    console.error('[podcasts] older:', err.message);
+    res.status(500).json({ success: false, error: 'could not load episodes' });
+  }
 });
 
 router.get('/episode/:id', async (req, res) => {
@@ -350,6 +376,87 @@ router.get('/art/:token/:px.jpg', async (req, res) => {
     // The page shows its own podcast placeholder for a missing cover.
     res.set('Cache-Control', 'public, max-age=600');
     res.status(404).end();
+  }
+});
+
+// ─── Listening progress ──────────────────────────────────────────────────────
+// One small row per user and episode they played (`<user>|<episodeId>`: pos, dur,
+// done), dropped 180 days after the last listen (TTL on `at`). The player saves
+// every ~20 s, so this can't ask the wallet each time: the page holds one vouch
+// from our API (`progress-vouch` over "session") for up to a day and reuses it.
+// A stolen one could only move that person's progress bars.
+
+const PROGRESS_VOUCH_MAX_AGE_MS = 24 * 3600 * 1000;
+const progressBrake = new Map();
+
+async function proveProgressUser(b) {
+  const user = userOf(b.user);
+  if (!USER_RE.test(user)) return null;
+  const signature = typeof b.signature === 'string' ? b.signature.slice(0, 200) : '';
+  const timestamp = parseInt(b.timestamp, 10);
+  if (!signature || !Number.isFinite(timestamp) || Math.abs(Date.now() - timestamp) > PROGRESS_VOUCH_MAX_AGE_MS) return null;
+  try {
+    const v = await verifyDelegateVouch({ message: podcastMessage('progress-vouch', user, 'session', timestamp), signature, delegates: AD_SIGNING_DELEGATES });
+    return v.ok ? user : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+const presentProgress = (rows) => Object.fromEntries(rows.map((r) => [r.ep, { pos: r.pos, dur: r.dur, done: !!r.done }]));
+
+router.get('/progress', async (req, res) => {
+  const user = userOf(req.query.user);
+  if (!USER_RE.test(user)) return res.status(400).json({ success: false, error: 'invalid user' });
+  const q = { user };
+  if (req.query.feed) {
+    if (!ID_RE.test(String(req.query.feed))) return res.status(400).json({ success: false, error: 'invalid feed' });
+    q.feed_id = new ObjectId(String(req.query.feed));
+  } else {
+    const ids = String(req.query.ids || '').split(',').filter((id) => EPISODE_RE.test(id)).slice(0, 150);
+    if (!ids.length) return res.json({ success: true, progress: {} });
+    q._id = { $in: ids.map((id) => `${user}|${id}`) };
+  }
+  try {
+    const rows = await getDb().collection(PROGRESS).find(q, { projection: { ep: 1, pos: 1, dur: 1, done: 1 } }).limit(3000).toArray();
+    res.set('Cache-Control', 'no-store');
+    res.json({ success: true, progress: presentProgress(rows) });
+  } catch (err) {
+    console.error('[podcasts] progress read:', err.message);
+    res.status(500).json({ success: false, error: 'could not load progress' });
+  }
+});
+
+router.post('/progress', express.json({ limit: '8kb' }), async (req, res) => {
+  const b = req.body || {};
+  const user = await proveProgressUser(b);
+  if (!user) return res.status(401).json({ success: false, error: 'Invalid signature' });
+  const items = (Array.isArray(b.items) ? b.items : []).slice(0, 20).filter((it) => it && EPISODE_RE.test(String(it.id)));
+  if (!items.length) return res.status(400).json({ success: false, error: 'no items' });
+  if (tooManyIn(progressBrake, user, 720)) return res.status(429).json({ success: false, error: 'too many updates' });
+  const now = new Date();
+  const ops = items.map((it) => {
+    const dur = Math.max(0, Math.min(86400, Math.round(Number(it.dur) || 0)));
+    const pos = Math.max(0, Math.min(dur || 86400, Math.round(Number(it.pos) || 0)));
+    // Finished: the last 5 %, or the last 30 s (outros and ads).
+    const done = dur > 0 && (pos >= dur * 0.95 || dur - pos <= 30);
+    const id = String(it.id);
+    return {
+      updateOne: {
+        filter: { _id: `${user}|${id}` },
+        // `done` only ever goes from false to true: playing a finished episode
+        // again from the start keeps it marked as listened.
+        update: { $set: { user, ep: id, feed_id: new ObjectId(id.slice(0, 24)), pos, dur, at: now }, $max: { done } },
+        upsert: true,
+      },
+    };
+  });
+  try {
+    await getDb().collection(PROGRESS).bulkWrite(ops, { ordered: false });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[podcasts] progress write:', err.message);
+    res.status(500).json({ success: false, error: 'could not save progress' });
   }
 });
 
