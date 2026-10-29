@@ -565,7 +565,8 @@ module.exports = {
     // creator suggestions) — e.g. bots/spam gaming the boards. This is NARROWER than
     // the site-wide hidden-creators list: these accounts still appear in feeds/search/
     // their own profile; they're just kept off the boards. Comma-separated, lowercased.
-    LEADERBOARD_EXCLUDED_USERS: (process.env.LEADERBOARD_EXCLUDED_USERS || 'badadib')
+    // Default: the platform's own account and the end-to-end test account.
+    LEADERBOARD_EXCLUDED_USERS: (process.env.LEADERBOARD_EXCLUDED_USERS || 'badadib,e2etestobs')
         .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
 
     // Accounts that never RECEIVE an ad payout, as creator or as viewer. badadib is
