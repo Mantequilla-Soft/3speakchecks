@@ -6,8 +6,8 @@
  *   GET  /podcasts/subscriptions?user=
  *   GET  /podcasts/latest?user=&before=&limit=     newest episodes of everything followed
  *   GET  /podcasts/notifications?user=             new episodes since each follow (bell)
- *   GET  /podcasts/feed/:id?since=&limit=          a show and its newest episodes
- *   GET  /podcasts/feed/:id/older?offset=&since=   the next page of them
+ *   GET  /podcasts/feed/:id?since=&until=&limit=   a show and its newest episodes
+ *   GET  /podcasts/feed/:id/older?offset=&since=&until=   the next page of them
  *   GET  /podcasts/episode/:id
  *   GET  /podcasts/search?q=                       Podcast Index, when a key is set
  *   GET  /podcasts/discover                        most followed + recently followed shows
@@ -225,12 +225,17 @@ router.get('/notifications', async (req, res) => {
 });
 
 // Every episode is stored, so a show pages straight from Mongo, newest first.
-// `since` (ISO date) is the date filter on the show page.
+// `since` / `until` (ISO dates, either may be left out) are the show page's date
+// filter, presets and custom range alike.
 function episodePage(req) {
   const _id = new ObjectId(req.params.id);
   const q = { feed_id: _id };
   const since = req.query.since ? new Date(String(req.query.since)) : null;
-  if (since && !Number.isNaN(since.getTime())) q.published_at = { $gte: since };
+  const until = req.query.until ? new Date(String(req.query.until)) : null;
+  const range = {};
+  if (since && !Number.isNaN(since.getTime())) range.$gte = since;
+  if (until && !Number.isNaN(until.getTime())) range.$lte = until;
+  if (Object.keys(range).length) q.published_at = range;
   const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
   const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
   return { _id, q, limit, offset };
