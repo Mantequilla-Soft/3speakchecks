@@ -28,6 +28,7 @@ const adPaymentWatch = require('./services/adPaymentWatch');
 const susScan = require('./services/susScan');
 const podpingFeeds = require('./services/podpingFeeds');
 const lightningSupports = require('./services/lightningSupports');
+const podcastFeeds = require('./services/podcastFeeds');
 const adPayouts = require('./services/adPayouts');
 const adCreativeSync = require('./services/adCreativeSync');
 const adSettings = require('./utils/adSettings');
@@ -134,6 +135,7 @@ app.use('/', subtitleProxyRoutes);
 app.use('/', subtitleEditRoutes);          // author caption edits; same ordering rule (before streamStats)
 app.use('/', require('./routes/commentPins')); // author pins comments on own video; same ordering rule
 app.use('/', require('./routes/supports'));    // every tip on a video (profile Supporters); same ordering rule
+app.use('/podcasts', require('./routes/podcasts')); // outside podcast feeds (Podcasts tab on /audio); same ordering rule
 app.use('/advertise', advertiseRoutes);   // same reason as above: must precede streamStatsRoutes
 app.use('/advertise', adCampaignRoutes);  // booking + payment, same mount, same ordering rule
 app.use('/advertise', adSelfPromoRoutes); // a creator promoting their OWN video, same mount
@@ -433,6 +435,9 @@ async function startServer() {
 
     // Podping: announce channel feeds that gained an episode, via the local
     // podping-hivepinger. Each run is a no-op while hivepinger is not up.
+    // Outside podcast feeds: a worker thread polls every followed feed every 30 min.
+    podcastFeeds.start();
+
     // Lightning tips: @v4vapp credits whose memo links a 3Speak post become
     // supports. Main thread, see services/lightningSupports.js.
     if (lightningSupports.enabled()) {
