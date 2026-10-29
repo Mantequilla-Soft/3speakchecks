@@ -50,12 +50,16 @@ describe('parseFeed', () => {
     expect(episodes[0].value).toBeUndefined();
   });
 
-  test('keeps only the newest 50, and copes with an oldest-first feed', () => {
+  test('a routine poll reads the newest items, a full read all of them, oldest-first feeds too', () => {
     const many = Array.from({ length: 80 }, (_, i) => item(i, new Date(Date.UTC(2020, 0, 1 + i)).toUTCString())).join('');
-    const { episodes, itemCount } = parseFeed(feed(many));
-    expect(itemCount).toBe(80);
-    expect(episodes).toHaveLength(50);
-    expect(episodes[0].guid).toBe('ep-79');
+    const quick = parseFeed(feed(many));
+    expect(quick.itemCount).toBe(80);
+    expect(quick.episodes).toHaveLength(60);
+    expect(quick.episodes[0].guid).toBe('ep-79');
+    expect(quick.complete).toBe(false);
+    const full = parseFeed(feed(many), { all: true });
+    expect(full.episodes).toHaveLength(80);
+    expect(full.complete).toBe(true);
   });
 
   test('skips items without playable media, refuses non-RSS', () => {
@@ -121,5 +125,54 @@ describe('routes and podping', () => {
     expect(service.pingedUrls(op('podping', { urls: ['https://b/y.xml'] }))).toEqual(['https://b/y.xml']);
     expect(service.pingedUrls(op('podping', { url: 'https://c/z.xml' }))).toEqual(['https://c/z.xml']);
     expect(service.pingedUrls(op('follow', { iris: ['https://a/x.xml'] }))).toEqual([]);
+  });
+});
+
+describe('cover art tokens', () => {
+  const { artToken, urlFromToken } = require('../utils/podcastArt');
+  test('only tokens the checker made resolve', () => {
+    const url = 'https://cdn.example.com/cover.jpg';
+    const token = artToken(url);
+    expect(urlFromToken(token)).toBe(url);
+    const [sig] = token.split('.');
+    expect(urlFromToken(`${sig}.${Buffer.from('http://127.0.0.1/x').toString('base64url')}`)).toBeNull();
+    expect(urlFromToken('nonsense')).toBeNull();
+    expect(artToken('')).toBe('');
+    expect(artToken('ftp://x/y.jpg')).toBe('');
+  });
+});
+
+describe('show art fallback', () => {
+  test('a show without a cover takes its newest episode art', () => {
+    const xml = `<?xml version="1.0"?><rss xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"><channel><title>No cover</title>
+      <item><title>Old</title><guid>o</guid><pubDate>Mon, 19 Oct 2026 10:00:00 GMT</pubDate><enclosure url="https://c/o.mp3" type="audio/mpeg"/><itunes:image href="https://c/old.jpg"/></item>
+      <item><title>New, no art</title><guid>n</guid><pubDate>Wed, 21 Oct 2026 10:00:00 GMT</pubDate><enclosure url="https://c/n.mp3" type="audio/mpeg"/></item>
+      <item><title>A</title><guid>a</guid><pubDate>Tue, 20 Oct 2026 10:00:00 GMT</pubDate><enclosure url="https://c/a.mp3" type="audio/mpeg"/><itunes:image href="https://c/a.jpg"/></item>
+    </channel></rss>`;
+    const { show, episodes } = parseFeed(xml, { all: true });
+    // The most recent episode WITH art, not the first one in the file.
+    expect(show.image).toBe('https://c/a.jpg');
+    expect(episodes.find((e) => e.guid === 'a').image).toBeUndefined();
+    expect(episodes.find((e) => e.guid === 'o').image).toBe('https://c/old.jpg');
+  });
+
+  test('no art anywhere: no image (the page shows its placeholder)', () => {
+    const xml = `<?xml version="1.0"?><rss><channel><title>Bare</title>
+      <item><title>A</title><guid>a</guid><enclosure url="https://c/a.mp3" type="audio/mpeg"/></item></channel></rss>`;
+    expect(parseFeed(xml).show.image).toBe('');
+  });
+});
+
+describe('show notes', () => {
+  const { notesByGuid } = require('../utils/podcastParse');
+  test('full notes per episode guid, content:encoded first', () => {
+    const xml = `<?xml version="1.0"?><rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>S</title>
+      <item><title>A</title><guid>a</guid><enclosure url="https://c/a.mp3" type="audio/mpeg"/>
+        <description>short</description><content:encoded><![CDATA[<p>Long <a href="https://x">notes</a></p>]]></content:encoded></item>
+      <item><title>B</title><enclosure url="https://c/b.mp3" type="audio/mpeg"/><description><![CDATA[<b>Only</b> description]]></description></item>
+    </channel></rss>`;
+    const notes = notesByGuid(xml);
+    expect(notes.get('a')).toBe('<p>Long <a href="https://x">notes</a></p>');
+    expect(notes.get('https://c/b.mp3')).toBe('<b>Only</b> description');
   });
 });

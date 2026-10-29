@@ -1,20 +1,20 @@
 /**
- * Reading an outside podcast's RSS feed into the lean shape we keep in Mongo.
+ * Reading an outside podcast's RSS feed into the lean shape we keep in Mongo
+ * (every episode, up to MAX_ALL_ITEMS per show).
  *
  * Only what the Podcasts tab, the player and the tip window use survives:
  * descriptions become capped plain text (show notes are mostly HTML, links and
  * sponsor reads), and an episode only carries an image or a value block when it
  * differs from the show's, which is the common case for neither.
  *
- * Feeds are newest-first almost everywhere, so a routine poll parses just the
- * first TRUNCATE_ITEMS items (a 10 MB back catalogue becomes a few hundred KB of
- * work). When the cut part turns out to be oldest-first, the caller re-parses
- * the whole document.
+ * Feeds are newest-first almost everywhere, so a routine poll (looking for new
+ * episodes) parses just the first TRUNCATE_ITEMS items: a 10 MB back catalogue
+ * becomes a few hundred KB of work. A full read (`all`) takes every item; when
+ * the cut part turns out to be oldest-first, the whole document is read too.
  */
 const crypto = require('crypto');
 const { XMLParser } = require('fast-xml-parser');
 
-const KEEP_EPISODES = 50;
 const TRUNCATE_ITEMS = 60;
 const MAX_ALL_ITEMS = 3000;
 
@@ -258,8 +258,9 @@ const byNewest = (a, b) => (b.published_at ? b.published_at.getTime() : 0) - (a.
 
 /**
  * @param {string} xml
- * @param {{all?: boolean}} opts  all: read every item (up to MAX_ALL_ITEMS), for "load older"
- * @returns {{show, episodes, itemCount}} episodes newest first; KEEP_EPISODES of them unless `all`
+ * @param {{all?: boolean}} opts  all: read every item (up to MAX_ALL_ITEMS)
+ * @returns {{show, episodes, itemCount, complete}} episodes newest first; only the
+ *   newest TRUNCATE_ITEMS unless `all`. `complete`: every item was read.
  */
 function parseFeed(xml, { all = false } = {}) {
   let channel;
@@ -278,19 +279,50 @@ function parseFeed(xml, { all = false } = {}) {
     const last = date(rawItems[rawItems.length - 1] && rawItems[rawItems.length - 1].pubDate);
     if (first && last && first < last) {
       const whole = parseFeed(xml, { all: true });
-      return { ...whole, episodes: whole.episodes.slice(0, KEEP_EPISODES) };
+      return { ...whole, episodes: whole.episodes.slice(0, TRUNCATE_ITEMS), complete: false };
     }
   }
   const show = readChannel(channel);
   if (rawItems.length > MAX_ALL_ITEMS) rawItems = rawItems.slice(0, MAX_ALL_ITEMS);
   const episodes = readItems(rawItems, show).sort(byNewest);
+  // A show without cover art of its own (ARD's feeds, for one) takes the art of
+  // its most recent episode that has some; with none at all the page shows its
+  // podcast placeholder. Episodes with that same art then don't repeat it.
+  if (!show.image) {
+    const newestArt = episodes.find((e) => e.image);
+    if (newestArt) {
+      show.image = newestArt.image;
+      for (const e of episodes) if (e.image === show.image) delete e.image;
+    }
+  }
   if (!show.title && !episodes.length) {
     const e = new Error('no title and no playable episodes');
     e.code = 'not_a_podcast';
     throw e;
   }
   const itemCount = cut ? (xml.match(/<\/item>/g) || []).length : rawItems.length;
-  return { show, episodes: all ? episodes : episodes.slice(0, KEEP_EPISODES), itemCount };
+  return { show, episodes, itemCount, complete: !cut };
 }
 
-module.exports = { parseFeed, urlKey, episodeId, plain, duration, valueOf, KEEP_EPISODES, _test: { truncateItems } };
+const NOTES_MAX = 60 * 1024;
+
+/**
+ * Every episode's full show notes, as the feed has them (HTML), keyed by the
+ * same guid readItems() uses, so episodeId(feed, guid) finds them. Not stored:
+ * the episode page asks for them (routes/podcasts.js /episode/:id/notes) and the
+ * page sanitises them. Each is capped at NOTES_MAX.
+ */
+function notesByGuid(xml) {
+  const channel = parseDoc(xml);
+  const out = new Map();
+  for (const item of (channel.item || []).slice(0, MAX_ALL_ITEMS)) {
+    const media = mediaOf(item);
+    if (!media) continue;
+    const guid = text(item.guid) || media.url;
+    const html = text(item['content:encoded']) || text(item.description) || text(item['itunes:summary']);
+    if (html) out.set(guid, html.length > NOTES_MAX ? html.slice(0, NOTES_MAX) : html);
+  }
+  return out;
+}
+
+module.exports = { notesByGuid, parseFeed, urlKey, episodeId, plain, duration, valueOf, TRUNCATE_ITEMS, MAX_ALL_ITEMS, _test: { truncateItems } };

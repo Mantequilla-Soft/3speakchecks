@@ -16,6 +16,7 @@
  *   podcast_feeds     one row per show, shared by everyone who added it
  *   podcast_subs      `<user>|<feedId>` → added_at, notify
  *   podcast_episodes  the newest 50 per show, lean (see utils/podcastParse.js)
+ *   podcast_progress  `<user>|<episodeId>` → pos, dur, done (TTL 180 days)
  *
  * Switches: PODCAST_FEEDS_ENABLED=false turns all of it off,
  * PODCAST_PODPING_ENABLED=true adds the Hive listener (off by default).
@@ -33,6 +34,7 @@ const WORKER_PATH = path.join(__dirname, 'podcastFeedsWorker.js');
 const FEEDS = 'podcast_feeds';
 const EPISODES = 'podcast_episodes';
 const SUBS = 'podcast_subs';
+const PROGRESS = 'podcast_progress';
 const STATE = 'podcast-state';
 
 const ENABLED = String(process.env.PODCAST_FEEDS_ENABLED || 'true').toLowerCase() !== 'false';
@@ -93,10 +95,14 @@ async function ensureIndexes() {
     db.collection(FEEDS).createIndex({ alt_keys: 1 }),
     db.collection(FEEDS).createIndex({ podcast_guid: 1 }, { sparse: true }),
     db.collection(FEEDS).createIndex({ next_poll_at: 1 }),
+    db.collection(FEEDS).createIndex({ subscribers: -1, last_followed_at: -1 }),
+    db.collection(FEEDS).createIndex({ last_followed_at: -1 }),
     db.collection(SUBS).createIndex({ user: 1 }),
     db.collection(SUBS).createIndex({ feed_id: 1 }),
     db.collection(EPISODES).createIndex({ feed_id: 1, published_at: -1 }),
     db.collection(EPISODES).createIndex({ feed_id: 1, first_seen_at: -1 }),
+    db.collection(PROGRESS).createIndex({ user: 1, feed_id: 1 }),
+    db.collection(PROGRESS).createIndex({ at: 1 }, { expireAfterSeconds: 180 * 24 * 3600 }),
   ]);
 }
 
@@ -256,6 +262,6 @@ module.exports = {
   start,
   ask,
   enabled: () => ENABLED && ENABLE_MONGO_WRITES,
-  collections: { FEEDS, EPISODES, SUBS },
+  collections: { FEEDS, EPISODES, SUBS, PROGRESS },
   _test: { pingedUrls },
 };

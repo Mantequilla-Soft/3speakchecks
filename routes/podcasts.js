@@ -6,10 +6,15 @@
  *   GET  /podcasts/subscriptions?user=
  *   GET  /podcasts/latest?user=&before=&limit=     newest episodes of everything followed
  *   GET  /podcasts/notifications?user=             new episodes since each follow (bell)
- *   GET  /podcasts/feed/:id                        a show and its stored episodes
- *   GET  /podcasts/feed/:id/older?offset=          past the 50 we keep, read live
+ *   GET  /podcasts/feed/:id?since=&until=&limit=   a show and its newest episodes
+ *   GET  /podcasts/feed/:id/older?offset=&since=&until=   the next page of them
  *   GET  /podcasts/episode/:id
+ *   GET  /podcasts/episode/:id/notes               full show notes, read from the feed
  *   GET  /podcasts/search?q=                       Podcast Index, when a key is set
+ *   GET  /podcasts/discover                        most followed + recently followed shows
+ *   GET  /podcasts/art/:token/:px.jpg              cover art, see utils/podcastArt.js
+ *   GET  /podcasts/progress?user=&ids=|&feed=      how far the user got in episodes
+ *   POST /podcasts/progress                        save that (session vouch, below)
  *
  * Writes, signed:
  *   POST /podcasts/subscribe   { user, urls: [..], titles?: [..], signature, timestamp }
@@ -38,10 +43,11 @@ const { verifyHiveAuthority, verifyDelegateVouch } = require('../utils/hiveAuth'
 const { SIGNATURE_TIMESTAMP_TOLERANCE_MS, AD_SIGNING_DELEGATES } = require('../utils/config');
 const { checkUrl } = require('../utils/safeFetch');
 const { urlKey } = require('../utils/podcastParse');
+const { artToken, urlFromToken, renderArt, SIZES } = require('../utils/podcastArt');
 const podcastFeeds = require('../services/podcastFeeds');
 
 const router = express.Router();
-const { FEEDS, EPISODES, SUBS } = podcastFeeds.collections;
+const { FEEDS, EPISODES, SUBS, PROGRESS } = podcastFeeds.collections;
 
 const USER_RE = /^~?[a-z0-9][a-z0-9.-]{1,31}$/;
 const ID_RE = /^[0-9a-f]{24}$/;
@@ -84,16 +90,17 @@ async function proveUser(b, action, payload) {
 }
 
 // Every write is a database write; this keeps one account from making it a hobby.
-const recent = new Map();
-function tooMany(user, max = 60) {
+function tooManyIn(map, user, max) {
   const now = Date.now();
-  const list = (recent.get(user) || []).filter((t) => now - t < 60 * 60 * 1000);
+  const list = (map.get(user) || []).filter((t) => now - t < 60 * 60 * 1000);
   if (list.length >= max) return true;
   list.push(now);
-  recent.set(user, list);
-  if (recent.size > 5000) recent.delete(recent.keys().next().value);
+  map.set(user, list);
+  if (map.size > 5000) map.delete(map.keys().next().value);
   return false;
 }
+const recent = new Map();
+const tooMany = (user, max = 60) => tooManyIn(recent, user, max);
 
 function presentFeed(f, extra = {}) {
   if (!f) return null;
@@ -107,6 +114,8 @@ function presentFeed(f, extra = {}) {
     last_episode_at: f.last_episode_at || null,
     ...extra,
   };
+  const art = artToken(f.image);
+  if (art) out.art = art;
   for (const k of ['link', 'description', 'language', 'categories', 'explicit', 'funding', 'value', 'error', 'item_count']) {
     if (f[k] !== undefined && f[k] !== null && f[k] !== '') out[k] = f[k];
   }
@@ -123,11 +132,33 @@ function presentEpisode(e) {
     published_at: e.published_at || null,
   };
   for (const k of ['bytes', 'duration', 'summary', 'image', 'link', 'value']) if (e[k]) out[k] = e[k];
+  if (e.image) out.art = artToken(e.image);
   return out;
 }
 
+/**
+ * Shows without cover art of their own get the art of their newest stored episode
+ * that has some, right when they are listed (the parser does the same on a show's
+ * next full read, utils/podcastParse.js). Changes the docs in place, never Mongo.
+ */
+async function fillMissingArt(feedDocs) {
+  const missing = feedDocs.filter((f) => f && f._id && !f.image);
+  if (!missing.length) return feedDocs;
+  const rows = await getDb().collection(EPISODES).aggregate([
+    { $match: { feed_id: { $in: missing.map((f) => f._id) }, image: { $exists: true } } },
+    { $sort: { published_at: -1 } },
+    { $group: { _id: '$feed_id', image: { $first: '$image' } } },
+  ]).toArray();
+  const byId = new Map(rows.map((r) => [String(r._id), r.image]));
+  for (const f of missing) {
+    const image = byId.get(String(f._id));
+    if (image) f.image = image;
+  }
+  return feedDocs;
+}
+
 // Just enough of a show to draw an episode row and its tip button.
-const FEED_CARD = { title: 1, author: 1, image: 1, value: 1, funding: 1, url: 1, status: 1 };
+const FEED_CARD = { title: 1, author: 1, image: 1, value: 1, funding: 1, url: 1, status: 1, link: 1 };
 const feedCard = (f) => presentFeed(f);
 
 function disabled(res) {
@@ -148,7 +179,7 @@ router.get('/subscriptions', async (req, res) => {
     const db = getDb();
     const subs = await db.collection(SUBS).find({ user }).toArray();
     const feeds = subs.length
-      ? await db.collection(FEEDS).find({ _id: { $in: subs.map((s) => s.feed_id) } }).toArray()
+      ? await fillMissingArt(await db.collection(FEEDS).find({ _id: { $in: subs.map((s) => s.feed_id) } }).toArray())
       : [];
     const byId = new Map(feeds.map((f) => [f._id.toHexString(), f]));
     const list = subs.map((s) => {
@@ -175,7 +206,7 @@ router.get('/latest', async (req, res) => {
     if (before && !Number.isNaN(before.getTime())) q.published_at = { $lt: before };
     const eps = await db.collection(EPISODES).find(q).sort({ published_at: -1 }).limit(limit).toArray();
     const ids = [...new Set(eps.map((e) => e.feed_id.toHexString()))].map((h) => new ObjectId(h));
-    const feeds = ids.length ? await db.collection(FEEDS).find({ _id: { $in: ids } }, { projection: FEED_CARD }).toArray() : [];
+    const feeds = ids.length ? await fillMissingArt(await db.collection(FEEDS).find({ _id: { $in: ids } }, { projection: FEED_CARD }).toArray()) : [];
     res.json({
       success: true,
       episodes: eps.map(presentEpisode),
@@ -203,7 +234,7 @@ router.get('/notifications', async (req, res) => {
       .filter((e) => e.first_seen_at > (addedAt.get(e.feed_id.toHexString()) || since))
       .slice(0, 30);
     const ids = [...new Set(eps.map((e) => e.feed_id.toHexString()))].map((h) => new ObjectId(h));
-    const feeds = ids.length ? await db.collection(FEEDS).find({ _id: { $in: ids } }, { projection: FEED_CARD }).toArray() : [];
+    const feeds = ids.length ? await fillMissingArt(await db.collection(FEEDS).find({ _id: { $in: ids } }, { projection: FEED_CARD }).toArray()) : [];
     res.json({
       success: true,
       episodes: eps.map((e) => ({ ...presentEpisode(e), first_seen_at: e.first_seen_at })),
@@ -215,19 +246,41 @@ router.get('/notifications', async (req, res) => {
   }
 });
 
+// Every episode is stored, so a show pages straight from Mongo, newest first.
+// `since` / `until` (ISO dates, either may be left out) are the show page's date
+// filter, presets and custom range alike.
+function episodePage(req) {
+  const _id = new ObjectId(req.params.id);
+  const q = { feed_id: _id };
+  const since = req.query.since ? new Date(String(req.query.since)) : null;
+  const until = req.query.until ? new Date(String(req.query.until)) : null;
+  const range = {};
+  if (since && !Number.isNaN(since.getTime())) range.$gte = since;
+  if (until && !Number.isNaN(until.getTime())) range.$lte = until;
+  if (Object.keys(range).length) q.published_at = range;
+  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+  return { _id, q, limit, offset };
+}
+
 router.get('/feed/:id', async (req, res) => {
   if (!ID_RE.test(req.params.id)) return res.status(400).json({ success: false, error: 'invalid id' });
   try {
     const db = getDb();
-    const _id = new ObjectId(req.params.id);
+    const { _id, q, limit } = episodePage(req);
     const feed = await db.collection(FEEDS).findOne({ _id });
     if (!feed) return res.status(404).json({ success: false, error: 'not found' });
-    const eps = await db.collection(EPISODES).find({ feed_id: _id }).sort({ published_at: -1 }).limit(50).toArray();
+    await fillMissingArt([feed]);
+    const [eps, total] = await Promise.all([
+      db.collection(EPISODES).find(q).sort({ published_at: -1 }).limit(limit).toArray(),
+      db.collection(EPISODES).countDocuments(q),
+    ]);
     res.json({
       success: true,
       feed: presentFeed(feed, { subscribers: feed.subscribers || 0 }),
       episodes: eps.map(presentEpisode),
-      older_available: (feed.item_count || 0) > eps.length,
+      total,
+      older_available: total > eps.length,
     });
   } catch (err) {
     console.error('[podcasts] feed:', err.message);
@@ -237,11 +290,18 @@ router.get('/feed/:id', async (req, res) => {
 
 router.get('/feed/:id/older', async (req, res) => {
   if (!ID_RE.test(req.params.id)) return res.status(400).json({ success: false, error: 'invalid id' });
-  if (!podcastFeeds.enabled()) return disabled(res);
-  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
-  const r = await podcastFeeds.ask('older', { feed_id: req.params.id, offset, limit: 50 }, 40000);
-  if (!r.ok) return res.status(r.code === 'not_found' ? 404 : 502).json({ success: false, error: 'could not read the feed', code: r.code });
-  res.json({ success: true, episodes: r.episodes.map(presentEpisode), total: r.total, next_offset: offset + r.episodes.length });
+  try {
+    const { q, limit, offset } = episodePage(req);
+    const col = getDb().collection(EPISODES);
+    const [eps, total] = await Promise.all([
+      col.find(q).sort({ published_at: -1 }).skip(offset).limit(limit).toArray(),
+      col.countDocuments(q),
+    ]);
+    res.json({ success: true, episodes: eps.map(presentEpisode), total, next_offset: offset + eps.length });
+  } catch (err) {
+    console.error('[podcasts] older:', err.message);
+    res.status(500).json({ success: false, error: 'could not load episodes' });
+  }
 });
 
 router.get('/episode/:id', async (req, res) => {
@@ -252,11 +312,29 @@ router.get('/episode/:id', async (req, res) => {
     const ep = await db.collection(EPISODES).findOne({ _id: id });
     if (!ep) return res.status(404).json({ success: false, error: 'not found' });
     const feed = await db.collection(FEEDS).findOne({ _id: ep.feed_id }, { projection: FEED_CARD });
+    if (feed) await fillMissingArt([feed]);
     res.json({ success: true, episode: presentEpisode(ep), feed: feedCard(feed) });
   } catch (err) {
     console.error('[podcasts] episode:', err.message);
     res.status(500).json({ success: false, error: 'could not load the episode' });
   }
+});
+
+// The full show notes (HTML as the feed has it; the page sanitises it). Not kept
+// in Mongo, the worker reads them from the feed and caches them for a while.
+const notesLimiter = rateLimit({
+  windowMs: 60 * 1000, max: 60, standardHeaders: false, legacyHeaders: false,
+  message: { success: false, error: 'Too many requests' },
+});
+
+router.get('/episode/:id/notes', notesLimiter, async (req, res) => {
+  const id = String(req.params.id);
+  if (!EPISODE_RE.test(id)) return res.status(400).json({ success: false, error: 'invalid id' });
+  if (!podcastFeeds.enabled()) return disabled(res);
+  const r = await podcastFeeds.ask('notes', { feed_id: id.slice(0, 24), episode_id: id }, 40000);
+  if (!r.ok) return res.status(r.code === 'not_found' ? 404 : 502).json({ success: false, error: 'could not read the show notes', code: r.code });
+  res.set('Cache-Control', 'public, max-age=900');
+  res.json({ success: true, html: r.html });
 });
 
 // ─── Search (Podcast Index) ───────────────────────────────────────────────────
@@ -288,6 +366,7 @@ router.get('/search', searchLimiter, async (req, res) => {
       author: String(f.author || f.ownerName || '').slice(0, 120),
       url: f.url,
       image: f.artwork || f.image || '',
+      art: artToken(f.artwork || f.image || ''),
       episodes: f.episodeCount || 0,
       last_episode_at: f.newestItemPubdate ? new Date(f.newestItemPubdate * 1000) : null,
       value: !!f.value,
@@ -298,6 +377,133 @@ router.get('/search', searchLimiter, async (req, res) => {
   } catch (err) {
     console.warn('[podcasts] search:', err.message);
     res.status(502).json({ success: false, error: 'search failed' });
+  }
+});
+
+// ─── Discover ─────────────────────────────────────────────────────────────────
+
+// What everyone on 3Speak follows: the ten most followed shows, and the shows
+// someone followed most recently. Same for every visitor, so cached briefly.
+let discoverCache = null;
+const DISCOVER_CARD = { ...FEED_CARD, subscribers: 1, last_followed_at: 1, categories: 1 };
+
+router.get('/discover', async (req, res) => {
+  try {
+    if (!discoverCache || Date.now() - discoverCache.at > 60 * 1000) {
+      const col = getDb().collection(FEEDS);
+      const base = { subscribers: { $gt: 0 }, status: 'ok' };
+      const [top, recent] = await Promise.all([
+        col.find(base, { projection: DISCOVER_CARD }).sort({ subscribers: -1, last_followed_at: -1 }).limit(10).toArray(),
+        col.find({ ...base, last_followed_at: { $exists: true } }, { projection: DISCOVER_CARD }).sort({ last_followed_at: -1 }).limit(12).toArray(),
+      ]);
+      await fillMissingArt([...top, ...recent]);
+      const card = (f) => presentFeed(f, { subscribers: f.subscribers || 0 });
+      discoverCache = { at: Date.now(), body: { success: true, top: top.map(card), recent: recent.map(card) } };
+    }
+    res.set('Cache-Control', 'public, max-age=60');
+    res.json(discoverCache.body);
+  } catch (err) {
+    console.error('[podcasts] discover:', err.message);
+    res.status(500).json({ success: false, error: 'could not load podcasts' });
+  }
+});
+
+// ─── Cover art ────────────────────────────────────────────────────────────────
+
+router.get('/art/:token/:px.jpg', async (req, res) => {
+  const px = parseInt(req.params.px, 10);
+  const url = urlFromToken(req.params.token);
+  if (!url || !SIZES.has(px)) return res.status(404).end();
+  try {
+    const jpeg = await renderArt(url, px);
+    res.set('Content-Type', 'image/jpeg');
+    res.set('Cache-Control', 'public, max-age=604800, immutable');
+    res.send(jpeg);
+  } catch (err) {
+    // The page shows its own podcast placeholder for a missing cover.
+    res.set('Cache-Control', 'public, max-age=600');
+    res.status(404).end();
+  }
+});
+
+// ─── Listening progress ──────────────────────────────────────────────────────
+// One small row per user and episode they played (`<user>|<episodeId>`: pos, dur,
+// done), dropped 180 days after the last listen (TTL on `at`). The player saves
+// every ~20 s, so this can't ask the wallet each time: the page holds one vouch
+// from our API (`progress-vouch` over "session") for up to a day and reuses it.
+// A stolen one could only move that person's progress bars.
+
+const PROGRESS_VOUCH_MAX_AGE_MS = 24 * 3600 * 1000;
+const progressBrake = new Map();
+
+async function proveProgressUser(b) {
+  const user = userOf(b.user);
+  if (!USER_RE.test(user)) return null;
+  const signature = typeof b.signature === 'string' ? b.signature.slice(0, 200) : '';
+  const timestamp = parseInt(b.timestamp, 10);
+  if (!signature || !Number.isFinite(timestamp) || Math.abs(Date.now() - timestamp) > PROGRESS_VOUCH_MAX_AGE_MS) return null;
+  try {
+    const v = await verifyDelegateVouch({ message: podcastMessage('progress-vouch', user, 'session', timestamp), signature, delegates: AD_SIGNING_DELEGATES });
+    return v.ok ? user : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+const presentProgress = (rows) => Object.fromEntries(rows.map((r) => [r.ep, { pos: r.pos, dur: r.dur, done: !!r.done }]));
+
+router.get('/progress', async (req, res) => {
+  const user = userOf(req.query.user);
+  if (!USER_RE.test(user)) return res.status(400).json({ success: false, error: 'invalid user' });
+  const q = { user };
+  if (req.query.feed) {
+    if (!ID_RE.test(String(req.query.feed))) return res.status(400).json({ success: false, error: 'invalid feed' });
+    q.feed_id = new ObjectId(String(req.query.feed));
+  } else {
+    const ids = String(req.query.ids || '').split(',').filter((id) => EPISODE_RE.test(id)).slice(0, 150);
+    if (!ids.length) return res.json({ success: true, progress: {} });
+    q._id = { $in: ids.map((id) => `${user}|${id}`) };
+  }
+  try {
+    const rows = await getDb().collection(PROGRESS).find(q, { projection: { ep: 1, pos: 1, dur: 1, done: 1 } }).limit(3000).toArray();
+    res.set('Cache-Control', 'no-store');
+    res.json({ success: true, progress: presentProgress(rows) });
+  } catch (err) {
+    console.error('[podcasts] progress read:', err.message);
+    res.status(500).json({ success: false, error: 'could not load progress' });
+  }
+});
+
+router.post('/progress', express.json({ limit: '8kb' }), async (req, res) => {
+  const b = req.body || {};
+  const user = await proveProgressUser(b);
+  if (!user) return res.status(401).json({ success: false, error: 'Invalid signature' });
+  const items = (Array.isArray(b.items) ? b.items : []).slice(0, 20).filter((it) => it && EPISODE_RE.test(String(it.id)));
+  if (!items.length) return res.status(400).json({ success: false, error: 'no items' });
+  if (tooManyIn(progressBrake, user, 720)) return res.status(429).json({ success: false, error: 'too many updates' });
+  const now = new Date();
+  const ops = items.map((it) => {
+    const dur = Math.max(0, Math.min(86400, Math.round(Number(it.dur) || 0)));
+    const pos = Math.max(0, Math.min(dur || 86400, Math.round(Number(it.pos) || 0)));
+    // Finished: the last 5 %, or the last 30 s (outros and ads).
+    const done = dur > 0 && (pos >= dur * 0.95 || dur - pos <= 30);
+    const id = String(it.id);
+    return {
+      updateOne: {
+        filter: { _id: `${user}|${id}` },
+        // `done` only ever goes from false to true: playing a finished episode
+        // again from the start keeps it marked as listened.
+        update: { $set: { user, ep: id, feed_id: new ObjectId(id.slice(0, 24)), pos, dur, at: now }, $max: { done } },
+        upsert: true,
+      },
+    };
+  });
+  try {
+    await getDb().collection(PROGRESS).bulkWrite(ops, { ordered: false });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[podcasts] progress write:', err.message);
+    res.status(500).json({ success: false, error: 'could not save progress' });
   }
 });
 
@@ -376,7 +582,8 @@ router.post('/subscribe', express.json({ limit: '256kb' }), async (req, res) => 
     );
     if (up.upsertedCount) {
       room -= 1;
-      await feeds.updateOne({ _id: feed._id }, { $inc: { subscribers: 1 }, $unset: { orphaned_at: '' } });
+      await feeds.updateOne({ _id: feed._id }, { $inc: { subscribers: 1 }, $set: { last_followed_at: new Date() }, $unset: { orphaned_at: '' } });
+      discoverCache = null;
       await feeds.updateOne({ _id: feed._id, added_by: { $exists: false } }, { $set: { added_by: user } });
     }
     out.ok = true;
