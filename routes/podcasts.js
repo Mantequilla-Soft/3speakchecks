@@ -10,6 +10,8 @@
  *   GET  /podcasts/feed/:id/older?offset=          past the 50 we keep, read live
  *   GET  /podcasts/episode/:id
  *   GET  /podcasts/search?q=                       Podcast Index, when a key is set
+ *   GET  /podcasts/discover                        most followed + recently followed shows
+ *   GET  /podcasts/art/:token/:px.jpg              cover art, see utils/podcastArt.js
  *
  * Writes, signed:
  *   POST /podcasts/subscribe   { user, urls: [..], titles?: [..], signature, timestamp }
@@ -38,6 +40,7 @@ const { verifyHiveAuthority, verifyDelegateVouch } = require('../utils/hiveAuth'
 const { SIGNATURE_TIMESTAMP_TOLERANCE_MS, AD_SIGNING_DELEGATES } = require('../utils/config');
 const { checkUrl } = require('../utils/safeFetch');
 const { urlKey } = require('../utils/podcastParse');
+const { artToken, urlFromToken, renderArt, SIZES } = require('../utils/podcastArt');
 const podcastFeeds = require('../services/podcastFeeds');
 
 const router = express.Router();
@@ -107,6 +110,8 @@ function presentFeed(f, extra = {}) {
     last_episode_at: f.last_episode_at || null,
     ...extra,
   };
+  const art = artToken(f.image);
+  if (art) out.art = art;
   for (const k of ['link', 'description', 'language', 'categories', 'explicit', 'funding', 'value', 'error', 'item_count']) {
     if (f[k] !== undefined && f[k] !== null && f[k] !== '') out[k] = f[k];
   }
@@ -123,11 +128,12 @@ function presentEpisode(e) {
     published_at: e.published_at || null,
   };
   for (const k of ['bytes', 'duration', 'summary', 'image', 'link', 'value']) if (e[k]) out[k] = e[k];
+  if (e.image) out.art = artToken(e.image);
   return out;
 }
 
 // Just enough of a show to draw an episode row and its tip button.
-const FEED_CARD = { title: 1, author: 1, image: 1, value: 1, funding: 1, url: 1, status: 1 };
+const FEED_CARD = { title: 1, author: 1, image: 1, value: 1, funding: 1, url: 1, status: 1, link: 1 };
 const feedCard = (f) => presentFeed(f);
 
 function disabled(res) {
@@ -288,6 +294,7 @@ router.get('/search', searchLimiter, async (req, res) => {
       author: String(f.author || f.ownerName || '').slice(0, 120),
       url: f.url,
       image: f.artwork || f.image || '',
+      art: artToken(f.artwork || f.image || ''),
       episodes: f.episodeCount || 0,
       last_episode_at: f.newestItemPubdate ? new Date(f.newestItemPubdate * 1000) : null,
       value: !!f.value,
@@ -298,6 +305,51 @@ router.get('/search', searchLimiter, async (req, res) => {
   } catch (err) {
     console.warn('[podcasts] search:', err.message);
     res.status(502).json({ success: false, error: 'search failed' });
+  }
+});
+
+// ─── Discover ─────────────────────────────────────────────────────────────────
+
+// What everyone on 3Speak follows: the ten most followed shows, and the shows
+// someone followed most recently. Same for every visitor, so cached briefly.
+let discoverCache = null;
+const DISCOVER_CARD = { ...FEED_CARD, subscribers: 1, last_followed_at: 1, categories: 1 };
+
+router.get('/discover', async (req, res) => {
+  try {
+    if (!discoverCache || Date.now() - discoverCache.at > 60 * 1000) {
+      const col = getDb().collection(FEEDS);
+      const base = { subscribers: { $gt: 0 }, status: 'ok' };
+      const [top, recent] = await Promise.all([
+        col.find(base, { projection: DISCOVER_CARD }).sort({ subscribers: -1, last_followed_at: -1 }).limit(10).toArray(),
+        col.find({ ...base, last_followed_at: { $exists: true } }, { projection: DISCOVER_CARD }).sort({ last_followed_at: -1 }).limit(12).toArray(),
+      ]);
+      const card = (f) => presentFeed(f, { subscribers: f.subscribers || 0 });
+      discoverCache = { at: Date.now(), body: { success: true, top: top.map(card), recent: recent.map(card) } };
+    }
+    res.set('Cache-Control', 'public, max-age=60');
+    res.json(discoverCache.body);
+  } catch (err) {
+    console.error('[podcasts] discover:', err.message);
+    res.status(500).json({ success: false, error: 'could not load podcasts' });
+  }
+});
+
+// ─── Cover art ────────────────────────────────────────────────────────────────
+
+router.get('/art/:token/:px.jpg', async (req, res) => {
+  const px = parseInt(req.params.px, 10);
+  const url = urlFromToken(req.params.token);
+  if (!url || !SIZES.has(px)) return res.status(404).end();
+  try {
+    const jpeg = await renderArt(url, px);
+    res.set('Content-Type', 'image/jpeg');
+    res.set('Cache-Control', 'public, max-age=604800, immutable');
+    res.send(jpeg);
+  } catch (err) {
+    // The page shows its own podcast placeholder for a missing cover.
+    res.set('Cache-Control', 'public, max-age=600');
+    res.status(404).end();
   }
 });
 
@@ -376,7 +428,8 @@ router.post('/subscribe', express.json({ limit: '256kb' }), async (req, res) => 
     );
     if (up.upsertedCount) {
       room -= 1;
-      await feeds.updateOne({ _id: feed._id }, { $inc: { subscribers: 1 }, $unset: { orphaned_at: '' } });
+      await feeds.updateOne({ _id: feed._id }, { $inc: { subscribers: 1 }, $set: { last_followed_at: new Date() }, $unset: { orphaned_at: '' } });
+      discoverCache = null;
       await feeds.updateOne({ _id: feed._id, added_by: { $exists: false } }, { $set: { added_by: user } });
     }
     out.ok = true;

@@ -93,6 +93,8 @@ async function ensureIndexes() {
     db.collection(FEEDS).createIndex({ alt_keys: 1 }),
     db.collection(FEEDS).createIndex({ podcast_guid: 1 }, { sparse: true }),
     db.collection(FEEDS).createIndex({ next_poll_at: 1 }),
+    db.collection(FEEDS).createIndex({ subscribers: -1, last_followed_at: -1 }),
+    db.collection(FEEDS).createIndex({ last_followed_at: -1 }),
     db.collection(SUBS).createIndex({ user: 1 }),
     db.collection(SUBS).createIndex({ feed_id: 1 }),
     db.collection(EPISODES).createIndex({ feed_id: 1, published_at: -1 }),

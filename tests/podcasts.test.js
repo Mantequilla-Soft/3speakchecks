@@ -123,3 +123,17 @@ describe('routes and podping', () => {
     expect(service.pingedUrls(op('follow', { iris: ['https://a/x.xml'] }))).toEqual([]);
   });
 });
+
+describe('cover art tokens', () => {
+  const { artToken, urlFromToken } = require('../utils/podcastArt');
+  test('only tokens the checker made resolve', () => {
+    const url = 'https://cdn.example.com/cover.jpg';
+    const token = artToken(url);
+    expect(urlFromToken(token)).toBe(url);
+    const [sig] = token.split('.');
+    expect(urlFromToken(`${sig}.${Buffer.from('http://127.0.0.1/x').toString('base64url')}`)).toBeNull();
+    expect(urlFromToken('nonsense')).toBeNull();
+    expect(artToken('')).toBe('');
+    expect(artToken('ftp://x/y.jpg')).toBe('');
+  });
+});
