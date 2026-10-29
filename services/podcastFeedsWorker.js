@@ -6,6 +6,7 @@
  *
  *   { id, type: 'tick' }                  poll every feed that is due
  *   { id, type: 'probe', url }            someone added a URL: fetch it now, store it
+ *   { id, type: 'notes', feed_id, episode_id }  an episode's full show notes (not stored)
  *
  * and replies { id, ok, ... }. Parsing a big feed is synchronous CPU work, which is
  * why none of this happens on the thread that answers HTTP requests.
@@ -24,7 +25,8 @@ const { parentPort } = require('worker_threads');
 const { MongoClient } = require('mongodb');
 const { MONGODB_URI, DATABASE_NAME } = require('../utils/config');
 const { safeFetch } = require('../utils/safeFetch');
-const { parseFeed, urlKey, episodeId } = require('../utils/podcastParse');
+const { parseFeed, urlKey, episodeId, notesByGuid } = require('../utils/podcastParse');
+const { ObjectId } = require('mongodb');
 
 const FEEDS = 'podcast_feeds';
 const EPISODES = 'podcast_episodes';
@@ -307,6 +309,29 @@ async function probe(url) {
   return { feed_id: (r.merged || feed._id).toHexString(), existed: !!r.merged };
 }
 
+// Show notes per feed, read on demand: an episode page asks for one, the next
+// episode of the same show is then answered from here. A few shows, a short while.
+const NOTES_TTL = 15 * MIN;
+const NOTES_FEEDS = 4;
+const notesCache = new Map(); // feedId → { at, byId: Map(episodeId → html) }
+
+async function notes(feedId, epId) {
+  await connect();
+  let hit = notesCache.get(feedId);
+  if (!hit || Date.now() - hit.at > NOTES_TTL) {
+    const feed = await db.collection(FEEDS).findOne({ _id: new ObjectId(feedId) }, { projection: { url: 1 } });
+    if (!feed) return { error: 'not_found' };
+    const res = await safeFetch(feed.url, { timeoutMs: 25000, maxBytes: 32 * 1024 * 1024 });
+    const byId = new Map();
+    for (const [guid, html] of notesByGuid(res.body.toString('utf8'))) byId.set(episodeId(feedId, guid), html);
+    hit = { at: Date.now(), byId };
+    notesCache.delete(feedId);
+    notesCache.set(feedId, hit);
+    while (notesCache.size > NOTES_FEEDS) notesCache.delete(notesCache.keys().next().value);
+  }
+  return { html: hit.byId.get(epId) || '' };
+}
+
 let ticking = false;
 // Required by the tests outside a worker, where there is no parent to talk to.
 if (parentPort) parentPort.on('message', async (msg) => {
@@ -318,6 +343,9 @@ if (parentPort) parentPort.on('message', async (msg) => {
       try { reply({ ok: true, ...(await tick()) }); } finally { ticking = false; }
     } else if (msg.type === 'probe') {
       const r = await probe(msg.url);
+      reply(r.error ? { ok: false, code: r.error } : { ok: true, ...r });
+    } else if (msg.type === 'notes') {
+      const r = await notes(String(msg.feed_id), String(msg.episode_id));
       reply(r.error ? { ok: false, code: r.error } : { ok: true, ...r });
     } else {
       reply({ ok: false, code: 'unknown_message' });

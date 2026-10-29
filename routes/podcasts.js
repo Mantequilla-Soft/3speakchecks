@@ -9,6 +9,7 @@
  *   GET  /podcasts/feed/:id?since=&until=&limit=   a show and its newest episodes
  *   GET  /podcasts/feed/:id/older?offset=&since=&until=   the next page of them
  *   GET  /podcasts/episode/:id
+ *   GET  /podcasts/episode/:id/notes               full show notes, read from the feed
  *   GET  /podcasts/search?q=                       Podcast Index, when a key is set
  *   GET  /podcasts/discover                        most followed + recently followed shows
  *   GET  /podcasts/art/:token/:px.jpg              cover art, see utils/podcastArt.js
@@ -317,6 +318,23 @@ router.get('/episode/:id', async (req, res) => {
     console.error('[podcasts] episode:', err.message);
     res.status(500).json({ success: false, error: 'could not load the episode' });
   }
+});
+
+// The full show notes (HTML as the feed has it; the page sanitises it). Not kept
+// in Mongo, the worker reads them from the feed and caches them for a while.
+const notesLimiter = rateLimit({
+  windowMs: 60 * 1000, max: 60, standardHeaders: false, legacyHeaders: false,
+  message: { success: false, error: 'Too many requests' },
+});
+
+router.get('/episode/:id/notes', notesLimiter, async (req, res) => {
+  const id = String(req.params.id);
+  if (!EPISODE_RE.test(id)) return res.status(400).json({ success: false, error: 'invalid id' });
+  if (!podcastFeeds.enabled()) return disabled(res);
+  const r = await podcastFeeds.ask('notes', { feed_id: id.slice(0, 24), episode_id: id }, 40000);
+  if (!r.ok) return res.status(r.code === 'not_found' ? 404 : 502).json({ success: false, error: 'could not read the show notes', code: r.code });
+  res.set('Cache-Control', 'public, max-age=900');
+  res.json({ success: true, html: r.html });
 });
 
 // ─── Search (Podcast Index) ───────────────────────────────────────────────────

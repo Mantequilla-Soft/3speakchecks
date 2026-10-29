@@ -304,4 +304,25 @@ function parseFeed(xml, { all = false } = {}) {
   return { show, episodes, itemCount, complete: !cut };
 }
 
-module.exports = { parseFeed, urlKey, episodeId, plain, duration, valueOf, TRUNCATE_ITEMS, MAX_ALL_ITEMS, _test: { truncateItems } };
+const NOTES_MAX = 60 * 1024;
+
+/**
+ * Every episode's full show notes, as the feed has them (HTML), keyed by the
+ * same guid readItems() uses, so episodeId(feed, guid) finds them. Not stored:
+ * the episode page asks for them (routes/podcasts.js /episode/:id/notes) and the
+ * page sanitises them. Each is capped at NOTES_MAX.
+ */
+function notesByGuid(xml) {
+  const channel = parseDoc(xml);
+  const out = new Map();
+  for (const item of (channel.item || []).slice(0, MAX_ALL_ITEMS)) {
+    const media = mediaOf(item);
+    if (!media) continue;
+    const guid = text(item.guid) || media.url;
+    const html = text(item['content:encoded']) || text(item.description) || text(item['itunes:summary']);
+    if (html) out.set(guid, html.length > NOTES_MAX ? html.slice(0, NOTES_MAX) : html);
+  }
+  return out;
+}
+
+module.exports = { notesByGuid, parseFeed, urlKey, episodeId, plain, duration, valueOf, TRUNCATE_ITEMS, MAX_ALL_ITEMS, _test: { truncateItems } };

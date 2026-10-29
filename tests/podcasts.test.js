@@ -162,3 +162,17 @@ describe('show art fallback', () => {
     expect(parseFeed(xml).show.image).toBe('');
   });
 });
+
+describe('show notes', () => {
+  const { notesByGuid } = require('../utils/podcastParse');
+  test('full notes per episode guid, content:encoded first', () => {
+    const xml = `<?xml version="1.0"?><rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>S</title>
+      <item><title>A</title><guid>a</guid><enclosure url="https://c/a.mp3" type="audio/mpeg"/>
+        <description>short</description><content:encoded><![CDATA[<p>Long <a href="https://x">notes</a></p>]]></content:encoded></item>
+      <item><title>B</title><enclosure url="https://c/b.mp3" type="audio/mpeg"/><description><![CDATA[<b>Only</b> description]]></description></item>
+    </channel></rss>`;
+    const notes = notesByGuid(xml);
+    expect(notes.get('a')).toBe('<p>Long <a href="https://x">notes</a></p>');
+    expect(notes.get('https://c/b.mp3')).toBe('<b>Only</b> description');
+  });
+});
