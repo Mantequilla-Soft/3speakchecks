@@ -135,6 +135,27 @@ function presentEpisode(e) {
   return out;
 }
 
+/**
+ * Shows without cover art of their own get the art of their newest stored episode
+ * that has some, right when they are listed (the parser does the same on a show's
+ * next full read, utils/podcastParse.js). Changes the docs in place, never Mongo.
+ */
+async function fillMissingArt(feedDocs) {
+  const missing = feedDocs.filter((f) => f && f._id && !f.image);
+  if (!missing.length) return feedDocs;
+  const rows = await getDb().collection(EPISODES).aggregate([
+    { $match: { feed_id: { $in: missing.map((f) => f._id) }, image: { $exists: true } } },
+    { $sort: { published_at: -1 } },
+    { $group: { _id: '$feed_id', image: { $first: '$image' } } },
+  ]).toArray();
+  const byId = new Map(rows.map((r) => [String(r._id), r.image]));
+  for (const f of missing) {
+    const image = byId.get(String(f._id));
+    if (image) f.image = image;
+  }
+  return feedDocs;
+}
+
 // Just enough of a show to draw an episode row and its tip button.
 const FEED_CARD = { title: 1, author: 1, image: 1, value: 1, funding: 1, url: 1, status: 1, link: 1 };
 const feedCard = (f) => presentFeed(f);
@@ -157,7 +178,7 @@ router.get('/subscriptions', async (req, res) => {
     const db = getDb();
     const subs = await db.collection(SUBS).find({ user }).toArray();
     const feeds = subs.length
-      ? await db.collection(FEEDS).find({ _id: { $in: subs.map((s) => s.feed_id) } }).toArray()
+      ? await fillMissingArt(await db.collection(FEEDS).find({ _id: { $in: subs.map((s) => s.feed_id) } }).toArray())
       : [];
     const byId = new Map(feeds.map((f) => [f._id.toHexString(), f]));
     const list = subs.map((s) => {
@@ -184,7 +205,7 @@ router.get('/latest', async (req, res) => {
     if (before && !Number.isNaN(before.getTime())) q.published_at = { $lt: before };
     const eps = await db.collection(EPISODES).find(q).sort({ published_at: -1 }).limit(limit).toArray();
     const ids = [...new Set(eps.map((e) => e.feed_id.toHexString()))].map((h) => new ObjectId(h));
-    const feeds = ids.length ? await db.collection(FEEDS).find({ _id: { $in: ids } }, { projection: FEED_CARD }).toArray() : [];
+    const feeds = ids.length ? await fillMissingArt(await db.collection(FEEDS).find({ _id: { $in: ids } }, { projection: FEED_CARD }).toArray()) : [];
     res.json({
       success: true,
       episodes: eps.map(presentEpisode),
@@ -212,7 +233,7 @@ router.get('/notifications', async (req, res) => {
       .filter((e) => e.first_seen_at > (addedAt.get(e.feed_id.toHexString()) || since))
       .slice(0, 30);
     const ids = [...new Set(eps.map((e) => e.feed_id.toHexString()))].map((h) => new ObjectId(h));
-    const feeds = ids.length ? await db.collection(FEEDS).find({ _id: { $in: ids } }, { projection: FEED_CARD }).toArray() : [];
+    const feeds = ids.length ? await fillMissingArt(await db.collection(FEEDS).find({ _id: { $in: ids } }, { projection: FEED_CARD }).toArray()) : [];
     res.json({
       success: true,
       episodes: eps.map((e) => ({ ...presentEpisode(e), first_seen_at: e.first_seen_at })),
@@ -248,6 +269,7 @@ router.get('/feed/:id', async (req, res) => {
     const { _id, q, limit } = episodePage(req);
     const feed = await db.collection(FEEDS).findOne({ _id });
     if (!feed) return res.status(404).json({ success: false, error: 'not found' });
+    await fillMissingArt([feed]);
     const [eps, total] = await Promise.all([
       db.collection(EPISODES).find(q).sort({ published_at: -1 }).limit(limit).toArray(),
       db.collection(EPISODES).countDocuments(q),
@@ -289,6 +311,7 @@ router.get('/episode/:id', async (req, res) => {
     const ep = await db.collection(EPISODES).findOne({ _id: id });
     if (!ep) return res.status(404).json({ success: false, error: 'not found' });
     const feed = await db.collection(FEEDS).findOne({ _id: ep.feed_id }, { projection: FEED_CARD });
+    if (feed) await fillMissingArt([feed]);
     res.json({ success: true, episode: presentEpisode(ep), feed: feedCard(feed) });
   } catch (err) {
     console.error('[podcasts] episode:', err.message);
@@ -355,6 +378,7 @@ router.get('/discover', async (req, res) => {
         col.find(base, { projection: DISCOVER_CARD }).sort({ subscribers: -1, last_followed_at: -1 }).limit(10).toArray(),
         col.find({ ...base, last_followed_at: { $exists: true } }, { projection: DISCOVER_CARD }).sort({ last_followed_at: -1 }).limit(12).toArray(),
       ]);
+      await fillMissingArt([...top, ...recent]);
       const card = (f) => presentFeed(f, { subscribers: f.subscribers || 0 });
       discoverCache = { at: Date.now(), body: { success: true, top: top.map(card), recent: recent.map(card) } };
     }
