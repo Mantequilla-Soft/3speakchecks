@@ -260,9 +260,10 @@ async function tick() {
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, batch.length) }, async () => {
     while (i < batch.length) {
       const feed = batch[i++];
-      // No cover yet: read it in full (no 304 / hash shortcut) so the show can
-      // take its newest episode's art (utils/podcastParse.js).
-      results.push(await pollFeed(feed, { force: feed.status === 'ok' && !feed.image }));
+      // Read in full, skipping the 304 / hash shortcut, while the show has no cover
+      // yet (it may take its newest episode's art, utils/podcastParse.js) or was
+      // never read in full (added while only the newest 50 were kept).
+      results.push(await pollFeed(feed, { force: feed.status === 'ok' && (!feed.image || !feed.last_full_at) }));
     }
   }));
   const announce = results
