@@ -17,6 +17,11 @@
  * HIVE tips are valued at the on-chain median feed price (same as promote.js and
  * adPaymentClaim.js) and the rate used is stored on the row. `hbd_value` is always
  * HBD, whatever was sent.
+ *
+ * Lightning tips land in the same collection from a watcher instead
+ * (services/lightningSupports.js): currency 'SATS', hbd_value 0, and a null
+ * tipper when the payer can't be told. Lists and rankings sum them separately
+ * as `total_sats` / `sats_total`.
  */
 const express = require('express');
 const rateLimit = require('express-rate-limit');
@@ -263,7 +268,11 @@ async function attachContent(db, rows) {
   return rows.map((r) => ({ ...r, video: byKey.get(`${r.author}/${r.permlink}`) || null }));
 }
 
-const PUBLIC_FIELDS = { _id: 0, trx_id: 1, tipper: 1, author: 1, permlink: 1, kind: 1, hbd_value: 1, amount: 1, currency: 1, tippedAt: 1, createdAt: 1, memo: 1, hidden: 1 };
+const PUBLIC_FIELDS = { _id: 0, trx_id: 1, tipper: 1, author: 1, permlink: 1, kind: 1, hbd_value: 1, amount: 1, currency: 1, via: 1, tippedAt: 1, createdAt: 1, memo: 1, hidden: 1 };
+
+// Lightning tips (services/lightningSupports.js) are sats with hbd_value 0: they
+// are summed on their own, never converted into the HBD totals.
+const SATS_SUM = { $sum: { $cond: [{ $eq: ['$currency', 'SATS'] }, '$amount', 0] } };
 
 // A tip its creator hid (POST /supports/hide) counts nowhere public: not in
 // lists, chips, totals or counts, on either side.
@@ -284,7 +293,7 @@ router.get('/supports/by/:tipper/supported', async (req, res) => {
     await ensureIndexes(coll);
     const [result] = await coll.aggregate([
       { $match: { tipper, ...VISIBLE } },
-      { $group: { _id: '$author', hbd_total: { $sum: '$hbd_value' }, count: { $sum: 1 }, last: { $max: '$tippedAt' } } },
+      { $group: { _id: '$author', hbd_total: { $sum: '$hbd_value' }, sats_total: SATS_SUM, count: { $sum: 1 }, last: { $max: '$tippedAt' } } },
       { $sort: { hbd_total: -1, last: -1 } },
       { $facet: { total: [{ $count: 'n' }], top: [{ $limit: limit }] } },
     ]).toArray();
@@ -296,6 +305,7 @@ router.get('/supports/by/:tipper/supported', async (req, res) => {
       supported: top.map((s) => ({
         author: s._id,
         hbd_total: roundHbd(s.hbd_total),
+        sats_total: s.sats_total || 0,
         count: s.count,
         last: s.last,
       })),
@@ -319,7 +329,7 @@ async function listPage(req, res, filter, { includeHidden = false } = {}) {
   const listed = includeHidden ? filter : visible;
   const [total, sum, rows] = await Promise.all([
     coll.countDocuments(listed),
-    coll.aggregate([{ $match: visible }, { $group: { _id: null, hbd: { $sum: '$hbd_value' } } }]).toArray(),
+    coll.aggregate([{ $match: visible }, { $group: { _id: null, hbd: { $sum: '$hbd_value' }, sats: SATS_SUM } }]).toArray(),
     coll.find(listed, { projection: PUBLIC_FIELDS })
       .sort({ tippedAt: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
   ]);
@@ -327,6 +337,7 @@ async function listPage(req, res, filter, { includeHidden = false } = {}) {
     success: true,
     total,
     total_hbd: roundHbd(sum[0]?.hbd),
+    total_sats: sum[0]?.sats || 0,
     page,
     limit,
     items: await attachContent(db, rows),
@@ -341,7 +352,7 @@ router.get('/supports/by/:tipper', async (req, res) => {
   try {
     const tipper = norm(req.params.tipper);
     if (!ACCOUNT_RE.test(tipper)) return res.status(400).json({ success: false, error: 'Invalid account' });
-    if (isHiddenSync(tipper)) return res.json({ success: true, total: 0, total_hbd: 0, page: 1, limit: 0, items: [] });
+    if (isHiddenSync(tipper)) return res.json({ success: true, total: 0, total_hbd: 0, total_sats: 0, page: 1, limit: 0, items: [] });
     // Tips to hidden creators stay out: their videos aren't shown anywhere.
     const hidden = hiddenListSync();
     await listPage(req, res, hidden.length ? { tipper, author: { $nin: hidden } } : { tipper });
@@ -356,7 +367,7 @@ router.get('/supports/:author', async (req, res) => {
   try {
     const author = norm(req.params.author);
     if (!ACCOUNT_RE.test(author)) return res.status(400).json({ success: false, error: 'Invalid author' });
-    if (isHiddenSync(author)) return res.json({ success: true, total: 0, total_hbd: 0, page: 1, limit: 0, items: [] });
+    if (isHiddenSync(author)) return res.json({ success: true, total: 0, total_hbd: 0, total_sats: 0, page: 1, limit: 0, items: [] });
     // Hidden rows are public data (the transfer is on chain anyway); only the
     // creator's own tab asks for them, to offer "Unhide".
     await listPage(req, res, { author }, { includeHidden: req.query.includeHidden === '1' });
@@ -377,7 +388,8 @@ router.get('/supports/:author/supporters', async (req, res) => {
 
     const [result] = await getDb().collection(COLLECTION).aggregate([
       { $match: { author, ...VISIBLE } },
-      { $group: { _id: '$tipper', hbd_total: { $sum: '$hbd_value' }, count: { $sum: 1 }, last: { $max: '$tippedAt' } } },
+      // Anonymous Lightning tips (tipper null) group into one supporter.
+      { $group: { _id: '$tipper', hbd_total: { $sum: '$hbd_value' }, sats_total: SATS_SUM, count: { $sum: 1 }, last: { $max: '$tippedAt' } } },
       { $sort: { hbd_total: -1, last: -1 } },
       { $facet: { total: [{ $count: 'n' }], top: [{ $limit: limit }] } },
     ]).toArray();
@@ -387,6 +399,7 @@ router.get('/supports/:author/supporters', async (req, res) => {
       supporters: (result?.top || []).map((s) => ({
         tipper: s._id,
         hbd_total: roundHbd(s.hbd_total),
+        sats_total: s.sats_total || 0,
         count: s.count,
         last: s.last,
       })),
@@ -479,3 +492,9 @@ router.post('/supports/hide', express.json({ limit: '4kb' }), async (req, res) =
 
 module.exports = router;
 module.exports._test = { hideMessage };
+// Shared with services/lightningSupports.js, which records Lightning tips into
+// the same collection.
+module.exports.COLLECTION = COLLECTION;
+module.exports.findContent = findContent;
+module.exports.cleanMemo = cleanMemo;
+module.exports.ensureIndexes = ensureIndexes;

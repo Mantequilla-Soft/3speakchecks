@@ -103,15 +103,23 @@ async function hiveRpcBatch(rpcBatch) {
  *
  * Returns raw history entries, newest page last, exactly as a single call would.
  */
-async function transfersSince(account, sinceMs, { maxPages = 25, pageSize = 1000 } = {}) {
+async function transfersSince(account, sinceMs, opts = {}) {
+    // operation filter (low) for `transfer` (op id 2) = 1<<2 = 4.
+    return historySince(account, sinceMs, 4, opts);
+}
+
+/**
+ * transfersSince() for any operation type: `filterLow` is the low word of the
+ * account history operation filter, 1 << op id (custom_json = 1 << 18).
+ */
+async function historySince(account, sinceMs, filterLow, { maxPages = 25, pageSize = 1000 } = {}) {
     const out = [];
     let start = -1;
     for (let page = 0; page < maxPages; page += 1) {
-        // operation filter (low) for `transfer` (op id 2) = 1<<2 = 4.
         const [hist] = await hiveRpcBatch([{
             jsonrpc: '2.0',
             method: 'condenser_api.get_account_history',
-            params: [account, start, pageSize, 4, 0],
+            params: [account, start, pageSize, filterLow, 0],
             id: 1,
         }]);
         const entries = Array.isArray(hist?.result) ? hist.result : [];
@@ -601,6 +609,7 @@ async function fetchAccountComments(account, sinceMs, { maxPages = 30 } = {}) {
 
 module.exports = {
     transfersSince,
+    historySince,
     hiveRpcCall,
     fetchAccountComments,
     hiveRpcBatch,
