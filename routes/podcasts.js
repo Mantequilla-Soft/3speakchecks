@@ -10,9 +10,11 @@
  *   GET  /podcasts/feed/:id/older?offset=&since=&until=   the next page of them
  *   GET  /podcasts/episode/:id
  *   GET  /podcasts/episode/:id/notes               full show notes, read from the feed
- *   GET  /podcasts/search?q=                       Podcast Index, when a key is set
+ *   GET  /podcasts/search?q=&country=              Podcast Index + Apple Podcasts + fyyd, merged
  *   GET  /podcasts/person?q=                       shows a host or guest appears in (Podcast Index)
  *   GET  /podcasts/trending?lang=&cat=             Podcast Index's trending shows
+ *   GET  /podcasts/charts?country=&cat=            Apple Podcasts' top charts
+ * (directories: utils/podcastDirectories.js)
  *   GET  /podcasts/discover                        most followed + recently followed shows
  *   GET  /podcasts/art/:token/:px.jpg              cover art, see utils/podcastArt.js
  *   GET  /podcasts/progress?user=&ids=|&feed=      how far the user got in episodes
@@ -47,6 +49,7 @@ const { checkUrl } = require('../utils/safeFetch');
 const { urlKey } = require('../utils/podcastParse');
 const { artToken, urlFromToken, renderArt, SIZES } = require('../utils/podcastArt');
 const podcastFeeds = require('../services/podcastFeeds');
+const directories = require('../utils/podcastDirectories');
 
 const router = express.Router();
 const { FEEDS, EPISODES, SUBS, PROGRESS } = podcastFeeds.collections;
@@ -58,8 +61,6 @@ const MAX_FEEDS_PER_USER = Math.max(1, parseInt(process.env.PODCAST_MAX_FEEDS_PE
 const MAX_URLS_PER_CALL = 200;
 const NOTIFY_DAYS = 14;
 
-const PI_KEY = process.env.PODCASTINDEX_API_KEY || '';
-const PI_SECRET = process.env.PODCASTINDEX_API_SECRET || '';
 
 // Must match podcastMessage() in the frontend (src/lib/podcasts.js) and the signer
 // in server/index.cjs exactly.
@@ -171,7 +172,12 @@ function disabled(res) {
 
 router.get('/config', (req, res) => {
   res.set('Cache-Control', 'public, max-age=300');
-  res.json({ success: true, enabled: podcastFeeds.enabled(), search: !!(PI_KEY && PI_SECRET), max_feeds: MAX_FEEDS_PER_USER });
+  // Search and charts need no key (Apple, fyyd); people and trending are Podcast Index only.
+  const pi = directories.piEnabled();
+  res.json({
+    success: true, enabled: podcastFeeds.enabled(), search: true, charts: true, person: pi, trending: pi,
+    chart_countries: directories.CHART_COUNTRIES, max_feeds: MAX_FEEDS_PER_USER,
+  });
 });
 
 router.get('/subscriptions', async (req, res) => {
@@ -186,7 +192,11 @@ router.get('/subscriptions', async (req, res) => {
     const byId = new Map(feeds.map((f) => [f._id.toHexString(), f]));
     const list = subs.map((s) => {
       const f = byId.get(s.feed_id.toHexString());
-      return f ? { ...presentFeed(f), notify: s.notify !== false, added_at: s.added_at } : null;
+      if (!f) return null;
+      // keys: every address this feed is known under (it moved, or two URLs were
+      // one feed), so a directory listing it under another one shows it as followed.
+      const keys = [f.url_key, ...(f.alt_keys || [])].filter(Boolean);
+      return { ...presentFeed(f), keys, notify: s.notify !== false, added_at: s.added_at };
     }).filter(Boolean).sort((a, b) => (a.title || a.url).localeCompare(b.title || b.url));
     res.json({ success: true, subscriptions: list });
   } catch (err) {
@@ -346,34 +356,7 @@ const searchLimiter = rateLimit({
   message: { success: false, error: 'Too many requests' },
 });
 
-/** A GET on the Podcast Index API, signed the way it asks (key + secret + time). */
-async function piGet(path) {
-  const date = String(Math.floor(Date.now() / 1000));
-  const auth = crypto.createHash('sha1').update(PI_KEY + PI_SECRET + date).digest('hex');
-  const r = await fetch(`https://api.podcastindex.org/api/1.0/${path}`, {
-    headers: { 'User-Agent': '3SpeakPodcastBot/1.0', 'X-Auth-Key': PI_KEY, 'X-Auth-Date': date, Authorization: auth },
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!r.ok) throw new Error(`podcastindex ${r.status}`);
-  return r.json();
-}
-
-/** One Podcast Index show as a search result the Podcasts tab can follow. */
-function presentPiFeed(f) {
-  const image = f.artwork || f.image || '';
-  return {
-    title: String(f.title || '').slice(0, 200),
-    author: String(f.author || f.ownerName || '').slice(0, 120),
-    url: f.url,
-    image,
-    art: artToken(image),
-    episodes: f.episodeCount || 0,
-    last_episode_at: f.newestItemPubdate || f.newestItemPublishTime
-      ? new Date((f.newestItemPubdate || f.newestItemPublishTime) * 1000)
-      : null,
-    value: !!f.value,
-  };
-}
+const { piGet, piShow } = directories;
 
 /**
  * The shows a person search found, from its episodes: one entry per show, most
@@ -387,7 +370,7 @@ function showsFromEpisodes(items, max = 20) {
     let show = byFeed.get(key);
     if (!show) {
       show = {
-        ...presentPiFeed({ title: it.feedTitle, author: it.feedAuthor, url: it.feedUrl, image: it.feedImage }),
+        ...piShow({ title: it.feedTitle, author: it.feedAuthor, url: it.feedUrl, image: it.feedImage }),
         matches: 0, sample: '', sample_at: 0,
       };
       byFeed.set(key, show);
@@ -444,18 +427,17 @@ async function cached(key, ttl, load) {
   return results;
 }
 
+const COUNTRY_RE = /^[a-z]{2}$/;
 const searchOff = (res) => res.status(503).json({ success: false, error: 'search is not configured', code: 'search_disabled' });
 const usable = (f) => f && f.url && !f.dead;
 
 router.get('/search', searchLimiter, async (req, res) => {
-  if (!PI_KEY || !PI_SECRET) return searchOff(res);
   const q = String(req.query.q || '').trim().slice(0, 100);
   if (q.length < 2) return res.json({ success: true, results: [] });
+  // Apple's search is per storefront; the listener's chart country picks it.
+  const country = COUNTRY_RE.test(String(req.query.country || '')) ? String(req.query.country) : 'us';
   try {
-    const results = await cached(`term:${q.toLowerCase()}`, 10 * 60 * 1000, async () => {
-      const data = await piGet(`search/byterm?q=${encodeURIComponent(q)}&max=20`);
-      return (data.feeds || []).filter(usable).slice(0, 20).map(presentPiFeed);
-    });
+    const results = await cached(`term:${country}:${q.toLowerCase()}`, 10 * 60 * 1000, () => directories.searchAll(q, { country }));
     res.json({ success: true, results });
   } catch (err) {
     console.warn('[podcasts] search:', err.message);
@@ -464,7 +446,7 @@ router.get('/search', searchLimiter, async (req, res) => {
 });
 
 router.get('/person', searchLimiter, async (req, res) => {
-  if (!PI_KEY || !PI_SECRET) return searchOff(res);
+  if (!directories.piEnabled()) return searchOff(res);
   const q = String(req.query.q || '').trim().slice(0, 100);
   if (q.length < 2) return res.json({ success: true, results: [] });
   try {
@@ -480,7 +462,7 @@ router.get('/person', searchLimiter, async (req, res) => {
 });
 
 router.get('/trending', searchLimiter, async (req, res) => {
-  if (!PI_KEY || !PI_SECRET) return searchOff(res);
+  if (!directories.piEnabled()) return searchOff(res);
   const lang = String(req.query.lang || '').toLowerCase();
   const cat = CATEGORIES.find((c) => c.toLowerCase() === String(req.query.cat || '').toLowerCase()) || '';
   if (lang && !LANG_RE.test(lang)) return res.status(400).json({ success: false, error: 'bad language' });
@@ -490,12 +472,25 @@ router.get('/trending', searchLimiter, async (req, res) => {
       if (lang) params.set('lang', langParam(lang));
       if (cat) params.set('cat', cat);
       const data = await piGet(`podcasts/trending?${params}`);
-      return (data.feeds || []).filter(usable).slice(0, 24).map(presentPiFeed);
+      return (data.feeds || []).filter(usable).slice(0, 24).map(piShow);
     });
     res.json({ success: true, results, categories: CATEGORIES });
   } catch (err) {
     console.warn('[podcasts] trending:', err.message);
     res.status(502).json({ success: false, error: 'trending failed' });
+  }
+});
+
+router.get('/charts', searchLimiter, async (req, res) => {
+  const country = String(req.query.country || 'us').toLowerCase();
+  if (!directories.CHART_COUNTRIES.includes(country)) return res.status(400).json({ success: false, error: 'unknown country' });
+  const cat = CATEGORIES.find((c) => c.toLowerCase() === String(req.query.cat || '').toLowerCase()) || '';
+  try {
+    const results = await cached(`charts:${country}:${cat}`, 60 * 60 * 1000, () => directories.appleChart(country, cat));
+    res.json({ success: true, results });
+  } catch (err) {
+    console.warn('[podcasts] charts:', err.message);
+    res.status(502).json({ success: false, error: 'charts failed' });
   }
 });
 
@@ -655,9 +650,13 @@ router.post('/subscribe', express.json({ limit: '256kb' }), async (req, res) => 
   const single = urls.length === 1;
 
   for (let i = 0; i < urls.length; i += 1) {
-    const url = urls[i];
-    const out = { url };
+    const out = { url: urls[i] };
     results.push(out);
+    // A link from Apple Podcasts, Overcast, fyyd... names its feed; Spotify & co. have none.
+    const resolved = await directories.resolveLink(urls[i]);
+    if (resolved.code) { Object.assign(out, resolved); continue; }
+    const url = resolved.url;
+    if (resolved.via) out.resolved_url = url;
     try {
       checkUrl(url);
     } catch (err) {
@@ -677,7 +676,18 @@ router.post('/subscribe', express.json({ limit: '256kb' }), async (req, res) => 
 
     if (single && (!feed || !feed.last_ok_at)) {
       // One URL: fetch it now, so the person learns right away whether it is a podcast.
-      const r = await podcastFeeds.ask('probe', { url }, 35000);
+      let r = await podcastFeeds.ask('probe', { url }, 35000);
+      // A show's website rather than its feed: try the feed the page announces.
+      if (!r.ok && (r.code === 'not_a_podcast' || r.code === 'parse_error')) {
+        const found = await directories.discoverFeed(url);
+        if (found && urlKey(found) !== key && internalOwner(urlKey(found))) {
+          r = { ok: false, code: 'internal_feed' };
+        } else if (found && urlKey(found) !== key) {
+          const known = await feeds.findOne({ $or: [{ url_key: urlKey(found) }, { alt_keys: urlKey(found) }] }, { projection: { _id: 1, last_ok_at: 1 } });
+          r = known && known.last_ok_at ? { ok: true, feed_id: known._id.toHexString() } : await podcastFeeds.ask('probe', { url: found }, 35000);
+          if (r.ok) out.resolved_url = found;
+        }
+      }
       if (!r.ok) { out.code = r.code || 'error'; continue; }
       feed = { _id: new ObjectId(r.feed_id) };
     } else if (!feed) {
@@ -756,4 +766,4 @@ router.post('/notify', express.json({ limit: '4kb' }), async (req, res) => {
 });
 
 module.exports = router;
-module.exports._test = { podcastMessage, urlsDigest, internalOwner, presentEpisode, showsFromEpisodes, langParam, presentPiFeed };
+module.exports._test = { podcastMessage, urlsDigest, internalOwner, presentEpisode, showsFromEpisodes, langParam };
