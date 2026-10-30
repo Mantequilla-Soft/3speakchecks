@@ -13,7 +13,8 @@
  * - drops feeds nobody follows any more, with their episodes, after a grace week.
  *
  * Collections (all small, all ours):
- *   podcast_feeds     one row per show, shared by everyone who added it
+ *   podcast_feeds     one row per show, shared by everyone who added it (a
+ *                     private feed: one row per listener, routes/podcasts.js)
  *   podcast_subs      `<user>|<feedId>` → added_at, notify
  *   podcast_episodes  the newest 50 per show, lean (see utils/podcastParse.js)
  *   podcast_progress  `<user>|<episodeId>` → pos, dur, done (TTL 180 days)

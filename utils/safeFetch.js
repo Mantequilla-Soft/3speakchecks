@@ -160,14 +160,17 @@ function requestOnce(u, { headers, timeoutMs, maxBytes, deadline }) {
  * @returns {Promise<{status, url, permanent, headers, body: Buffer|null}>}
  *   `url` is where it ended up; `permanent` is true when every redirect on the way
  *   was a 301/308 (the feed has really moved). 304 comes back with body null.
+ *   `auth`: an Authorization value (a private feed's, see splitCredentials), sent
+ *   on every hop that stays on the first URL's origin and on no other.
  */
-async function safeFetch(rawUrl, { headers = {}, timeoutMs = 15000, maxBytes = 16 * 1024 * 1024, maxRedirects = 5 } = {}) {
+async function safeFetch(rawUrl, { headers = {}, auth = '', timeoutMs = 15000, maxBytes = 16 * 1024 * 1024, maxRedirects = 5 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let u = checkUrl(rawUrl);
+  const origin = u.origin;
   let permanent = true;
   for (let hop = 0; hop <= maxRedirects; hop += 1) {
     // Conditional headers belong to the URL we stored them for, not a redirect target.
-    const res = await requestOnce(u, { headers: hop === 0 ? headers : {}, timeoutMs, maxBytes, deadline });
+    const res = await requestOnce(u, { headers: { ...(hop === 0 ? headers : {}), ...authFor(u, origin, auth) }, timeoutMs, maxBytes, deadline });
     if (res.status >= 300 && res.status < 400 && res.status !== 304) {
       const loc = res.headers.location;
       if (!loc) throw new FetchError(`http_${res.status}`, 'redirect without a location');
@@ -181,4 +184,79 @@ async function safeFetch(rawUrl, { headers = {}, timeoutMs = 15000, maxBytes = 1
   throw new FetchError('too_many_redirects', 'too many redirects');
 }
 
-module.exports = { safeFetch, checkUrl, isBlockedAddress, FetchError, USER_AGENT };
+/**
+ * A private feed's password, from `https://user:pass@host/...`. Node refuses URLs
+ * with credentials in them (and so does checkUrl), so they travel as a Basic
+ * Authorization header instead: { url: the URL without them, auth: 'Basic ...' | '' }.
+ */
+function splitCredentials(raw) {
+  let u;
+  try { u = new URL(String(raw).trim()); } catch (_) { return { url: String(raw || ''), auth: '' }; }
+  if (!u.username && !u.password) return { url: u.toString(), auth: '' };
+  let user;
+  let pass;
+  try { user = decodeURIComponent(u.username); pass = decodeURIComponent(u.password); } catch (_) { user = u.username; pass = u.password; }
+  u.username = '';
+  u.password = '';
+  return { url: u.toString(), auth: `Basic ${Buffer.from(`${user}:${pass}`, 'utf8').toString('base64')}` };
+}
+
+/** The Authorization header, only for the host it was given for: a redirect elsewhere never sees it. */
+function authFor(u, origin, auth) {
+  return auth && u.origin === origin ? { Authorization: auth } : {};
+}
+
+function streamOnce(u, { headers, deadline, idleMs }) {
+  return new Promise((resolve, reject) => {
+    const lib = u.protocol === 'https:' ? https : http;
+    const req = lib.request(u, {
+      method: 'GET',
+      lookup: guardedLookup,
+      // No compression: the bytes go to the listener as they are, and audio does not shrink.
+      headers: { 'User-Agent': USER_AGENT, Accept: '*/*', 'Accept-Encoding': 'identity', ...headers },
+    });
+    const timer = setTimeout(() => req.destroy(new FetchError('timeout', 'took too long')), Math.max(1, deadline - Date.now()));
+    req.on('error', (err) => { clearTimeout(timer); reject(err instanceof FetchError ? err : new FetchError(err.code === 'blocked_address' ? 'blocked_address' : 'network', err.message)); });
+    req.on('response', (res) => {
+      clearTimeout(timer);
+      // From here on only a stall ends it: a big file may take a while, a silent host may not.
+      req.setTimeout(idleMs, () => req.destroy(new FetchError('timeout', 'the host stopped sending')));
+      resolve({ req, res });
+    });
+    req.end();
+  });
+}
+
+/**
+ * Like safeFetch, but hands back the response STREAM instead of reading it: for
+ * big files (an episode's audio) passed on to a listener as they arrive. Same
+ * checks on every hop. The caller caps the size and must consume or destroy
+ * `stream`. Answers of 400 and up throw FetchError('http_<status>').
+ * @returns {Promise<{status, headers, url, stream, abort}>}
+ */
+async function safeStream(rawUrl, { headers = {}, auth = '', timeoutMs = 20000, idleMs = 60000, maxRedirects = 8 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let u = checkUrl(rawUrl);
+  const origin = u.origin;
+  for (let hop = 0; hop <= maxRedirects; hop += 1) {
+    const { req, res } = await streamOnce(u, { headers: { ...headers, ...authFor(u, origin, auth) }, deadline, idleMs });
+    const status = res.statusCode || 0;
+    if (status >= 300 && status < 400 && status !== 304) {
+      res.resume();
+      req.destroy();
+      const loc = res.headers.location;
+      if (!loc) throw new FetchError(`http_${status}`, 'redirect without a location');
+      u = checkUrl(new URL(loc, u).toString());
+      continue;
+    }
+    if (status >= 400 || status === 304) {
+      res.resume();
+      req.destroy();
+      throw new FetchError(`http_${status}`, `server answered ${status}`);
+    }
+    return { status, headers: res.headers, url: u.toString(), stream: res, abort: () => req.destroy() };
+  }
+  throw new FetchError('too_many_redirects', 'too many redirects');
+}
+
+module.exports = { safeFetch, safeStream, splitCredentials, checkUrl, isBlockedAddress, FetchError, USER_AGENT };

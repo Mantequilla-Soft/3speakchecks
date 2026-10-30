@@ -16,8 +16,11 @@
  *   beat, so a late or forged beat cannot claim a long span and idle time is not
  *   listening. A session token (HMAC over sid + item) binds beats to the session.
  * - Only CONTIGUOUS forward playback counts: a beat whose position moved forward by
- *   no more than the elapsed time x 2.5 (up to 2.5x speed and a late beat). A seek
- *   or a rewind credits nothing.
+ *   no more than the elapsed time x the beat's playback rate plus a third (skip
+ *   silence jumps over pauses on top of the rate), between 2.5x and 4x, plus 10 %
+ *   for beat timing. A seek or
+ *   a rewind credits nothing. Credit stays wall-clock time either way, so a fast
+ *   listener is credited for the time they spent, not for the audio they got.
  * - listenedSeconds = wall-clock time spent listening; contentSeconds = audio
  *   consumed (playhead advance), which is right at any playback speed.
  * - listenedPct = distinct timeline slices (of 100) actually heard: skipping to the
@@ -61,6 +64,15 @@ const HEATMAP_COLLECTION = 'listen-heatmaps';
 const BEAT_SECONDS = Math.max(1, parseInt(process.env.LISTEN_TRACK_BEAT_SECONDS, 10) || 10);
 const BUCKET_COUNT = 100;
 const MAX_BEAT_CREDIT_MS = Math.max(BEAT_SECONDS * 1000 * 1.6, 8000);
+// How far the playhead may run ahead of the clock and still be one stretch of
+// listening: the reported rate (up to 3x in the player) plus a third for skipped
+// silences, never under the old 2.5x and never over 4x, and then 10 % for a beat
+// that arrives a little early or late (the server times beats, the player moves
+// the playhead).
+const MIN_CONTIGUOUS_RATE = 2.5;
+const MAX_CONTIGUOUS_RATE = 4;
+const RATE_SLACK = 4 / 3;
+const BEAT_JITTER = 1.1;
 const MAX_DURATION_SEC = 6 * 3600; // longer "episodes" exist (live recordings); beyond this nothing is measured
 const DURATION_DISAGREEMENT_RATIO = 0.5;
 // Per-process: sessions live for a few track-lengths, losing them on a restart is fine.
@@ -140,7 +152,10 @@ function applyBeat(s, { now, position, rate, hidden }) {
   const n = s.bucketCount || BUCKET_COUNT;
   const lastPos = Number(s.lastPosition) || 0;
   const curPos = clampPos(position, durSec);
-  const contiguousMax = Math.max((credit / 1000) * 2.5, 12);
+  const r = Number(rate);
+  const rateOk = Number.isFinite(r) && r > 0 && r <= 4;
+  const pace = Math.min(MAX_CONTIGUOUS_RATE, Math.max(MIN_CONTIGUOUS_RATE, rateOk ? r * RATE_SLACK : 0)) * BEAT_JITTER;
+  const contiguousMax = Math.max((credit / 1000) * pace, 12);
   const covered = new Set(Array.isArray(s.coveredBuckets) ? s.coveredBuckets : []);
   const incs = {};
   let { accumulatedMs = 0, contentMs = 0, hiddenContentMs = 0 } = s;
@@ -157,8 +172,6 @@ function applyBeat(s, { now, position, rate, hidden }) {
       covered.add(b);
     }
   }
-  const r = Number(rate);
-  const rateOk = Number.isFinite(r) && r > 0 && r <= 4;
   return {
     counted,
     incs,
@@ -405,4 +418,4 @@ router.get('/heatmap', limiter(120), async (req, res) => {
 });
 
 module.exports = router;
-module.exports._test = { applyBeat, bucketIndex, resolveDuration, normalizeSource, clientIp, qualifies, creditSeconds, listenVouchMessage, proveListener, recordListenerReward, MAX_BEAT_CREDIT_MS, BUCKET_COUNT };
+module.exports._test = { MAX_CONTIGUOUS_RATE, applyBeat, bucketIndex, resolveDuration, normalizeSource, clientIp, qualifies, creditSeconds, listenVouchMessage, proveListener, recordListenerReward, MAX_BEAT_CREDIT_MS, BUCKET_COUNT };

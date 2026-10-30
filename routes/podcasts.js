@@ -6,10 +6,13 @@
  *   GET  /podcasts/subscriptions?user=
  *   GET  /podcasts/latest?user=&before=&limit=     newest episodes of everything followed
  *   GET  /podcasts/notifications?user=             new episodes since each follow (bell)
- *   GET  /podcasts/feed/:id?since=&until=&limit=   a show and its newest episodes
- *   GET  /podcasts/feed/:id/older?offset=&since=&until=   the next page of them
+ *   GET  /podcasts/feed/:id?since=&until=&limit=&q=   a show and its newest episodes
+ *   GET  /podcasts/feed/:id/older?offset=&since=&until=&q=   the next page of them
  *   GET  /podcasts/episode/:id
  *   GET  /podcasts/episode/:id/notes               full show notes, read from the feed
+ *   GET  /podcasts/episode/:id/chapters            chapters (JSON file or inline), see utils/podcastMedia.js
+ *   GET  /podcasts/episode/:id/transcript?lang=    a transcript as timed cues
+ *   GET  /podcasts/episode/:id/download            the audio through us, with CORS, for saving offline
  *   GET  /podcasts/search?q=&country=              Podcast Index + Apple Podcasts + fyyd, merged
  *   GET  /podcasts/person?q=                       shows a host or guest appears in (Podcast Index)
  *   GET  /podcasts/trending?lang=&cat=             Podcast Index's trending shows
@@ -21,7 +24,7 @@
  *   POST /podcasts/progress                        save that (session vouch, below)
  *
  * Writes, signed:
- *   POST /podcasts/subscribe   { user, urls: [..], titles?: [..], signature, timestamp }
+ *   POST /podcasts/subscribe   { user, urls: [..], titles?: [..], private?: [..], signature, timestamp }
  *   POST /podcasts/unsubscribe { user, feed_id, signature, timestamp }
  *   POST /podcasts/notify      { user, feed_id, notify, signature, timestamp }
  *
@@ -37,6 +40,14 @@
  *
  * No notification rows: the bell is computed from podcast_subs.added_at and each
  * episode's first_seen_at, and the "seen" mark lives in the browser.
+ *
+ * PRIVATE feeds (paid or password-protected: `private: true` on subscribe, or a
+ * URL with `user:pass@`) are one row per listener, see services/podcastFeedsWorker.js.
+ * Their URL is never returned (`url: ''`, no `keys`), they are in no public list,
+ * and reading their episodes (every read below that returns one, chapters,
+ * transcripts and downloads included) needs the listener's session vouch as query
+ * parameters `vu=&vts=&vsig=` (the one POST /progress takes) and a follow of that
+ * feed. Without it a list leaves the feed out and a single read is a 404.
  */
 const crypto = require('crypto');
 const express = require('express');
@@ -45,8 +56,10 @@ const { ObjectId } = require('mongodb');
 const { getDb } = require('../utils/db');
 const { verifyHiveAuthority, verifyDelegateVouch } = require('../utils/hiveAuth');
 const { SIGNATURE_TIMESTAMP_TOLERANCE_MS, AD_SIGNING_DELEGATES } = require('../utils/config');
-const { checkUrl } = require('../utils/safeFetch');
-const { urlKey } = require('../utils/podcastParse');
+const { Transform, pipeline } = require('stream');
+const { checkUrl, safeFetch, safeStream, splitCredentials } = require('../utils/safeFetch');
+const { urlKey, privateKey } = require('../utils/podcastParse');
+const media = require('../utils/podcastMedia');
 const { artToken, urlFromToken, renderArt, SIZES } = require('../utils/podcastArt');
 const podcastFeeds = require('../services/podcastFeeds');
 const directories = require('../utils/podcastDirectories');
@@ -106,11 +119,85 @@ function tooManyIn(map, user, max) {
 const recent = new Map();
 const tooMany = (user, max = 60) => tooManyIn(recent, user, max);
 
+// ─── Private feeds ────────────────────────────────────────────────────────────
+
+// A checked vouch is remembered until it runs out: the episode list, the player
+// and the progress bars all send the same one, many times a minute.
+const readers = new Map(); // `user|ts|sig` → valid until
+async function readerOf(req) {
+  const q = req.query || {};
+  if (!q.vu || !q.vsig || !q.vts) return null;
+  const user = userOf(q.vu);
+  const key = `${user}|${String(q.vts).slice(0, 20)}|${String(q.vsig).slice(0, 200)}`;
+  const until = readers.get(key);
+  if (until && until > Date.now()) return user;
+  const ok = await proveProgressUser({ user: q.vu, signature: String(q.vsig), timestamp: q.vts });
+  if (!ok) return null;
+  readers.set(key, parseInt(q.vts, 10) + PROGRESS_VOUCH_MAX_AGE_MS);
+  if (readers.size > 2000) readers.delete(readers.keys().next().value);
+  return ok;
+}
+
+const hexOf = (id) => (typeof id === 'string' ? id : id.toHexString());
+
+/** May this request read a feed (or one of its episodes)? A private one: only a vouched follower. */
+async function mayRead(req, isPrivate, feedId) {
+  if (!isPrivate) return true;
+  const reader = await readerOf(req);
+  if (!reader) return false;
+  return !!(await getDb().collection(SUBS).findOne({ _id: `${reader}|${hexOf(feedId)}` }, { projection: { _id: 1 } }));
+}
+
+/**
+ * The feeds of `user`'s follows that this request may see: all of them when it
+ * carries that user's vouch, else all but the private ones. (Following is proven
+ * by the follow rows themselves.)
+ */
+async function visibleFeedIds(req, user, ids) {
+  if (!ids.length) return ids;
+  const priv = await getDb().collection(FEEDS).find({ _id: { $in: ids }, private: true }, { projection: { _id: 1 } }).toArray();
+  if (!priv.length || (await readerOf(req)) === user) return ids;
+  const hidden = new Set(priv.map((f) => f._id.toHexString()));
+  return ids.filter((id) => !hidden.has(hexOf(id)));
+}
+
+/**
+ * The Basic auth of a private feed, for a URL on that feed's own host (its audio,
+ * chapters, transcripts often sit behind the same password). '' otherwise.
+ */
+async function privateAuth(ep, url) {
+  if (!ep.private) return '';
+  const feed = await getDb().collection(FEEDS).findOne({ _id: ep.feed_id }, { projection: { url: 1 } });
+  if (!feed) return '';
+  const { url: bare, auth } = splitCredentials(feed.url);
+  try { return auth && new URL(bare).origin === new URL(url).origin ? auth : ''; } catch (_) { return ''; }
+}
+
+// A stream with no end time that started this long ago is over, whatever the
+// feed still says (an unchanged feed is not read again).
+const LIVE_STALE_MS = 24 * 3600 * 1000;
+
+/** The show's live items that are still upcoming or running. */
+function liveNow(list, now = Date.now()) {
+  return (Array.isArray(list) ? list : []).filter((l) => {
+    const end = l.end ? new Date(l.end).getTime() : 0;
+    const start = l.start ? new Date(l.start).getTime() : 0;
+    if (end) return end > now;
+    return !start || now - start < LIVE_STALE_MS;
+  }).map((l) => {
+    const out = { id: l.id, title: l.title || '', status: l.status, start: l.start || null, url: l.url, mime: l.mime || '' };
+    if (l.end) out.end = l.end;
+    if (l.link) out.link = l.link;
+    return out;
+  });
+}
+
 function presentFeed(f, extra = {}) {
   if (!f) return null;
   const out = {
     id: f._id.toHexString(),
-    url: f.url,
+    // A private feed's URL holds the listener's password or token: never sent.
+    url: f.private ? '' : f.url,
     title: f.title || '',
     author: f.author || '',
     image: f.image || '',
@@ -123,6 +210,10 @@ function presentFeed(f, extra = {}) {
   for (const k of ['link', 'description', 'language', 'categories', 'explicit', 'funding', 'value', 'error', 'item_count']) {
     if (f[k] !== undefined && f[k] !== null && f[k] !== '') out[k] = f[k];
   }
+  if (Array.isArray(f.persons) && f.persons.length) out.persons = f.persons;
+  const live = liveNow(f.live);
+  if (live.length) out.live = live;
+  if (f.private) out.private = true;
   return out;
 }
 
@@ -135,10 +226,19 @@ function presentEpisode(e) {
     mime: e.mime || '',
     published_at: e.published_at || null,
   };
-  for (const k of ['bytes', 'duration', 'summary', 'image', 'link', 'value']) if (e[k]) out[k] = e[k];
+  for (const k of ['bytes', 'duration', 'summary', 'image', 'link', 'value', 'episode_type', 'persons', 'soundbites', 'video']) if (e[k]) out[k] = e[k];
   if (e.image) out.art = artToken(e.image);
+  for (const k of ['season', 'episode']) if (typeof e[k] === 'number') out[k] = e[k];
+  // Only that there are chapters and which transcript languages: the files'
+  // addresses stay here, the player asks /episode/:id/chapters and /transcript.
+  if (e.chapters || e.chapters_url) out.chapters = true;
+  if (Array.isArray(e.transcripts) && e.transcripts.length) out.transcripts = e.transcripts.map((t) => ({ lang: t.lang, type: t.type }));
+  if (e.private) out.private = true;
   return out;
 }
+
+// Lists never need the inline chapters (only that there are some, `chapters`).
+const EPISODE_LIST = { chapters_inline: 0 };
 
 /**
  * Shows without cover art of their own get the art of their newest stored episode
@@ -162,7 +262,7 @@ async function fillMissingArt(feedDocs) {
 }
 
 // Just enough of a show to draw an episode row and its tip button.
-const FEED_CARD = { title: 1, author: 1, image: 1, value: 1, funding: 1, url: 1, status: 1, link: 1 };
+const FEED_CARD = { title: 1, author: 1, image: 1, value: 1, funding: 1, url: 1, status: 1, link: 1, private: 1 };
 const feedCard = (f) => presentFeed(f);
 
 function disabled(res) {
@@ -187,18 +287,22 @@ router.get('/subscriptions', async (req, res) => {
   try {
     const db = getDb();
     const subs = await db.collection(SUBS).find({ user }).toArray();
-    const feeds = subs.length
-      ? await fillMissingArt(await db.collection(FEEDS).find({ _id: { $in: subs.map((s) => s.feed_id) } }).toArray())
+    const all = subs.length
+      ? await db.collection(FEEDS).find({ _id: { $in: subs.map((s) => s.feed_id) } }).toArray()
       : [];
+    // Private feeds only with this user's vouch.
+    const vouched = all.some((f) => f.private) && (await readerOf(req)) === user;
+    const feeds = await fillMissingArt(all.filter((f) => !f.private || vouched));
     const byId = new Map(feeds.map((f) => [f._id.toHexString(), f]));
     const list = subs.map((s) => {
       const f = byId.get(s.feed_id.toHexString());
       if (!f) return null;
       // keys: every address this feed is known under (it moved, or two URLs were
       // one feed), so a directory listing it under another one shows it as followed.
-      const keys = [f.url_key, ...(f.alt_keys || [])].filter(Boolean);
+      // None for a private feed: its key is the listener's own, not an address.
+      const keys = f.private ? [] : [f.url_key, ...(f.alt_keys || [])].filter(Boolean);
       return { ...presentFeed(f), keys, notify: s.notify !== false, added_at: s.added_at };
-    }).filter(Boolean).sort((a, b) => (a.title || a.url).localeCompare(b.title || b.url));
+    }).filter(Boolean).sort((a, b) => (a.title || a.url || a.id).localeCompare(b.title || b.url || b.id));
     res.json({ success: true, subscriptions: list });
   } catch (err) {
     console.error('[podcasts] subscriptions:', err.message);
@@ -214,10 +318,11 @@ router.get('/latest', async (req, res) => {
   try {
     const db = getDb();
     const subs = await db.collection(SUBS).find({ user }, { projection: { feed_id: 1 } }).toArray();
-    if (!subs.length) return res.json({ success: true, episodes: [], feeds: {} });
-    const q = { feed_id: { $in: subs.map((s) => s.feed_id) } };
+    const feedIds = await visibleFeedIds(req, user, subs.map((s) => s.feed_id));
+    if (!feedIds.length) return res.json({ success: true, episodes: [], feeds: {} });
+    const q = { feed_id: { $in: feedIds } };
     if (before && !Number.isNaN(before.getTime())) q.published_at = { $lt: before };
-    const eps = await db.collection(EPISODES).find(q).sort({ published_at: -1 }).limit(limit).toArray();
+    const eps = await db.collection(EPISODES).find(q, { projection: EPISODE_LIST }).sort({ published_at: -1 }).limit(limit).toArray();
     const ids = [...new Set(eps.map((e) => e.feed_id.toHexString()))].map((h) => new ObjectId(h));
     const feeds = ids.length ? await fillMissingArt(await db.collection(FEEDS).find({ _id: { $in: ids } }, { projection: FEED_CARD }).toArray()) : [];
     res.json({
@@ -237,11 +342,12 @@ router.get('/notifications', async (req, res) => {
   try {
     const db = getDb();
     const subs = await db.collection(SUBS).find({ user, notify: { $ne: false } }, { projection: { feed_id: 1, added_at: 1 } }).toArray();
-    if (!subs.length) return res.json({ success: true, episodes: [], feeds: {} });
+    const feedIds = await visibleFeedIds(req, user, subs.map((s) => s.feed_id));
+    if (!feedIds.length) return res.json({ success: true, episodes: [], feeds: {} });
     const since = new Date(Date.now() - NOTIFY_DAYS * 24 * 3600 * 1000);
     const addedAt = new Map(subs.map((s) => [s.feed_id.toHexString(), s.added_at]));
     const eps = (await db.collection(EPISODES)
-      .find({ feed_id: { $in: subs.map((s) => s.feed_id) }, first_seen_at: { $gt: since } })
+      .find({ feed_id: { $in: feedIds }, first_seen_at: { $gt: since } }, { projection: EPISODE_LIST })
       .sort({ first_seen_at: -1 }).limit(60).toArray())
       // Only what arrived after this person followed the show.
       .filter((e) => e.first_seen_at > (addedAt.get(e.feed_id.toHexString()) || since))
@@ -259,9 +365,13 @@ router.get('/notifications', async (req, res) => {
   }
 });
 
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 // Every episode is stored, so a show pages straight from Mongo, newest first.
 // `since` / `until` (ISO dates, either may be left out) are the show page's date
-// filter, presets and custom range alike.
+// filter, presets and custom range alike. `q`: only episodes whose title or
+// summary contains it (any case). One show is a few thousand rows at most, read
+// through the feed_id index, so no text index is needed.
 function episodePage(req) {
   const _id = new ObjectId(req.params.id);
   const q = { feed_id: _id };
@@ -271,6 +381,11 @@ function episodePage(req) {
   if (since && !Number.isNaN(since.getTime())) range.$gte = since;
   if (until && !Number.isNaN(until.getTime())) range.$lte = until;
   if (Object.keys(range).length) q.published_at = range;
+  const text = String(req.query.q || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+  if (text) {
+    const re = new RegExp(escapeRegex(text), 'i');
+    q.$or = [{ title: re }, { summary: re }];
+  }
   const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
   const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
   return { _id, q, limit, offset };
@@ -282,10 +397,10 @@ router.get('/feed/:id', async (req, res) => {
     const db = getDb();
     const { _id, q, limit } = episodePage(req);
     const feed = await db.collection(FEEDS).findOne({ _id });
-    if (!feed) return res.status(404).json({ success: false, error: 'not found' });
+    if (!feed || !(await mayRead(req, feed.private, _id))) return res.status(404).json({ success: false, error: 'not found' });
     await fillMissingArt([feed]);
     const [eps, total] = await Promise.all([
-      db.collection(EPISODES).find(q).sort({ published_at: -1 }).limit(limit).toArray(),
+      db.collection(EPISODES).find(q, { projection: EPISODE_LIST }).sort({ published_at: -1 }).limit(limit).toArray(),
       db.collection(EPISODES).countDocuments(q),
     ]);
     res.json({
@@ -304,10 +419,12 @@ router.get('/feed/:id', async (req, res) => {
 router.get('/feed/:id/older', async (req, res) => {
   if (!ID_RE.test(req.params.id)) return res.status(400).json({ success: false, error: 'invalid id' });
   try {
-    const { q, limit, offset } = episodePage(req);
+    const { _id, q, limit, offset } = episodePage(req);
+    const feed = await getDb().collection(FEEDS).findOne({ _id }, { projection: { private: 1 } });
+    if (feed && !(await mayRead(req, feed.private, _id))) return res.status(404).json({ success: false, error: 'not found' });
     const col = getDb().collection(EPISODES);
     const [eps, total] = await Promise.all([
-      col.find(q).sort({ published_at: -1 }).skip(offset).limit(limit).toArray(),
+      col.find(q, { projection: EPISODE_LIST }).sort({ published_at: -1 }).skip(offset).limit(limit).toArray(),
       col.countDocuments(q),
     ]);
     res.json({ success: true, episodes: eps.map(presentEpisode), total, next_offset: offset + eps.length });
@@ -322,8 +439,8 @@ router.get('/episode/:id', async (req, res) => {
   if (!EPISODE_RE.test(id)) return res.status(400).json({ success: false, error: 'invalid id' });
   try {
     const db = getDb();
-    const ep = await db.collection(EPISODES).findOne({ _id: id });
-    if (!ep) return res.status(404).json({ success: false, error: 'not found' });
+    const ep = await db.collection(EPISODES).findOne({ _id: id }, { projection: EPISODE_LIST });
+    if (!ep || !(await mayRead(req, ep.private, ep.feed_id))) return res.status(404).json({ success: false, error: 'not found' });
     const feed = await db.collection(FEEDS).findOne({ _id: ep.feed_id }, { projection: FEED_CARD });
     if (feed) await fillMissingArt([feed]);
     res.json({ success: true, episode: presentEpisode(ep), feed: feedCard(feed) });
@@ -347,11 +464,221 @@ router.get('/episode/:id/notes', notesLimiter, async (req, res) => {
   const id = String(req.params.id);
   if (!EPISODE_RE.test(id)) return res.status(400).json({ success: false, error: 'invalid id' });
   if (!podcastFeeds.enabled()) return disabled(res);
+  const ep = await readableEpisode(req, res, {});
+  if (!ep) return;
   const r = await podcastFeeds.ask('notes', { feed_id: id.slice(0, 24), episode_id: id }, 40000);
   if (!r.ok) return res.status(r.code === 'not_found' ? 404 : 502).json({ success: false, error: 'could not read the show notes', code: r.code });
-  res.set('Cache-Control', 'public, max-age=900');
+  res.set('Cache-Control', ep.private ? 'private, max-age=900' : 'public, max-age=900');
   res.json({ success: true, html: r.html });
 });
+// ─── Chapters, transcripts, downloads ─────────────────────────────────────────
+
+/**
+ * The episode a request names, when it may read it; else the answer is sent
+ * (400 for a bad id, 404 for a missing or private one) and this is null.
+ */
+async function readableEpisode(req, res, projection) {
+  const id = String(req.params.id);
+  if (!EPISODE_RE.test(id)) { res.status(400).json({ success: false, error: 'invalid id' }); return null; }
+  try {
+    const ep = await getDb().collection(EPISODES).findOne({ _id: id }, { projection: { ...projection, feed_id: 1, private: 1 } });
+    if (ep && await mayRead(req, ep.private, ep.feed_id)) return ep;
+    res.status(404).json({ success: false, error: 'not found' });
+  } catch (err) {
+    console.error('[podcasts] episode read:', err.message);
+    res.status(500).json({ success: false, error: 'could not load the episode' });
+  }
+  return null;
+}
+
+// Chapter and transcript files from the podcast's host. Small, fetched once and
+// then answered from memory (utils/podcastMedia.js makeCache) for a few hours.
+const MEDIA_TTL = 6 * 3600 * 1000;
+const MEDIA_MISS_TTL = 10 * 60 * 1000;
+const CHAPTERS_MAX_BYTES = 1024 * 1024;
+// A word-by-word JSON transcript of a three-hour show is a few MB.
+const TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024;
+const mediaCache = media.makeCache();
+const mediaLoading = new Map();
+
+const mediaLimiter = rateLimit({
+  // Per listener: the checker does not trust nginx as a proxy, so the default
+  // key (req.ip) is nginx itself and the limit would be shared by everybody.
+  keyGenerator: (req) => rateLimit.ipKeyGenerator(clientIpOf(req)), validate: { xForwardedForHeader: false, ip: false },
+  windowMs: 60 * 1000, max: 60, standardHeaders: false, legacyHeaders: false,
+  message: { success: false, error: 'Too many requests' },
+});
+
+/**
+ * `load()` once per key: from the cache, or shared with a request already
+ * loading it. A failure is remembered (as null) for MEDIA_MISS_TTL.
+ */
+async function cachedMedia(key, load) {
+  const hit = mediaCache.get(key);
+  if (hit !== undefined) return hit;
+  if (mediaLoading.has(key)) return mediaLoading.get(key);
+  const p = (async () => {
+    try {
+      const value = await load();
+      mediaCache.set(key, value, value && value.length ? MEDIA_TTL : MEDIA_MISS_TTL);
+      return value;
+    } catch (err) {
+      mediaCache.set(key, null, MEDIA_MISS_TTL);
+      return null;
+    } finally {
+      mediaLoading.delete(key);
+    }
+  })();
+  mediaLoading.set(key, p);
+  return p;
+}
+
+async function remoteText(ep, url, maxBytes) {
+  const res = await safeFetch(url, {
+    timeoutMs: 12000, maxBytes, auth: await privateAuth(ep, url),
+    headers: { Accept: 'application/json, text/vtt, application/x-subrip, text/html;q=0.8, text/plain;q=0.8, */*;q=0.5' },
+  });
+  return res.body.toString('utf8');
+}
+
+const mediaCacheHeader = (ep) => (ep.private ? 'private, max-age=3600' : 'public, max-age=3600');
+
+router.get('/episode/:id/chapters', mediaLimiter, async (req, res) => {
+  const ep = await readableEpisode(req, res, { chapters_url: 1, chapters_inline: 1 });
+  if (!ep) return;
+  let chapters = [];
+  if (Array.isArray(ep.chapters_inline) && ep.chapters_inline.length) {
+    chapters = media.normaliseChapters(ep.chapters_inline);
+  } else if (ep.chapters_url) {
+    chapters = (await cachedMedia(`ch:${ep._id}:${ep.chapters_url}`,
+      async () => media.chaptersFromBody(await remoteText(ep, ep.chapters_url, CHAPTERS_MAX_BYTES)))) || [];
+  }
+  if (!chapters.length) return res.status(404).json({ success: false, error: 'no_chapters' });
+  res.set('Cache-Control', mediaCacheHeader(ep));
+  res.json({ success: true, chapters });
+});
+
+router.get('/episode/:id/transcript', mediaLimiter, async (req, res) => {
+  const ep = await readableEpisode(req, res, { transcripts: 1 });
+  if (!ep) return;
+  const list = Array.isArray(ep.transcripts) ? ep.transcripts : [];
+  const lang = String(req.query.lang || '').trim().toLowerCase().slice(0, 12);
+  let showLang = '';
+  if (!lang && list.length > 1) {
+    const feed = await getDb().collection(FEEDS).findOne({ _id: ep.feed_id }, { projection: { language: 1 } }).catch(() => null);
+    showLang = (feed && feed.language) || '';
+  }
+  // The best format of that language first; a file that fails, the next one.
+  for (const t of media.pickTranscripts(list, lang, showLang).slice(0, 3)) {
+    const cues = await cachedMedia(`tr:${ep._id}:${t.url}`,
+      async () => media.parseTranscript(await remoteText(ep, t.url, TRANSCRIPT_MAX_BYTES), t.type));
+    if (cues && cues.length) {
+      res.set('Cache-Control', mediaCacheHeader(ep));
+      return res.json({ success: true, lang: t.lang, languages: media.transcriptLanguages(list), cues });
+    }
+  }
+  res.status(404).json({ success: false, error: 'no_transcript' });
+});
+
+// The episode's audio passed through, for saving it offline when its host does
+// not allow cross-site reads (most do not send CORS headers). Only the episode's
+// own audio_url, fetched like a feed (utils/safeFetch.js safeStream, every hop
+// checked), never buffered, capped at PODCAST_DOWNLOAD_MAX_MB. A Range is passed
+// on, so a download can resume and a player can seek.
+const DOWNLOAD_MAX_BYTES = Math.max(1, parseInt(process.env.PODCAST_DOWNLOAD_MAX_MB, 10) || 400) * 1024 * 1024;
+const DOWNLOADS_AT_ONCE = 24;
+let downloadsOpen = 0;
+const RANGE_RE = /^bytes=(\d*)-(\d*)$/;
+// A range from somewhere in the middle continues a download (or is a seek), it
+// does not start one: those have their own, wider limit.
+const continuesDownload = (req) => {
+  const m = RANGE_RE.exec(String(req.headers.range || ''));
+  return !!m && m[1] !== '' && m[1] !== '0';
+};
+const downloadLimiter = (max, skip) => rateLimit({
+  keyGenerator: (req) => rateLimit.ipKeyGenerator(clientIpOf(req)), validate: { xForwardedForHeader: false, ip: false },
+  windowMs: 60 * 60 * 1000, max, skip, standardHeaders: false, legacyHeaders: false,
+  message: { success: false, error: 'Too many downloads, try again later' },
+});
+const downloadStarts = downloadLimiter(12, continuesDownload);
+const downloadRanges = downloadLimiter(600, (req) => !continuesDownload(req));
+
+/** What the file is served as: audio or video only, never something a browser would render as a page. */
+function downloadType(upstream, stored) {
+  const t = String(upstream || '').split(';')[0].trim().toLowerCase();
+  if (/^(audio|video)\/[a-z0-9.+-]{1,40}$/.test(t)) return t;
+  const s = String(stored || '').toLowerCase();
+  return /^(audio|video)\/[a-z0-9.+-]{1,40}$/.test(s) ? s : 'application/octet-stream';
+}
+
+function downloadName(url, title) {
+  let base = '';
+  try { base = decodeURIComponent(new URL(url).pathname.split('/').pop() || ''); } catch (_) { /* odd URL */ }
+  const ext = (base.match(/\.(mp3|m4a|m4b|aac|ogg|oga|opus|wav|flac|mp4|m4v|webm)$/i) || [''])[0].toLowerCase() || '.mp3';
+  const name = String(title || base.replace(/\.[^.]*$/, '') || 'episode').replace(/[^A-Za-z0-9._ -]+/g, '_').replace(/\s+/g, ' ').trim().slice(0, 80) || 'episode';
+  return `${name}${ext}`;
+}
+
+router.get('/episode/:id/download', downloadStarts, downloadRanges, async (req, res) => {
+  const ep = await readableEpisode(req, res, { audio_url: 1, mime: 1, title: 1 });
+  if (!ep) return;
+  if (downloadsOpen >= DOWNLOADS_AT_ONCE) return res.status(503).json({ success: false, error: 'busy, try again in a minute', code: 'busy' });
+  downloadsOpen += 1;
+  let released = false;
+  const release = () => { if (!released) { released = true; downloadsOpen -= 1; } };
+  let closed = false;
+  res.on('close', () => { closed = true; release(); });
+
+  const headers = {};
+  const range = String(req.headers.range || '');
+  if (RANGE_RE.test(range) && range !== 'bytes=-') headers.Range = range;
+  let up;
+  try {
+    up = await safeStream(ep.audio_url, { headers, auth: await privateAuth(ep, ep.audio_url) });
+  } catch (err) {
+    release();
+    if (closed) return;
+    if (err && err.code === 'http_416') return res.status(416).json({ success: false, error: 'range not satisfiable' });
+    return res.status(502).json({ success: false, error: 'the podcast host did not deliver the file', code: String((err && err.code) || 'error').slice(0, 40) });
+  }
+  if (closed) { up.abort(); return; }
+  const length = parseInt(up.headers['content-length'], 10);
+  const contentRange = String(up.headers['content-range'] || '');
+  const whole = up.status === 206 ? parseInt((contentRange.match(/\/(\d+)\s*$/) || [])[1], 10) : length;
+  if (Number.isFinite(whole) && whole > DOWNLOAD_MAX_BYTES) {
+    up.abort();
+    release();
+    return res.status(413).json({ success: false, error: 'the file is too large', max_mb: Math.round(DOWNLOAD_MAX_BYTES / 1048576) });
+  }
+  res.status(up.status === 206 ? 206 : 200);
+  res.set('Content-Type', downloadType(up.headers['content-type'], ep.mime));
+  if (Number.isFinite(length) && length >= 0) res.set('Content-Length', String(length));
+  if (up.status === 206 && contentRange) res.set('Content-Range', contentRange.slice(0, 100));
+  if (up.status === 206 || String(up.headers['accept-ranges'] || '').toLowerCase() === 'bytes') res.set('Accept-Ranges', 'bytes');
+  res.set('Content-Disposition', `attachment; filename="${downloadName(up.url, ep.title)}"`);
+  // CORS itself is app-wide (server.js, cors()); these let the page read the sizes.
+  res.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges, Content-Disposition');
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Content-Security-Policy', "default-src 'none'; sandbox");
+  res.set('Cache-Control', 'private, no-store');
+  // nginx would otherwise spool the whole file to disk before sending it on.
+  res.set('X-Accel-Buffering', 'no');
+  if (req.method === 'HEAD') { up.abort(); release(); return res.end(); }
+  // The size cap also for a host that sends no length (or a wrong one).
+  let sent = 0;
+  const cap = new Transform({
+    transform(chunk, _enc, cb) {
+      sent += chunk.length;
+      if (sent > DOWNLOAD_MAX_BYTES) return cb(Object.assign(new Error('too large'), { code: 'too_large' }));
+      return cb(null, chunk);
+    },
+  });
+  pipeline(up.stream, cap, res, (err) => {
+    if (err) up.abort();
+    release();
+  });
+});
+
 
 // ─── Search and trending (Podcast Index) ──────────────────────────────────────
 
@@ -512,7 +839,8 @@ router.get('/discover', async (req, res) => {
   try {
     if (!discoverCache || Date.now() - discoverCache.at > 60 * 1000) {
       const col = getDb().collection(FEEDS);
-      const base = { subscribers: { $gt: 0 }, status: 'ok' };
+      // Never a private feed: it is one listener's, and its title alone may say too much.
+      const base = { subscribers: { $gt: 0 }, status: 'ok', private: { $ne: true } };
       const [top, recent] = await Promise.all([
         col.find(base, { projection: DISCOVER_CARD }).sort({ subscribers: -1, last_followed_at: -1 }).limit(10).toArray(),
         col.find({ ...base, last_followed_at: { $exists: true } }, { projection: DISCOVER_CARD }).sort({ last_followed_at: -1 }).limit(12).toArray(),
@@ -649,6 +977,7 @@ router.post('/subscribe', express.json({ limit: '256kb' }), async (req, res) => 
   if (tooMany(user)) return res.status(429).json({ success: false, error: 'too many changes, try again later' });
 
   const titles = Array.isArray(b.titles) ? b.titles : [];
+  const privateFlags = Array.isArray(b.private) ? b.private : [];
   const db = getDb();
   const feeds = db.collection(FEEDS);
   const subs = db.collection(SUBS);
@@ -657,24 +986,40 @@ router.post('/subscribe', express.json({ limit: '256kb' }), async (req, res) => 
   const single = urls.length === 1;
 
   for (let i = 0; i < urls.length; i += 1) {
-    const out = { url: urls[i] };
+    // A private feed (marked so, or with a password in it): the listener's own row,
+    // fetched with their credentials, never looked up in a directory, and its
+    // password never echoed back.
+    const bare = splitCredentials(urls[i]);
+    const isPrivate = privateFlags[i] === true || privateFlags[i] === 'true' || !!bare.auth;
+    const out = { url: isPrivate ? bare.url : urls[i] };
     results.push(out);
-    // A link from Apple Podcasts, Overcast, fyyd... names its feed; Spotify & co. have none.
-    const resolved = await directories.resolveLink(urls[i]);
-    if (resolved.code) { Object.assign(out, resolved); continue; }
-    const url = resolved.url;
-    if (resolved.via) out.resolved_url = url;
+    let url = urls[i];
+    if (!isPrivate) {
+      // A link from Apple Podcasts, Overcast, fyyd... names its feed; Spotify & co. have none.
+      const resolved = await directories.resolveLink(urls[i]);
+      if (resolved.code) { Object.assign(out, resolved); continue; }
+      url = resolved.url;
+      if (resolved.via) out.resolved_url = url;
+    }
     try {
-      checkUrl(url);
+      checkUrl(isPrivate ? bare.url : url);
     } catch (err) {
       out.code = err.code || 'bad_url';
       continue;
     }
-    const key = urlKey(url);
-    const owner = internalOwner(key);
+    const owner = internalOwner(urlKey(isPrivate ? bare.url : url));
     if (owner) { out.code = 'internal_feed'; out.owner = owner; continue; }
+    const key = isPrivate ? privateKey(user, url) : urlKey(url);
+    if (isPrivate) out.private = true;
 
-    let feed = await feeds.findOne({ $or: [{ url_key: key }, { alt_keys: key }] }, { projection: { _id: 1, status: 1, last_ok_at: 1 } });
+    let feed = await feeds.findOne(
+      isPrivate ? { url_key: key } : { $or: [{ url_key: key }, { alt_keys: key }], private: { $ne: true } },
+      { projection: { _id: 1, status: 1, last_ok_at: 1, url: 1 } },
+    );
+    if (feed && isPrivate && feed.url !== url) {
+      // Same feed, new password or token: keep the new one and read it again soon.
+      await feeds.updateOne({ _id: feed._id }, { $set: { url, next_poll_at: new Date() } });
+    }
     if (feed) {
       const already = await subs.findOne({ _id: `${user}|${feed._id.toHexString()}` }, { projection: { _id: 1 } });
       if (already) { out.ok = true; out.already = true; out.feed_id = feed._id.toHexString(); continue; }
@@ -683,9 +1028,9 @@ router.post('/subscribe', express.json({ limit: '256kb' }), async (req, res) => 
 
     if (single && (!feed || !feed.last_ok_at)) {
       // One URL: fetch it now, so the person learns right away whether it is a podcast.
-      let r = await podcastFeeds.ask('probe', { url }, 35000);
+      let r = await podcastFeeds.ask('probe', isPrivate ? { url, private: true, owner: user } : { url }, 35000);
       // A show's website rather than its feed: try the feed the page announces.
-      if (!r.ok && (r.code === 'not_a_podcast' || r.code === 'parse_error')) {
+      if (!isPrivate && !r.ok && (r.code === 'not_a_podcast' || r.code === 'parse_error')) {
         const found = await directories.discoverFeed(url);
         if (found && urlKey(found) !== key && internalOwner(urlKey(found))) {
           r = { ok: false, code: 'internal_feed' };
@@ -701,6 +1046,7 @@ router.post('/subscribe', express.json({ limit: '256kb' }), async (req, res) => 
       // A batch (OPML): the worker reads them over the next minutes.
       const title = String(titles[i] || '').replace(/\s+/g, ' ').trim().slice(0, 200);
       const doc = { url, url_key: key, alt_keys: [], status: 'pending', subscribers: 0, error_count: 0, created_at: new Date(), next_poll_at: new Date() };
+      if (isPrivate) Object.assign(doc, { private: true, owner: user });
       if (title) doc.title = title;
       try {
         feed = { _id: (await feeds.insertOne(doc)).insertedId };
@@ -773,4 +1119,4 @@ router.post('/notify', express.json({ limit: '4kb' }), async (req, res) => {
 });
 
 module.exports = router;
-module.exports._test = { podcastMessage, urlsDigest, internalOwner, presentEpisode, showsFromEpisodes, langParam };
+module.exports._test = { podcastMessage, urlsDigest, internalOwner, presentEpisode, presentFeed, liveNow, showsFromEpisodes, langParam, escapeRegex, downloadType, downloadName, continuesDownload };
