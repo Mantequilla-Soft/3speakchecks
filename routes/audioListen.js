@@ -36,6 +36,7 @@
 const crypto = require('crypto');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = rateLimit;
 const geoip = require('geoip-lite');
 const { getDb } = require('../utils/db');
 
@@ -63,7 +64,9 @@ const clientIp = (req) => String(req.headers['x-real-ip'] || String(req.headers[
 // client address; the default key would be nginx's, one bucket for everybody.
 const limiter = (max) => rateLimit({
   windowMs: 60 * 1000, max, standardHeaders: false, legacyHeaders: false,
-  keyGenerator: clientIp, validate: { xForwardedForHeader: false, ip: false },
+  // ipKeyGenerator groups an IPv6 address by its /56, so one connection cannot
+  // dodge the limit by cycling through its own addresses.
+  keyGenerator: (req) => ipKeyGenerator(clientIp(req)), validate: { xForwardedForHeader: false, ip: false },
   message: { error: 'Too many requests' },
 });
 
