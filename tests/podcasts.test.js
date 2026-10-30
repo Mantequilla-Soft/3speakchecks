@@ -6,6 +6,7 @@ const { parseFeed, urlKey, episodeId, duration, _test: { truncateItems } } = req
 const { isBlockedAddress, checkUrl } = require('../utils/safeFetch');
 const { _test: routes } = require('../routes/podcasts');
 const { _test: service } = require('../services/podcastFeeds');
+const directories = require('../utils/podcastDirectories');
 
 const item = (n, date, extra = '') => `
   <item>
@@ -174,5 +175,111 @@ describe('show notes', () => {
     const notes = notesByGuid(xml);
     expect(notes.get('a')).toBe('<p>Long <a href="https://x">notes</a></p>');
     expect(notes.get('https://c/b.mp3')).toBe('<b>Only</b> description');
+  });
+});
+
+describe('Podcast Index results', () => {
+  const ep = (feedId, title, at, extra = {}) => ({
+    feedId, feedUrl: `https://feeds.example/${feedId}.xml`, feedTitle: `Show ${feedId}`, feedAuthor: 'Host', feedImage: '',
+    title, datePublished: at, ...extra,
+  });
+
+  test('a person search lists each show once, most matching episodes first, with the newest match', () => {
+    const shows = routes.showsFromEpisodes([
+      ep(1, 'old', 100), ep(2, 'b-old', 50), ep(2, 'b-new', 300), ep(2, 'b-mid', 200), ep(3, 'c', 400),
+      { title: 'no feed url', datePublished: 999 },
+    ]);
+    expect(shows.map((s) => [s.url, s.matches, s.sample])).toEqual([
+      ['https://feeds.example/2.xml', 3, 'b-new'],
+      ['https://feeds.example/3.xml', 1, 'c'],
+      ['https://feeds.example/1.xml', 1, 'old'],
+    ]);
+    expect(shows[0].last_episode_at).toEqual(new Date(300 * 1000));
+    expect(shows[0].title).toBe('Show 2');
+    expect('sample_at' in shows[0]).toBe(false);
+  });
+
+  test('a language is asked for with its regional forms', () => {
+    expect(routes.langParam('en').split(',')).toEqual(expect.arrayContaining(['en', 'en-us', 'en-gb']));
+    expect(routes.langParam('pt')).toBe('pt,pt-br,pt-pt');
+    expect(routes.langParam('sw')).toBe('sw,sw-sw');
+  });
+
+  test('a trending show reads its newest episode time', () => {
+    const f = directories.piShow({ title: 'T', url: 'https://x.example/f.xml', artwork: '', newestItemPublishTime: 1000 });
+    expect(f.last_episode_at).toEqual(new Date(1000 * 1000));
+    expect(f.sources).toEqual(['podcastindex']);
+  });
+});
+
+describe('podcast directories', () => {
+  const s = (title, url, source, extra = {}) => directories.show({ title, author: 'Host', url, source, ...extra });
+
+  test('a search lists each feed once, the ones several directories found first', () => {
+    const merged = directories.mergeShows([
+      [s('Alpha', 'https://a.example/feed', 'podcastindex'), s('Beta', 'https://b.example/feed', 'podcastindex')],
+      [s('Beta', 'http://b.example/feed/', 'apple', { image: 'https://img.example/b.jpg', extra: { apple_id: 7 } })],
+      // Same show under another URL: matched by title and author.
+      [s('beta!', 'https://feeds.other.example/b', 'fyyd'), s('Gamma', 'https://c.example/feed', 'fyyd')],
+    ]);
+    expect(merged.map((m) => [m.title, m.sources])).toEqual([
+      ['Beta', ['podcastindex', 'apple', 'fyyd']],
+      ['Alpha', ['podcastindex']],
+      ['Gamma', ['fyyd']],
+    ]);
+    expect(merged[0].url).toBe('https://b.example/feed');
+    expect(merged[0].image).toBe('https://img.example/b.jpg');
+    expect(merged[0].apple_id).toBe(7);
+  });
+
+  test('a result without a web feed address is left out', () => {
+    expect(directories.mergeShows([[s('No feed', '', 'apple'), s('Ftp', 'ftp://x.example/f', 'fyyd')]])).toEqual([]);
+  });
+
+  describe('links people paste', () => {
+    const realFetch = global.fetch;
+    afterEach(() => { global.fetch = realFetch; });
+    const answer = (body) => { global.fetch = jest.fn(async () => ({ ok: true, json: async () => body })); };
+
+    test('Apple Podcasts, Overcast and pod.link links give the feed Apple lists', async () => {
+      answer({ results: [{ collectionId: 1296350485, feedUrl: 'https://podcast.darknetdiaries.com' }] });
+      for (const link of [
+        'https://podcasts.apple.com/us/podcast/darknet-diaries/id1296350485',
+        'https://overcast.fm/itunes1296350485/darknet-diaries',
+        'https://pod.link/1296350485',
+      ]) {
+        expect(await directories.resolveLink(link)).toEqual({ url: 'https://podcast.darknetdiaries.com', via: 'apple' });
+      }
+      expect(global.fetch.mock.calls[0][0]).toContain('lookup?entity=podcast&id=1296350485');
+    });
+
+    test('a show Apple keeps to itself has no feed to follow', async () => {
+      answer({ results: [{ collectionId: 5, trackName: 'Exclusive' }] });
+      expect(await directories.resolveLink('https://podcasts.apple.com/de/podcast/x/id5')).toEqual({ code: 'apple_only' });
+    });
+
+    test('a fyyd link gives the feed fyyd lists', async () => {
+      answer({ data: { xmlURL: 'https://feeds.example/ldn.xml' } });
+      expect(await directories.resolveLink('https://fyyd.de/podcast/lage-der-nation/0')).toEqual({ url: 'https://feeds.example/ldn.xml', via: 'fyyd' });
+    });
+
+    test('Spotify and YouTube links say so, without asking anyone', async () => {
+      global.fetch = jest.fn();
+      expect(await directories.resolveLink('https://open.spotify.com/show/abc')).toEqual({ code: 'closed_platform', platform: 'Spotify' });
+      expect(await directories.resolveLink('https://www.youtube.com/@show/podcasts')).toEqual({ code: 'closed_platform', platform: 'YouTube' });
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    test('an old Google Podcasts link carries its feed', async () => {
+      const feed = 'https://feeds.example.com/show.rss';
+      const link = `https://podcasts.google.com/feed/${Buffer.from(feed).toString('base64url')}`;
+      expect(await directories.resolveLink(link)).toEqual({ url: feed, via: 'google' });
+    });
+
+    test('anything else is the URL itself, and a directory that is down says so', async () => {
+      expect(await directories.resolveLink('https://example.com/feed.xml')).toEqual({ url: 'https://example.com/feed.xml' });
+      global.fetch = jest.fn(async () => { throw new Error('down'); });
+      expect(await directories.resolveLink('https://podcasts.apple.com/us/podcast/x/id9')).toEqual({ code: 'directory_down' });
+    });
   });
 });
