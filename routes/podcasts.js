@@ -11,6 +11,8 @@
  *   GET  /podcasts/episode/:id
  *   GET  /podcasts/episode/:id/notes               full show notes, read from the feed
  *   GET  /podcasts/search?q=                       Podcast Index, when a key is set
+ *   GET  /podcasts/person?q=                       shows a host or guest appears in (Podcast Index)
+ *   GET  /podcasts/trending?lang=&cat=             Podcast Index's trending shows
  *   GET  /podcasts/discover                        most followed + recently followed shows
  *   GET  /podcasts/art/:token/:px.jpg              cover art, see utils/podcastArt.js
  *   GET  /podcasts/progress?user=&ids=|&feed=      how far the user got in episodes
@@ -337,46 +339,163 @@ router.get('/episode/:id/notes', notesLimiter, async (req, res) => {
   res.json({ success: true, html: r.html });
 });
 
-// ─── Search (Podcast Index) ───────────────────────────────────────────────────
+// ─── Search and trending (Podcast Index) ──────────────────────────────────────
 
 const searchLimiter = rateLimit({
   windowMs: 60 * 1000, max: 30, standardHeaders: false, legacyHeaders: false,
   message: { success: false, error: 'Too many requests' },
 });
+
+/** A GET on the Podcast Index API, signed the way it asks (key + secret + time). */
+async function piGet(path) {
+  const date = String(Math.floor(Date.now() / 1000));
+  const auth = crypto.createHash('sha1').update(PI_KEY + PI_SECRET + date).digest('hex');
+  const r = await fetch(`https://api.podcastindex.org/api/1.0/${path}`, {
+    headers: { 'User-Agent': '3SpeakPodcastBot/1.0', 'X-Auth-Key': PI_KEY, 'X-Auth-Date': date, Authorization: auth },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!r.ok) throw new Error(`podcastindex ${r.status}`);
+  return r.json();
+}
+
+/** One Podcast Index show as a search result the Podcasts tab can follow. */
+function presentPiFeed(f) {
+  const image = f.artwork || f.image || '';
+  return {
+    title: String(f.title || '').slice(0, 200),
+    author: String(f.author || f.ownerName || '').slice(0, 120),
+    url: f.url,
+    image,
+    art: artToken(image),
+    episodes: f.episodeCount || 0,
+    last_episode_at: f.newestItemPubdate || f.newestItemPublishTime
+      ? new Date((f.newestItemPubdate || f.newestItemPublishTime) * 1000)
+      : null,
+    value: !!f.value,
+  };
+}
+
+/**
+ * The shows a person search found, from its episodes: one entry per show, most
+ * matching episodes first, with how many matched and the newest one's title.
+ */
+function showsFromEpisodes(items, max = 20) {
+  const byFeed = new Map();
+  for (const it of items || []) {
+    if (!it || !it.feedUrl) continue;
+    const key = it.feedId || it.feedUrl;
+    let show = byFeed.get(key);
+    if (!show) {
+      show = {
+        ...presentPiFeed({ title: it.feedTitle, author: it.feedAuthor, url: it.feedUrl, image: it.feedImage }),
+        matches: 0, sample: '', sample_at: 0,
+      };
+      byFeed.set(key, show);
+    }
+    show.matches += 1;
+    const at = Number(it.datePublished) || 0;
+    if (!show.sample || at > show.sample_at) {
+      show.sample = String(it.title || '').slice(0, 200);
+      show.sample_at = at;
+    }
+  }
+  return [...byFeed.values()]
+    .sort((a, b) => b.matches - a.matches || b.sample_at - a.sample_at)
+    .slice(0, max)
+    .map(({ sample_at: at, ...show }) => ({ ...show, last_episode_at: at ? new Date(at * 1000) : null }));
+}
+
+// Podcast Index matches a language code exactly, and feeds name theirs as they
+// please ("en", "en-us", "en-GB"...), so a two-letter code is asked for with its
+// common regional forms too. Its match ignores case.
+const LANG_VARIANTS = {
+  en: ['en', 'en-us', 'en-gb', 'en-au', 'en-ca', 'en-in'],
+  es: ['es', 'es-es', 'es-mx', 'es-us', 'es-419', 'es-ar', 'es-co'],
+  pt: ['pt', 'pt-br', 'pt-pt'],
+  de: ['de', 'de-de', 'de-at', 'de-ch'],
+  fr: ['fr', 'fr-fr', 'fr-ca', 'fr-be', 'fr-ch'],
+  zh: ['zh', 'zh-cn', 'zh-tw', 'zh-hk', 'zh-hans', 'zh-hant'],
+  nl: ['nl', 'nl-nl', 'nl-be'],
+  it: ['it', 'it-it'],
+  ru: ['ru', 'ru-ru'],
+  ja: ['ja', 'ja-jp'],
+  ko: ['ko', 'ko-kr'],
+  id: ['id', 'id-id', 'in'],
+  fil: ['fil', 'tl', 'fil-ph', 'tl-ph'],
+};
+const LANG_RE = /^[a-z]{2,3}$/;
+const langParam = (lang) => (LANG_VARIANTS[lang] || [lang, `${lang}-${lang}`]).join(',');
+
+// The top-level categories (Apple's, which Podcast Index uses too). Only these
+// are passed on, by name.
+const CATEGORIES = [
+  'Arts', 'Business', 'Comedy', 'Education', 'Fiction', 'Government', 'Health', 'History', 'Kids',
+  'Leisure', 'Music', 'News', 'Religion', 'Science', 'Society', 'Sports', 'Technology', 'True Crime', 'TV',
+];
+
 const searchCache = new Map();
+/** A Podcast Index answer from memory when it is younger than `ttl`, else fetched and kept. */
+async function cached(key, ttl, load) {
+  const hit = searchCache.get(key);
+  if (hit && Date.now() - hit.at < ttl) return hit.results;
+  const results = await load();
+  searchCache.set(key, { at: Date.now(), results });
+  if (searchCache.size > 500) searchCache.delete(searchCache.keys().next().value);
+  return results;
+}
+
+const searchOff = (res) => res.status(503).json({ success: false, error: 'search is not configured', code: 'search_disabled' });
+const usable = (f) => f && f.url && !f.dead;
 
 router.get('/search', searchLimiter, async (req, res) => {
-  if (!PI_KEY || !PI_SECRET) return res.status(503).json({ success: false, error: 'search is not configured', code: 'search_disabled' });
+  if (!PI_KEY || !PI_SECRET) return searchOff(res);
   const q = String(req.query.q || '').trim().slice(0, 100);
   if (q.length < 2) return res.json({ success: true, results: [] });
-  const key = q.toLowerCase();
-  const hit = searchCache.get(key);
-  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return res.json({ success: true, results: hit.results });
   try {
-    const date = String(Math.floor(Date.now() / 1000));
-    const auth = crypto.createHash('sha1').update(PI_KEY + PI_SECRET + date).digest('hex');
-    const r = await fetch(`https://api.podcastindex.org/api/1.0/search/byterm?q=${encodeURIComponent(q)}&max=20`, {
-      headers: { 'User-Agent': '3SpeakPodcastBot/1.0', 'X-Auth-Key': PI_KEY, 'X-Auth-Date': date, Authorization: auth },
-      signal: AbortSignal.timeout(8000),
+    const results = await cached(`term:${q.toLowerCase()}`, 10 * 60 * 1000, async () => {
+      const data = await piGet(`search/byterm?q=${encodeURIComponent(q)}&max=20`);
+      return (data.feeds || []).filter(usable).slice(0, 20).map(presentPiFeed);
     });
-    if (!r.ok) throw new Error(`podcastindex ${r.status}`);
-    const data = await r.json();
-    const results = (data.feeds || []).filter((f) => f.url && !f.dead).slice(0, 20).map((f) => ({
-      title: String(f.title || '').slice(0, 200),
-      author: String(f.author || f.ownerName || '').slice(0, 120),
-      url: f.url,
-      image: f.artwork || f.image || '',
-      art: artToken(f.artwork || f.image || ''),
-      episodes: f.episodeCount || 0,
-      last_episode_at: f.newestItemPubdate ? new Date(f.newestItemPubdate * 1000) : null,
-      value: !!f.value,
-    }));
-    searchCache.set(key, { at: Date.now(), results });
-    if (searchCache.size > 300) searchCache.delete(searchCache.keys().next().value);
     res.json({ success: true, results });
   } catch (err) {
     console.warn('[podcasts] search:', err.message);
     res.status(502).json({ success: false, error: 'search failed' });
+  }
+});
+
+router.get('/person', searchLimiter, async (req, res) => {
+  if (!PI_KEY || !PI_SECRET) return searchOff(res);
+  const q = String(req.query.q || '').trim().slice(0, 100);
+  if (q.length < 2) return res.json({ success: true, results: [] });
+  try {
+    const results = await cached(`person:${q.toLowerCase()}`, 10 * 60 * 1000, async () => {
+      const data = await piGet(`search/byperson?q=${encodeURIComponent(q)}&max=100`);
+      return showsFromEpisodes(data.items);
+    });
+    res.json({ success: true, results });
+  } catch (err) {
+    console.warn('[podcasts] person search:', err.message);
+    res.status(502).json({ success: false, error: 'search failed' });
+  }
+});
+
+router.get('/trending', searchLimiter, async (req, res) => {
+  if (!PI_KEY || !PI_SECRET) return searchOff(res);
+  const lang = String(req.query.lang || '').toLowerCase();
+  const cat = CATEGORIES.find((c) => c.toLowerCase() === String(req.query.cat || '').toLowerCase()) || '';
+  if (lang && !LANG_RE.test(lang)) return res.status(400).json({ success: false, error: 'bad language' });
+  try {
+    const results = await cached(`trending:${lang}:${cat}`, 30 * 60 * 1000, async () => {
+      const params = new URLSearchParams({ max: '40' });
+      if (lang) params.set('lang', langParam(lang));
+      if (cat) params.set('cat', cat);
+      const data = await piGet(`podcasts/trending?${params}`);
+      return (data.feeds || []).filter(usable).slice(0, 24).map(presentPiFeed);
+    });
+    res.json({ success: true, results, categories: CATEGORIES });
+  } catch (err) {
+    console.warn('[podcasts] trending:', err.message);
+    res.status(502).json({ success: false, error: 'trending failed' });
   }
 });
 
@@ -637,4 +756,4 @@ router.post('/notify', express.json({ limit: '4kb' }), async (req, res) => {
 });
 
 module.exports = router;
-module.exports._test = { podcastMessage, urlsDigest, internalOwner, presentEpisode };
+module.exports._test = { podcastMessage, urlsDigest, internalOwner, presentEpisode, showsFromEpisodes, langParam, presentPiFeed };

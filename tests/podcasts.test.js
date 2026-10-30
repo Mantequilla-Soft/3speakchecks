@@ -176,3 +176,36 @@ describe('show notes', () => {
     expect(notes.get('https://c/b.mp3')).toBe('<b>Only</b> description');
   });
 });
+
+describe('Podcast Index results', () => {
+  const ep = (feedId, title, at, extra = {}) => ({
+    feedId, feedUrl: `https://feeds.example/${feedId}.xml`, feedTitle: `Show ${feedId}`, feedAuthor: 'Host', feedImage: '',
+    title, datePublished: at, ...extra,
+  });
+
+  test('a person search lists each show once, most matching episodes first, with the newest match', () => {
+    const shows = routes.showsFromEpisodes([
+      ep(1, 'old', 100), ep(2, 'b-old', 50), ep(2, 'b-new', 300), ep(2, 'b-mid', 200), ep(3, 'c', 400),
+      { title: 'no feed url', datePublished: 999 },
+    ]);
+    expect(shows.map((s) => [s.url, s.matches, s.sample])).toEqual([
+      ['https://feeds.example/2.xml', 3, 'b-new'],
+      ['https://feeds.example/3.xml', 1, 'c'],
+      ['https://feeds.example/1.xml', 1, 'old'],
+    ]);
+    expect(shows[0].last_episode_at).toEqual(new Date(300 * 1000));
+    expect(shows[0].title).toBe('Show 2');
+    expect('sample_at' in shows[0]).toBe(false);
+  });
+
+  test('a language is asked for with its regional forms', () => {
+    expect(routes.langParam('en').split(',')).toEqual(expect.arrayContaining(['en', 'en-us', 'en-gb']));
+    expect(routes.langParam('pt')).toBe('pt,pt-br,pt-pt');
+    expect(routes.langParam('sw')).toBe('sw,sw-sw');
+  });
+
+  test('a trending show reads its newest episode time', () => {
+    const f = routes.presentPiFeed({ title: 'T', url: 'https://x.example/f.xml', artwork: '', newestItemPublishTime: 1000 });
+    expect(f.last_episode_at).toEqual(new Date(1000 * 1000));
+  });
+});
