@@ -68,6 +68,7 @@ const podcastMessage = (action, user, payload, timestamp) =>
   ['3speak-podcasts', action, user, payload, String(timestamp)].join('|');
 const urlsDigest = (urls) => crypto.createHash('sha256').update(urls.join('\n'), 'utf8').digest('hex');
 
+const clientIpOf = (req) => String(req.headers['x-real-ip'] || String(req.headers['x-forwarded-for'] || '').split(',')[0] || req.ip || '').trim();
 const userOf = (v) => String(v || '').trim().toLowerCase().replace(/^@/, '');
 
 async function proveUser(b, action, payload) {
@@ -335,6 +336,9 @@ router.get('/episode/:id', async (req, res) => {
 // The full show notes (HTML as the feed has it; the page sanitises it). Not kept
 // in Mongo, the worker reads them from the feed and caches them for a while.
 const notesLimiter = rateLimit({
+  // Per listener: the checker does not trust nginx as a proxy, so the default
+  // key (req.ip) is nginx itself and the limit would be shared by everybody.
+  keyGenerator: clientIpOf, validate: { xForwardedForHeader: false, ip: false },
   windowMs: 60 * 1000, max: 60, standardHeaders: false, legacyHeaders: false,
   message: { success: false, error: 'Too many requests' },
 });
@@ -352,6 +356,9 @@ router.get('/episode/:id/notes', notesLimiter, async (req, res) => {
 // ─── Search and trending (Podcast Index) ──────────────────────────────────────
 
 const searchLimiter = rateLimit({
+  // Per listener: the checker does not trust nginx as a proxy, so the default
+  // key (req.ip) is nginx itself and the limit would be shared by everybody.
+  keyGenerator: clientIpOf, validate: { xForwardedForHeader: false, ip: false },
   windowMs: 60 * 1000, max: 30, standardHeaders: false, legacyHeaders: false,
   message: { success: false, error: 'Too many requests' },
 });
