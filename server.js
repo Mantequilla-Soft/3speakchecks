@@ -109,6 +109,7 @@ app.use('/', userRoutes);
 app.use('/', videosRoutes);
 app.use('/', promoteRoutes);
 app.use('/', shortsRoutes);
+app.use('/audio/listen', require('./routes/audioListen')); // listening time for all audio, like video watch time
 app.use('/audio', audioRoutes);
 app.use('/feeds', feedsRoutes);
 app.use('/feeds', watchedFeedRoutes);              // /feeds/watched/:username (history as cards)

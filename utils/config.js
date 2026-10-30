@@ -34,6 +34,31 @@ const VIEWER_POOL_PCT = (() => {
     return wanted;
 })();
 
+/* The listeners' cuts, in the same percentage points of the whole: what people
+ * who agreed to be identified earn for listening on 3speak.tv, split by what they
+ * listened to. 3Speak's own audio and outside podcast episodes are separate pools
+ * (owner, 2026-10-30: 3.5 + 1.5 = 5), each shared by its own listening seconds.
+ *
+ * Out of what we keep, like the viewer share: creators must not notice it exists.
+ * DEFAULT 0 on purpose: a pool set aside every period starts owing money the day it
+ * is switched on, so it is switched on in .env when listener rewards go live.
+ * Clamped against what is left after creators and viewers, the audio pool first.
+ */
+const clampedPct = (envName, fallback, room, label) => {
+    const n = parseFloat(process.env[envName]);
+    const wanted = Number.isFinite(n) && n >= 0 && n <= 100 ? n : fallback;
+    if (wanted > room) {
+        console.warn(`[ads] ${envName}=${wanted} is more than the platform's remaining ${room}% (${label}). Clamped to ${Math.max(0, room)}%.`);
+        return Math.max(0, room);
+    }
+    return wanted;
+};
+const LISTENER_AUDIO_POOL_PCT = clampedPct('AD_LISTENER_AUDIO_POOL_PCT', 0,
+    100 - CREATOR_POOL_PCT - VIEWER_POOL_PCT, `creator ${CREATOR_POOL_PCT}%, viewer ${VIEWER_POOL_PCT}%`);
+const LISTENER_PODCAST_POOL_PCT = clampedPct('AD_LISTENER_PODCAST_POOL_PCT', 0,
+    100 - CREATOR_POOL_PCT - VIEWER_POOL_PCT - LISTENER_AUDIO_POOL_PCT, `creator, viewer and listener audio`);
+const LISTENER_POOL_PCT = LISTENER_AUDIO_POOL_PCT + LISTENER_PODCAST_POOL_PCT;
+
 /* The referrer's cut, in the same percentage points of the whole.
  *
  * Paid when the ADVERTISER who booked the campaign was themselves referred to the
@@ -48,7 +73,7 @@ const VIEWER_POOL_PCT = (() => {
 const REFERRAL_POOL_PCT = (() => {
     const n = parseFloat(process.env.AD_REFERRAL_POOL_PCT);
     const wanted = Number.isFinite(n) && n >= 0 && n <= 100 ? n : 2;
-    const room = 100 - CREATOR_POOL_PCT - VIEWER_POOL_PCT;
+    const room = 100 - CREATOR_POOL_PCT - VIEWER_POOL_PCT - LISTENER_POOL_PCT;
     if (wanted > room) {
         console.warn(`[ads] AD_REFERRAL_POOL_PCT=${wanted} is more than the platform's `
             + `remaining ${room}% (creator ${CREATOR_POOL_PCT}%, viewer ${VIEWER_POOL_PCT}%). `
@@ -70,7 +95,7 @@ const REFERRAL_POOL_PCT = (() => {
 const ENCODER_POOL_PCT = (() => {
     const n = parseFloat(process.env.AD_ENCODER_POOL_PCT);
     const wanted = Number.isFinite(n) && n >= 0 && n <= 100 ? n : 5;
-    const room = 100 - CREATOR_POOL_PCT - VIEWER_POOL_PCT - REFERRAL_POOL_PCT;
+    const room = 100 - CREATOR_POOL_PCT - VIEWER_POOL_PCT - LISTENER_POOL_PCT - REFERRAL_POOL_PCT;
     if (wanted > room) {
         console.warn(`[ads] AD_ENCODER_POOL_PCT=${wanted} is more than the platform's `
             + `remaining ${room}% (creator ${CREATOR_POOL_PCT}%, viewer ${VIEWER_POOL_PCT}%, `
@@ -900,6 +925,22 @@ module.exports = {
     // of the creator pool would be paying them with creators' money, which is not
     // the deal creators agreed to.
     AD_VIEWER_POOL_PCT: VIEWER_POOL_PCT,
+
+    // Listener rewards (see LISTENER_*_POOL_PCT above): points of the whole for
+    // 3Speak audio and for outside podcast episodes, default 0 until switched on.
+    AD_LISTENER_AUDIO_POOL_PCT: LISTENER_AUDIO_POOL_PCT,
+    AD_LISTENER_PODCAST_POOL_PCT: LISTENER_PODCAST_POOL_PCT,
+    AD_LISTENER_POOL_PCT: LISTENER_POOL_PCT,
+    // Listening records of people who agreed to be identified for listening, and
+    // only them: one row per (listener, kind, id), written by routes/audioListen.js.
+    // Separate from the anonymous `listen-durations` for the same reason as viewers.
+    AD_LISTENER_LISTEN_COLLECTION: process.env.AD_LISTENER_LISTEN_COLLECTION || 'ad_listener_listen',
+    // When a listen counts: this share of the item really heard (unique coverage),
+    // at most this many seconds per item, and per listener per UTC day (owner,
+    // 2026-10-30: 50%, 60 min, 4 h; hour-long episodes are the norm in audio).
+    AD_LISTENER_MIN_PCT: parseFloat(process.env.AD_LISTENER_MIN_PCT) || 50,
+    AD_LISTENER_MAX_SECONDS: parseInt(process.env.AD_LISTENER_MAX_SECONDS, 10) || 3600,
+    AD_LISTENER_DAILY_MAX_SECONDS: parseInt(process.env.AD_LISTENER_DAILY_MAX_SECONDS, 10) || 4 * 3600,
 
     // --- Booking, payment, serving, payout ---
     AD_CAMPAIGNS_COLLECTION: process.env.AD_CAMPAIGNS_COLLECTION || 'ad_campaigns',

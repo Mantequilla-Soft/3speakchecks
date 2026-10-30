@@ -40,7 +40,16 @@ const {
   AD_PAYOUTS_ENABLED, AD_PAYOUT_INTERVAL_H, AD_PAYOUT_MIN_HBD, AD_CREDIT_MIN_HBD, AD_PAYOUT_PERIOD_DAYS, AD_PAYOUT_PERIOD_OFFSET_MIN, AD_PAYMENTS_COLLECTION, AD_BOOKING_EXPIRY_DAYS,
   AD_VIEWER_POOL_PCT, AD_VIEWER_WATCH_COLLECTION, AD_REFERRAL_POOL_PCT,
   AD_ENCODER_POOL_PCT, AD_ENCODER_ACCOUNT,
+  AD_LISTENER_AUDIO_POOL_PCT, AD_LISTENER_PODCAST_POOL_PCT, AD_LISTENER_LISTEN_COLLECTION,
 } = require('../utils/config');
+
+// Listener reward pools, by what was listened to (owner, 2026-10-30): 3Speak's own
+// audio and outside podcast episodes are paid from separate pools, each shared by
+// its own listening seconds, and every payout row says which.
+const LISTENER_POOLS = [
+  { kind: 'audio', pct: () => AD_LISTENER_AUDIO_POOL_PCT },
+  { kind: 'podcast', pct: () => AD_LISTENER_PODCAST_POOL_PCT },
+];
 const { STATES } = require('../utils/adModel');
 // The chain is the authority on which community a post was published to — see
 // resolveCommunities() for why a Mongo read alone was not enough.
@@ -575,17 +584,20 @@ async function writePayoutRows(db, periodKey, rows) {
   const byAccount = new Map();
   for (const r of rows) {
     const cur = byAccount.get(r.account);
-    if (!cur) { byAccount.set(r.account, { ...r }); continue; }
+    if (!cur) { byAccount.set(r.account, { ...r, parts: { [r.kind]: r.hbd } }); continue; }
     cur.hbd = Math.round((cur.hbd + r.hbd) * 1000) / 1000;
     cur.amounts = mergeLegs(cur.amounts, r.amounts);
     // One account, two reasons. Named so a payout report can say which.
     cur.kind = cur.kind === r.kind ? cur.kind : [...new Set([cur.kind, r.kind])].sort().join('+');
+    // ...and how much for each, so a merged row can still be split again (listener
+    // money from 3Speak audio vs outside podcasts, viewer vs creator).
+    cur.parts[r.kind] = Math.round(((cur.parts[r.kind] || 0) + r.hbd) * 1000) / 1000;
   }
   for (const r of byAccount.values()) {
     await db.collection(AD_PAYOUTS_COLLECTION).updateOne(
       { periodKey, account: r.account },
       {
-        $set: { hbd: r.hbd, amounts: r.amounts, kind: r.kind, updatedAt: new Date() },
+        $set: { hbd: r.hbd, amounts: r.amounts, kind: r.kind, parts: r.parts, updatedAt: new Date() },
         $setOnInsert: { status: 'pending', createdAt: new Date() },
       },
       { upsert: true },
@@ -624,6 +636,8 @@ async function settlePeriod(db, period, deps = {}) {
   const carriedInAssets = prior?.carriedOutAssets || null;
   const viewerCarriedIn = prior?.viewerCarriedOut || 0;
   const viewerCarriedInAssets = prior?.viewerCarriedOutAssets || null;
+  const listenerCarriedIn = (kind) => (prior?.listeners?.[kind]?.carriedOut) || 0;
+  const listenerCarriedInAssets = (kind) => (prior?.listeners?.[kind]?.carriedOutAssets) || null;
 
   const ownPool = revenue * (AD_CREATOR_POOL_PCT / 100);
   const pool = ownPool + carriedIn;
@@ -694,6 +708,34 @@ async function settlePeriod(db, period, deps = {}) {
     viewerCarriedInAssets,
   );
 
+  /* ─── listener shares ───────────────────────────────────────────────────
+   * Built exactly like the viewer share: a percentage of the revenue from ads that
+   * were shown, out of what WE keep, plus whatever a previous period could not pay.
+   * One pool per kind of listening (3Speak audio, outside podcasts).
+   */
+  const listenerPools = LISTENER_POOLS.map(({ kind, pct }) => {
+    const own = Math.round(shownRevenue * (pct() / 100) * 1000) / 1000;
+    const carriedIn = listenerCarriedIn(kind);
+    const poolHbd = Math.round((own + carriedIn) * 1000) / 1000;
+    const assetPool = mergeAssets(assetPoolFor(shownAssetTotals, pct(), own, shownRevenue), listenerCarriedInAssets(kind));
+    return { kind, poolHbd, carriedIn, assetPool };
+  });
+  const payAllListeners = async () => {
+    const out = {};
+    for (const p of listenerPools) out[p.kind] = { ...p, paid: await payListeners(db, period, p.kind, p.poolHbd, p.assetPool, { defer: true }) };
+    return out;
+  };
+  // What the period document records about each listener pool.
+  const listenerSummary = (paid) => Object.fromEntries(Object.entries(paid).map(([kind, p]) => [kind, {
+    poolHbd: p.poolHbd,
+    recipients: p.paid.recipients,
+    paidHbd: p.paid.paidHbd,
+    carriedIn: p.carriedIn,
+    carriedOut: p.paid.carriedOut,
+    carriedOutAssets: scaleAssets(p.assetPool, p.poolHbd > 0 ? p.paid.carriedOut / p.poolHbd : 0),
+  }]));
+  const listenerRows = (paid) => Object.values(paid).flatMap((p) => p.paid.rows);
+
   /* ─── referrer share ────────────────────────────────────────────────────
    * If the ADVERTISER who booked a campaign was themselves referred here, the
    * person who brought them takes AD_REFERRAL_POOL_PCT of that campaign's
@@ -723,9 +765,10 @@ async function settlePeriod(db, period, deps = {}) {
     // No ad was shown, so this period adds nothing to the viewer pool; only a
     // carry from an earlier period (money from ads that WERE shown) can go out.
     const viewerPaidNoImp = await payViewers(db, period, viewerPoolHbd, viewerAssetPool, { defer: true });
+    const listenersPaidNoImp = await payAllListeners();
     // Referral and encoder rows are empty here (nothing was shown); kept in the
     // ONE merged write so the shape matches the normal path.
-    await writePayoutRows(db, period.key, [...referral.rows, ...encoder.rows, ...viewerPaidNoImp.rows]);
+    await writePayoutRows(db, period.key, [...referral.rows, ...encoder.rows, ...viewerPaidNoImp.rows, ...listenerRows(listenersPaidNoImp)]);
     // Nothing delivered. The money is not ours to keep — carry it forward, in the
     // assets it arrived as so the next period can actually send it.
     await periods.updateOne({ _id: period.key }, {
@@ -740,6 +783,7 @@ async function settlePeriod(db, period, deps = {}) {
         viewerCarriedIn,
         viewerCarriedOut: viewerPaidNoImp.carriedOut,
         viewerCarriedOutAssets: scaleAssets(viewerAssetPool, viewerPoolHbd > 0 ? viewerPaidNoImp.carriedOut / viewerPoolHbd : 0),
+        listeners: listenerSummary(listenersPaidNoImp),
         referralPoolHbd: referral.poolHbd,
         referralRecipients: referral.rows.length,
         referralSkipped: referral.skipped,
@@ -857,8 +901,10 @@ async function settlePeriod(db, period, deps = {}) {
   // 🚨 Deferred and folded into the ONE write below. Writing viewer rows separately
   // replaced the creator row of anyone who was both (unique on periodKey+account).
   const viewerPaid = await payViewers(db, period, viewerPoolHbd, viewerAssetPool, { defer: true });
+  // Listeners the same way, from their own pools, folded into the same one write.
+  const listenersPaid = await payAllListeners();
 
-  const written = await writePayoutRows(db, period.key, [...creatorRows, ...referral.rows, ...encoder.rows, ...viewerPaid.rows]);
+  const written = await writePayoutRows(db, period.key, [...creatorRows, ...referral.rows, ...encoder.rows, ...viewerPaid.rows, ...listenerRows(listenersPaid)]);
   const referralPaidHbd = Math.round(referral.rows.reduce((a, r) => a + r.hbd, 0) * 1000) / 1000;
   if (referralPaidHbd > 0) {
     console.log(`[adPayout] period ${period.key}: ${fmt3(referralPaidHbd)} HBD to ${referral.rows.length} referrer(s)`);
@@ -891,6 +937,7 @@ async function settlePeriod(db, period, deps = {}) {
       viewerCarriedIn,
       viewerCarriedOut: viewerPaid.carriedOut,
       viewerCarriedOutAssets: scaleAssets(viewerAssetPool, viewerPoolHbd > 0 ? viewerPaid.carriedOut / viewerPoolHbd : 0),
+      listeners: listenerSummary(listenersPaid),
       impressions: impressions.length, ratePerImpression: rate, carriedIn,
       /* What blocked accounts would have been paid, and were not. Neither sent nor
        * carried — it stays with the platform — so without this the money simply
@@ -1229,6 +1276,78 @@ async function payViewers(db, period, viewerPoolHbd, viewerAssetPool = null, { d
 }
 
 /**
+ * Pay listeners one kind's share ('audio' = 3Speak audio, 'podcast' = outside
+ * podcast episodes) of the period's ad revenue.
+ *
+ * The same shape and the same safety rules as payViewers above, read from the
+ * listener ledger instead (routes/audioListen.js recordListenerReward writes it:
+ * 3speak.tv only, agreed to listening, >= AD_LISTENER_MIN_PCT heard, not the owner,
+ * not private, capped per item and per day, one row per item with $max):
+ *
+ *   rate = pool / (this kind's unpaid qualifying seconds)
+ *
+ * - Rows are claimed (payoutId) before the payout row is written, and only the rows
+ *   of listeners actually paid, so somebody under the minimum keeps building up.
+ * - Blocked accounts leave the denominator and are claimed on sight.
+ * - Rows go through settlePeriod's ONE merged write (defer), never a write of their
+ *   own: ad_payouts is unique on (periodKey, account).
+ * - Payout rows are kind 'listener-audio' / 'listener-podcast'.
+ */
+async function payListeners(db, period, kind, poolHbd, assetPool = null, { defer = false } = {}) {
+  if (!(poolHbd > 0)) return { recipients: 0, paidHbd: 0, carriedOut: 0, rows: [] };
+  const ledger = db.collection(AD_LISTENER_LISTEN_COLLECTION);
+  const claimable = await ledger.find({ kind, payoutId: null }).toArray();
+  if (!claimable.length) return { recipients: 0, paidHbd: 0, carriedOut: poolHbd, rows: [] };
+
+  const blocked = await rewardBlockedSet(db, claimable.map((r) => r.listener));
+  const isExcluded = (v) => blocked.has(String(v || '').trim().toLowerCase());
+  const excludedIds = claimable.filter((r) => isExcluded(r.listener)).map((r) => r._id);
+  const claimExcluded = async () => {
+    if (excludedIds.length) await ledger.updateMany({ _id: { $in: excludedIds } }, { $set: { payoutId: period.key, settledAt: new Date() } });
+  };
+  const rows = claimable.filter((r) => !isExcluded(r.listener));
+  const totalSeconds = rows.reduce((a, r) => a + (Number(r.seconds) || 0), 0);
+  if (!rows.length || totalSeconds <= 0) {
+    await claimExcluded();
+    return { recipients: 0, paidHbd: 0, carriedOut: poolHbd, rows: [] };
+  }
+  const perSecond = poolHbd / totalSeconds;
+
+  const owed = new Map();
+  for (const r of rows) {
+    const secs = Number(r.seconds) || 0;
+    if (secs <= 0 || !r.listener) continue;
+    owed.set(r.listener, (owed.get(r.listener) || 0) + secs * perSecond);
+  }
+  const scored = [...owed.entries()].map(([account, hbd]) => ({ account, hbd: Math.round(hbd * 1000) / 1000 }));
+  const payable = scored.filter((r) => r.hbd >= AD_PAYOUT_MIN_HBD);
+  const paidAccounts = new Set(payable.map((r) => r.account));
+  const claimIds = rows.filter((r) => paidAccounts.has(r.listener)).map((r) => r._id);
+
+  await claimExcluded();
+  if (claimIds.length) await ledger.updateMany({ _id: { $in: claimIds } }, { $set: { payoutId: period.key, settledAt: new Date() } });
+
+  const payoutRows = payable.map((r) => ({
+    account: r.account,
+    hbd: r.hbd,
+    amounts: splitAmounts(poolHbd > 0 ? r.hbd / poolHbd : 0, assetPool || { HBD: poolHbd }),
+    kind: `listener-${kind}`,
+  }));
+  if (!defer) await writePayoutRows(db, period.key, payoutRows);
+
+  const total = payable.reduce((a, r) => a + r.hbd, 0);
+  const carriedOut = Math.max(0, Math.round((poolHbd - total) * 1000) / 1000);
+  const waiting = scored.length - payable.length;
+  console.log(
+    `[adPayout] period ${period.key}: listener ${kind} pool ${fmt3(poolHbd)} HBD / `
+    + `${(totalSeconds / 3600).toFixed(1)}h qualifying = ${(perSecond * 3600).toFixed(4)} HBD/hour `
+    + `→ ${payable.length} listener(s), ${fmt3(total)} HBD`
+    + (waiting > 0 ? ` (${waiting} under ${AD_PAYOUT_MIN_HBD} still building, ${fmt3(carriedOut)} HBD carried)` : ''),
+  );
+  return { recipients: payable.length, paidHbd: total, carriedOut, rows: payoutRows };
+}
+
+/**
  * Give back credit that an abandoned booking is sitting on.
  *
  * Credit is spent when a campaign is CREATED, so the advertiser is quoted a reduced
@@ -1444,4 +1563,4 @@ function schedule() {
   );
 }
 
-module.exports = { schedule, runOnce, settlePeriod, periodContaining, accrualFor, closeFinishedCampaigns, refundRefusedPayments, releaseStaleCredit, payViewers, payPending };
+module.exports = { schedule, runOnce, settlePeriod, periodContaining, accrualFor, closeFinishedCampaigns, refundRefusedPayments, releaseStaleCredit, payViewers, payListeners, payPending, writePayoutRows };
