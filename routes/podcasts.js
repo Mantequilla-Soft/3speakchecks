@@ -338,7 +338,7 @@ router.get('/episode/:id', async (req, res) => {
 const notesLimiter = rateLimit({
   // Per listener: the checker does not trust nginx as a proxy, so the default
   // key (req.ip) is nginx itself and the limit would be shared by everybody.
-  keyGenerator: clientIpOf, validate: { xForwardedForHeader: false, ip: false },
+  keyGenerator: (req) => rateLimit.ipKeyGenerator(clientIpOf(req)), validate: { xForwardedForHeader: false, ip: false },
   windowMs: 60 * 1000, max: 60, standardHeaders: false, legacyHeaders: false,
   message: { success: false, error: 'Too many requests' },
 });
@@ -358,7 +358,7 @@ router.get('/episode/:id/notes', notesLimiter, async (req, res) => {
 const searchLimiter = rateLimit({
   // Per listener: the checker does not trust nginx as a proxy, so the default
   // key (req.ip) is nginx itself and the limit would be shared by everybody.
-  keyGenerator: clientIpOf, validate: { xForwardedForHeader: false, ip: false },
+  keyGenerator: (req) => rateLimit.ipKeyGenerator(clientIpOf(req)), validate: { xForwardedForHeader: false, ip: false },
   windowMs: 60 * 1000, max: 30, standardHeaders: false, legacyHeaders: false,
   message: { success: false, error: 'Too many requests' },
 });
