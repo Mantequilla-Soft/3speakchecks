@@ -75,3 +75,68 @@ describe('helpers', () => {
     expect(L.clientIp({ headers: {}, ip: '127.0.0.1' })).toBe('127.0.0.1');
   });
 });
+
+describe('listener rewards (recording only)', () => {
+  const base = { listener: 'alice', source: '3speak', private: false, kind: 'audio', id: 'abc', owner: 'bob' };
+
+  test('only a named 3speak.tv listen from 50% heard, not private, not your own track', () => {
+    expect(L.qualifies(base, { listenedPct: 50 })).toBe(true);
+    expect(L.qualifies(base, { listenedPct: 49.9 })).toBe(false);
+    expect(L.qualifies({ ...base, listener: null }, { listenedPct: 90 })).toBe(false);
+    expect(L.qualifies({ ...base, source: 'embed' }, { listenedPct: 90 })).toBe(false);
+    expect(L.qualifies({ ...base, private: true }, { listenedPct: 90 })).toBe(false);
+    expect(L.qualifies({ ...base, owner: 'alice' }, { listenedPct: 90 })).toBe(false);
+    // An outside episode has no 3Speak owner.
+    expect(L.qualifies({ ...base, kind: 'podcast', owner: null }, { listenedPct: 90 })).toBe(true);
+  });
+
+  test('at most 60 minutes per item and 4 hours a day', () => {
+    expect(L.creditSeconds(1800, 0)).toBe(1800);
+    expect(L.creditSeconds(5400, 0)).toBe(3600);
+    expect(L.creditSeconds(3600, 4 * 3600 - 600)).toBe(600);
+    expect(L.creditSeconds(3600, 4 * 3600)).toBe(0);
+  });
+
+  test('a listener is only named for a vouched 3speak.tv listen with a Hive account', async () => {
+    const now = Date.now();
+    expect(await L.proveListener({ listener: 'alice', listenerSig: 'x', listenerTs: now }, 'embed')).toBeNull();
+    expect(await L.proveListener({ listener: '~warmup', listenerSig: 'x', listenerTs: now }, '3speak')).toBeNull();
+    expect(await L.proveListener({ listener: 'alice', listenerSig: 'x', listenerTs: now - 2 * 86400000 }, '3speak')).toBeNull();
+    expect(L.listenVouchMessage('alice', 123)).toBe('3speak-podcasts|listen-vouch|alice|session|123');
+  });
+
+  describe('the ledger', () => {
+    function fakeDb({ listenEnabled = true, todayOthers = 0 } = {}) {
+      const writes = [];
+      return {
+        writes,
+        collection: (name) => ({
+          findOne: async () => (name === 'ad_viewer_prefs' ? { listenEnabled } : null),
+          aggregate: () => ({ toArray: async () => (todayOthers ? [{ t: todayOthers }] : []) }),
+          updateOne: async (q, u) => { writes.push({ q, u }); },
+        }),
+      };
+    }
+    const s = { ...base, feed_id: null };
+    const now = new Date('2026-10-30T12:00:00Z');
+
+    test('writes one row per listener and item, only ever raised', async () => {
+      const db = fakeDb();
+      await L.recordListenerReward(db, s, { listenedPct: 60, contentSeconds: 700 }, now);
+      expect(db.writes).toHaveLength(1);
+      const { q, u } = db.writes[0];
+      expect(q).toEqual({ listener: 'alice', kind: 'audio', id: 'abc' });
+      expect(u.$max).toEqual({ seconds: 700, listenedPct: 60 });
+      expect(u.$setOnInsert).toMatchObject({ payoutId: null, day: '2026-10-30', source: '3speak' });
+    });
+
+    test('nothing for someone who did not agree to listening, or with today used up', async () => {
+      const off = fakeDb({ listenEnabled: false });
+      await L.recordListenerReward(off, s, { listenedPct: 90, contentSeconds: 700 }, now);
+      const full = fakeDb({ todayOthers: 4 * 3600 });
+      await L.recordListenerReward(full, s, { listenedPct: 90, contentSeconds: 700 }, now);
+      expect(off.writes).toHaveLength(0);
+      expect(full.writes).toHaveLength(0);
+    });
+  });
+});

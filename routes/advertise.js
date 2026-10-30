@@ -52,6 +52,8 @@ const {
   AD_CREATOR_PREFS_COLLECTION,
   AD_VIEWER_PREFS_COLLECTION,
   AD_VIEWER_WATCH_COLLECTION,
+  AD_LISTENER_LISTEN_COLLECTION,
+  AD_LISTENER_POOL_PCT,
   HIVE_AUTH_REQUIRED,
   SIGNATURE_TIMESTAMP_TOLERANCE_MS,
   AD_APPLY_MAX_PER_WINDOW,
@@ -169,15 +171,18 @@ function splitOf(doc) {
   // platform's own cut, so the creator side is the same number whether or not anyone
   // watching is opted in.
   const viewerPct = round1(AD_VIEWER_POOL_PCT);
+  // Listener rewards, from the platform side too (0 until switched on in .env).
+  const listenerPct = round1(AD_LISTENER_POOL_PCT);
   return {
     poolPct: AD_CREATOR_POOL_PCT,
     communityPct,
     creatorPct: AD_CREATOR_POOL_PCT - communityPct,
     viewerPct,
+    listenerPct,
     // What is actually left for 3Speak once the viewers are paid. Sent rather than
     // left as `100 - poolPct` for the client to work out, because that subtraction
     // is the one that was silently wrong the moment viewer rewards existed.
-    platformPct: round1(100 - AD_CREATOR_POOL_PCT - viewerPct),
+    platformPct: round1(100 - AD_CREATOR_POOL_PCT - viewerPct - listenerPct),
     // The encoders' cut (AD_ENCODER_POOL_PCT), paid out of platformPct above, not
     // beside it: platformPct stays "the platform side" so a client that does not
     // know this field still draws a key that adds up to 100.
@@ -304,6 +309,13 @@ const prefsMessage = (hiveAccount, adsEnabled, communitySharePct, timestamp, rol
  */
 const viewerPrefsMessage = (hiveAccount, rewardsEnabled, timestamp) =>
   ['3speak-ads', 'viewer-prefs', hiveAccount, rewardsEnabled ? 'on' : 'off',
+    String(timestamp)].join('|');
+
+/* Consent to be identified for LISTENING (listener rewards), separate from the
+ * viewer consent above so that agreeing to one is never read as agreeing to the
+ * other, and a signature for one cannot be replayed into the other. */
+const listenerPrefsMessage = (hiveAccount, listenEnabled, timestamp) =>
+  ['3speak-ads', 'listener-prefs', hiveAccount, listenEnabled ? 'on' : 'off',
     String(timestamp)].join('|');
 
 function badTimestamp(ts) {
@@ -1095,8 +1107,12 @@ router.get('/viewer/prefs/:account', featureVisible, async (req, res) => {
       // Default OFF. Being paid requires being identified, and identification is
       // not something to switch on for somebody who has not been asked.
       rewardsEnabled: doc ? doc.rewardsEnabled === true : false,
-      // Has this person ever answered? Drives whether the app asks.
-      decided: !!doc,
+      // Has this person ever answered? Drives whether the app asks. (A row can now
+      // also exist for the listening answer alone, hence the type check.)
+      decided: !!doc && typeof doc.rewardsEnabled === 'boolean',
+      // The same two for listening (POST /listener/prefs).
+      listenEnabled: doc ? doc.listenEnabled === true : false,
+      listenDecided: !!doc && typeof doc.listenEnabled === 'boolean',
       updatedAt: (doc && doc.updatedAt) || null,
     });
   } catch (err) {
@@ -1175,6 +1191,83 @@ router.post('/viewer/prefs', featureVisible, express.json({ limit: '8kb' }), asy
     res.json({ success: true, account: name, rewardsEnabled, decided: true, removedWatchRows: removed });
   } catch (err) {
     console.error('[advertise] viewer prefs write failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+/* POST /advertise/listener/prefs { account, listenEnabled, signature, timestamp }:
+ * the same consent record as /viewer/prefs above, for listening. Signed with its
+ * own message (listenerPrefsMessage); opting out deletes the listening rows. */
+router.post('/listener/prefs', featureVisible, express.json({ limit: '8kb' }), async (req, res) => {
+  try {
+    await ensureIndexes();
+    const b = req.body || {};
+    const name = account(b.account);
+    // Explicit boolean: `!== false` would turn a malformed body into an opt-in, and
+    // an accidental opt-in to being tracked is the one mistake this route must not
+    // make. Anything that is not literally true is a decline.
+    const listenEnabled = b.listenEnabled === true;
+    if (!HIVE_ACCOUNT_RE.test(name)) {
+      return res.status(400).json({ success: false, error: 'Invalid account' });
+    }
+    if (!betaWriterAllowed(name)) return res.status(403).json(BETA_REFUSAL);
+
+    // Signed, for the same reasons as the creator split plus one more: this is a
+    // consent record, and consent nobody can prove was given is not consent.
+    // The @threespeak delegate path is kept so HiveSigner and Butter Auth viewers
+    // (who hold no key in the browser) are not the only people unable to opt in.
+    let signedBy = name;
+    if (HIVE_AUTH_REQUIRED) {
+      const signature = str(b.signature, 200);
+      const timestamp = stamp(b.timestamp);
+      if (!signature || !timestamp) {
+        return res.status(401).json({
+          success: false,
+          error: 'Signature required',
+          expected_message: listenerPrefsMessage(name, listenEnabled, '<ms>'),
+        });
+      }
+      const tsErr = badTimestamp(timestamp);
+      if (tsErr) return res.status(401).json({ success: false, error: tsErr });
+      let verdict = { ok: false, signer: null };
+      try {
+        verdict = await verifyHiveAuthority({
+          message: listenerPrefsMessage(name, listenEnabled, timestamp),
+          signature,
+          username: name,
+          allowedDelegates: AD_SIGNING_DELEGATES,
+        });
+      } catch (err) {
+        if (err && err.code === 'HIVE_ACCOUNT_NOT_FOUND') {
+          return res.status(404).json({ success: false, error: 'Hive account not found' });
+        }
+        verdict = { ok: false, signer: null };
+      }
+      if (!verdict.ok) return res.status(401).json({ success: false, error: 'Invalid signature' });
+      signedBy = verdict.signer;
+    }
+
+    await getDb().collection(AD_VIEWER_PREFS_COLLECTION).updateOne(
+      { _id: name },
+      {
+        $set: { listenEnabled, listenSignedBy: signedBy, listenUpdatedAt: new Date() },
+        $setOnInsert: { createdAt: new Date() },
+      },
+      { upsert: true },
+    );
+
+    // 🚨 Opting OUT must not leave the identified watch rows we already collected
+    // sitting there. "Stop storing my username" is meaningless if the answer is
+    // "from now on" — the rows already written are the thing being consented to.
+    let removed = 0;
+    if (!listenEnabled) {
+      const r = await getDb().collection(AD_LISTENER_LISTEN_COLLECTION).deleteMany({ listener: name });
+      removed = r.deletedCount || 0;
+    }
+
+    res.json({ success: true, account: name, listenEnabled, listenDecided: true, removedListenRows: removed });
+  } catch (err) {
+    console.error('[advertise] listener prefs write failed:', err && err.message);
     res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });

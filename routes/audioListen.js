@@ -30,8 +30,16 @@
  * - listen-durations  one row per session, ANONYMOUS: no IP, no name. Country is
  *                     resolved on ingest and the IP thrown away, as for video.
  * - listen-heatmaps   one doc per item: the 100 slices and how often each was heard
- * Names are never stored here. Listener rewards (only for people who agreed, only
- * on 3speak.tv) keep their own ledger, separate, so revoking is a delete.
+ * Names are never stored in those. Listener rewards keep their own ledger,
+ * `ad_listener_listen`, so revoking consent is a delete:
+ * - only on 3speak.tv, for a listener our own API vouches for (POST
+ *   /api/podcasts/signature action 'listen', valid a day), never a warm-up handle;
+ * - only while they agreed to listening (ad_viewer_prefs.listenEnabled, re-read);
+ * - from AD_LISTENER_MIN_PCT heard, not on your own track, not in private mode;
+ * - at most AD_LISTENER_MAX_SECONDS per item and AD_LISTENER_DAILY_MAX_SECONDS per
+ *   listener per UTC day; one row per (listener, kind, id), only ever raised ($max).
+ * Recording is not paying: services/adPayouts.js pays from these rows only when the
+ * listener pools are switched on (AD_LISTENER_*_POOL_PCT, default 0).
  */
 const crypto = require('crypto');
 const express = require('express');
@@ -39,6 +47,11 @@ const rateLimit = require('express-rate-limit');
 const { ipKeyGenerator } = rateLimit;
 const geoip = require('geoip-lite');
 const { getDb } = require('../utils/db');
+const { verifyDelegateVouch } = require('../utils/hiveAuth');
+const {
+  AD_SIGNING_DELEGATES, AD_VIEWER_PREFS_COLLECTION, AD_LISTENER_LISTEN_COLLECTION,
+  AD_LISTENER_MIN_PCT, AD_LISTENER_MAX_SECONDS, AD_LISTENER_DAILY_MAX_SECONDS,
+} = require('../utils/config');
 
 const router = express.Router();
 
@@ -54,6 +67,11 @@ const DURATION_DISAGREEMENT_RATIO = 0.5;
 const SESSION_SECRET = crypto.randomBytes(32);
 
 const KINDS = new Set(['audio', 'podcast']);
+// A Hive account: listener rewards are paid on Hive, so a warm-up `~handle` never qualifies.
+const HIVE_ACCOUNT_RE = /^[a-z][a-z0-9.-]{2,15}$/;
+const LISTEN_VOUCH_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+// Must match the vouch our API signs (preview-3speak server/index.cjs, /api/podcasts/signature).
+const listenVouchMessage = (user, timestamp) => ['3speak-podcasts', 'listen-vouch', user, 'session', String(timestamp)].join('|');
 const AUDIO_ID_RE = /^[a-z0-9._-]{1,64}$/i;
 const EPISODE_RE = /^[0-9a-f]{24}:[A-Za-z0-9_-]{16}$/;
 
@@ -161,6 +179,70 @@ function applyBeat(s, { now, position, rate, hidden }) {
   };
 }
 
+/**
+ * Who is listening, when 3speak.tv's API vouches for it; else null (anonymous).
+ * Only for listens on 3speak.tv: an embed cannot know who is listening.
+ */
+async function proveListener(b, source) {
+  if (source !== '3speak' || !b.listener) return null;
+  const user = String(b.listener).trim().toLowerCase();
+  const signature = typeof b.listenerSig === 'string' ? b.listenerSig.slice(0, 200) : '';
+  const timestamp = parseInt(b.listenerTs, 10);
+  if (!HIVE_ACCOUNT_RE.test(user) || !signature || !Number.isFinite(timestamp)) return null;
+  if (Math.abs(Date.now() - timestamp) > LISTEN_VOUCH_MAX_AGE_MS) return null;
+  try {
+    const v = await verifyDelegateVouch({ message: listenVouchMessage(user, timestamp), signature, delegates: AD_SIGNING_DELEGATES });
+    return v.ok ? user : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether this listen may earn at all, before anything is read from the database. */
+function qualifies(s, { listenedPct }) {
+  if (!s.listener || s.source !== '3speak' || s.private) return false;
+  // A creator listening to their own track must not earn as its listener.
+  if (s.kind === 'audio' && s.owner && String(s.owner).toLowerCase() === s.listener) return false;
+  return listenedPct >= AD_LISTENER_MIN_PCT;
+}
+
+/** Seconds to credit: capped per item, and by what is left of today's allowance. */
+function creditSeconds(contentSeconds, otherSecondsToday) {
+  const perItem = Math.min(Math.max(0, Math.round(contentSeconds) || 0), AD_LISTENER_MAX_SECONDS);
+  return Math.max(0, Math.min(perItem, AD_LISTENER_DAILY_MAX_SECONDS - (otherSecondsToday || 0)));
+}
+
+/** A qualifying listen into the ledger, for listeners who agreed to it. Never throws. */
+async function recordListenerReward(db, s, stats, now = new Date()) {
+  try {
+    if (!qualifies(s, stats)) return;
+    const prefs = await db.collection(AD_VIEWER_PREFS_COLLECTION).findOne({ _id: s.listener }, { projection: { listenEnabled: 1 } });
+    if (!prefs || prefs.listenEnabled !== true) return;
+    const ledger = db.collection(AD_LISTENER_LISTEN_COLLECTION);
+    const day = now.toISOString().slice(0, 10);
+    // Today's other listening counts against the daily allowance. A row is dated by
+    // the day it was first written, which is when nearly all of its seconds accrue.
+    const others = await ledger.aggregate([
+      { $match: { listener: s.listener, day, $nor: [{ kind: s.kind, id: s.id }] } },
+      { $group: { _id: null, t: { $sum: '$seconds' } } },
+    ]).toArray();
+    const seconds = creditSeconds(stats.contentSeconds, others[0] ? others[0].t : 0);
+    if (seconds <= 0) return;
+    await ledger.updateOne(
+      { listener: s.listener, kind: s.kind, id: s.id },
+      {
+        $max: { seconds, listenedPct: stats.listenedPct },
+        $set: { owner: s.owner || null, feed_id: s.feed_id || null, at: now },
+        $setOnInsert: { payoutId: null, firstAt: now, day, source: s.source },
+      },
+      { upsert: true },
+    );
+  } catch (err) {
+    // A reward ledger must never break measuring.
+    console.error('[listen] listener reward:', err.message);
+  }
+}
+
 let indexesEnsured = false;
 async function ensureIndexes(db) {
   if (indexesEnsured) return;
@@ -174,6 +256,10 @@ async function ensureIndexes(db) {
     await log.createIndex({ kind: 1, id: 1, updatedAt: -1 });      // one item's stats
     await log.createIndex({ kind: 1, feed_id: 1, updatedAt: -1 }); // one show's stats
     await db.collection(HEATMAP_COLLECTION).createIndex({ kind: 1, id: 1 }, { unique: true });
+    const ledger = db.collection(AD_LISTENER_LISTEN_COLLECTION);
+    await ledger.createIndex({ listener: 1, kind: 1, id: 1 }, { unique: true });
+    await ledger.createIndex({ kind: 1, payoutId: 1 });   // what the payout reads
+    await ledger.createIndex({ listener: 1, day: 1 });    // the daily allowance
   } catch (err) {
     indexesEnsured = false;
     console.error('[listen] indexes:', err.message);
@@ -223,12 +309,17 @@ router.post('/start', express.json({ limit: '4kb' }), limiter(60), async (req, r
     const hmDoc = (hm && hm.value) || hm;
     const axis = (hmDoc && hmDoc.duration) || duration;
     const isPrivate = b.private === true || b.private === 'true';
+    const source = normalizeSource(b.source);
+    const listener = await proveListener(b, source);
     const sid = crypto.randomBytes(16).toString('hex');
     const startPosition = clampPos(b.position, axis);
     await db.collection(SESSION_COLLECTION).insertOne({
       sid, kind, id, owner: item.owner, feed_id: item.feed_id,
       duration: axis, bucketCount: (hmDoc && hmDoc.bucketCount) || BUCKET_COUNT,
-      source: normalizeSource(b.source),
+      source,
+      // Named only when our API vouched for it (see proveListener). Never copied
+      // into listen-durations, which stays anonymous.
+      listener,
       country: isPrivate ? null : countryOf(clientIp(req)),
       private: isPrivate,
       userAgent: String(req.headers['user-agent'] || '').slice(0, 300),
@@ -286,6 +377,7 @@ router.post('/beat', express.json({ limit: '4kb' }), limiter(240), async (req, r
       },
       { upsert: true },
     );
+    if (beat.counted) await recordListenerReward(db, s, beat.stats);
     res.json({ ...beat.stats, duration: s.duration, position: st.lastPosition });
   } catch (err) {
     console.error('[listen] beat:', err.message);
@@ -313,4 +405,4 @@ router.get('/heatmap', limiter(120), async (req, res) => {
 });
 
 module.exports = router;
-module.exports._test = { applyBeat, bucketIndex, resolveDuration, normalizeSource, clientIp, MAX_BEAT_CREDIT_MS, BUCKET_COUNT };
+module.exports._test = { applyBeat, bucketIndex, resolveDuration, normalizeSource, clientIp, qualifies, creditSeconds, listenVouchMessage, proveListener, recordListenerReward, MAX_BEAT_CREDIT_MS, BUCKET_COUNT };

@@ -29,6 +29,8 @@ const OWNED = [
   // identified watch data for someone who asked to be forgotten.
   { coll: 'ad_viewer_watch', field: 'viewer' },
   { coll: 'ad_viewer_prefs', field: '_id' },
+  // Listener rewards: listening tied to a name, only for people who agreed.
+  { coll: 'ad_listener_listen', field: 'listener' },
   { coll: 'podcastsettings', field: 'owner' },
   { coll: 'scheduled-posts', field: 'owner' },
   { coll: 'audio-listen-log', field: 'username' },
