@@ -5,7 +5,7 @@
  * answers messages from services/podcastFeeds.js (main thread):
  *
  *   { id, type: 'tick' }                  poll every feed that is due
- *   { id, type: 'probe', url }            someone added a URL: fetch it now, store it
+ *   { id, type: 'probe', url, private?, owner? }  someone added a URL: fetch it now, store it
  *   { id, type: 'notes', feed_id, episode_id }  an episode's full show notes (not stored)
  *
  * and replies { id, ok, ... }. Parsing a big feed is synchronous CPU work, which is
@@ -19,13 +19,19 @@
  * What a poll costs Mongo: nothing when the host answers 304 or the body hash is
  * unchanged, apart from the schedule fields on the feed row. MongoDB treats an
  * update that sets the same values as a no-op.
+ *
+ * PRIVATE feeds (a listener's paid or password-protected feed) are one row per
+ * listener (`private: true, owner`, url_key from privateKey()). Their URL may
+ * carry `user:pass@`, sent as Basic auth (Node's fetch refuses credentials in a
+ * URL). They are never merged with another row, and never moved to a new
+ * address: the URL the listener gave is the one that holds their access.
  */
 const crypto = require('crypto');
 const { parentPort } = require('worker_threads');
 const { MongoClient } = require('mongodb');
 const { MONGODB_URI, DATABASE_NAME } = require('../utils/config');
-const { safeFetch } = require('../utils/safeFetch');
-const { parseFeed, urlKey, episodeId, notesByGuid } = require('../utils/podcastParse');
+const { safeFetch, splitCredentials } = require('../utils/safeFetch');
+const { PARSE_VERSION, parseFeed, urlKey, privateKey, episodeId, notesByGuid } = require('../utils/podcastParse');
 const { ObjectId } = require('mongodb');
 
 const FEEDS = 'podcast_feeds';
@@ -70,7 +76,12 @@ function backoff(errorCount) {
   return Math.min(DAY, 15 * MIN * 2 ** Math.max(0, errorCount - 1));
 }
 
-const SHOW_FIELDS = ['title', 'author', 'image', 'link', 'description', 'language', 'categories', 'explicit', 'podcast_guid', 'medium', 'funding', 'value'];
+const SHOW_FIELDS = ['title', 'author', 'image', 'link', 'description', 'language', 'categories', 'explicit', 'podcast_guid', 'medium', 'funding', 'value', 'persons', 'live'];
+// Episode fields that may be missing: unset when a new read no longer has them.
+const OPTIONAL_EPISODE_FIELDS = [
+  'bytes', 'duration', 'summary', 'image', 'link', 'value', 'season', 'episode', 'episode_type',
+  'chapters', 'chapters_url', 'chapters_type', 'chapters_inline', 'transcripts', 'persons', 'soundbites', 'video', 'private',
+];
 
 function showSet(show) {
   const set = {};
@@ -87,7 +98,8 @@ function showSet(show) {
 async function writeEpisodes(feed, episodes, { firstFetch, prune }) {
   const feedHex = feed._id.toHexString();
   const col = db.collection(EPISODES);
-  const rows = episodes.map((e) => ({ ...e, _id: episodeId(feedHex, e.guid) }));
+  // Episodes of a private feed say so, for the reads that check (routes/podcasts.js).
+  const rows = episodes.map((e) => ({ ...e, ...(feed.private ? { private: true } : {}), _id: episodeId(feedHex, e.guid) }));
   if (!rows.length) return [];
   const ids = rows.map((r) => r._id);
   const known = new Set((await col.find({ _id: { $in: ids } }, { projection: { _id: 1 } }).toArray()).map((d) => d._id));
@@ -103,7 +115,7 @@ async function writeEpisodes(feed, episodes, { firstFetch, prune }) {
     // pubDate, so it can never show up as a new-episode notification later.
     const firstSeen = announced.has(_id) ? now : (r.published_at && r.published_at < now ? r.published_at : now);
     const unset = {};
-    for (const k of ['bytes', 'duration', 'summary', 'image', 'link', 'value']) if (!(k in fields)) unset[k] = '';
+    for (const k of OPTIONAL_EPISODE_FIELDS) if (!(k in fields)) unset[k] = '';
     const update = { $set: { ...fields, feed_id: feed._id }, $setOnInsert: { first_seen_at: firstSeen } };
     if (Object.keys(unset).length) update.$unset = unset;
     return { updateOne: { filter: { _id }, update, upsert: true } };
@@ -136,28 +148,39 @@ async function mergeInto(dup, keep) {
   return keep._id;
 }
 
-/** Another feed row that is really this show (same final URL or same podcast:guid)? */
+/**
+ * Another feed row that is really this show (same final URL or same podcast:guid)?
+ * Never for a private feed, and a private row is nobody's twin: merging would hand
+ * one listener's access to everyone following the public row.
+ */
 async function findTwin(feed, key, guid) {
+  if (feed.private) return null;
   const or = [{ url_key: key }, { alt_keys: key }];
   if (guid) or.push({ podcast_guid: guid });
-  return db.collection(FEEDS).findOne({ _id: { $ne: feed._id }, $or: or });
+  return db.collection(FEEDS).findOne({ _id: { $ne: feed._id }, private: { $ne: true }, $or: or });
 }
 
 /**
  * Fetch, parse and store one feed.
  * @returns {{feed_id, status, error?, announce?: [{id,title}], merged?: ObjectId}}
  */
+/** Stored by the current parser: an unchanged feed (304, same body) may be skipped. */
+const parsedByCurrent = (feed) => feed.parse_version === PARSE_VERSION;
+
 async function pollFeed(feed, { force = false } = {}) {
   const now = new Date();
   const firstFetch = feed.status === 'pending' || !feed.last_ok_at;
+  // A show the current parser has not read yet is read in full, changed or not.
+  const reparse = !parsedByCurrent(feed);
   const headers = {};
-  if (!force && !firstFetch) {
+  if (!force && !firstFetch && !reparse) {
     if (feed.etag) headers['If-None-Match'] = feed.etag;
     if (feed.last_modified) headers['If-Modified-Since'] = feed.last_modified;
   }
   const col = db.collection(FEEDS);
   try {
-    const res = await safeFetch(feed.url, { headers });
+    const { url: fetchUrl, auth } = splitCredentials(feed.url);
+    const res = await safeFetch(fetchUrl, { headers, auth });
     if (res.status === 304) {
       await col.updateOne({ _id: feed._id }, {
         $set: { status: 'ok', last_fetch_at: now, last_ok_at: now, error_count: 0, next_poll_at: new Date(Date.now() + jitter(pollInterval())) },
@@ -169,7 +192,7 @@ async function pollFeed(feed, { force = false } = {}) {
     const cond = {};
     if (res.headers.etag) cond.etag = String(res.headers.etag).slice(0, 200);
     if (res.headers['last-modified']) cond.last_modified = String(res.headers['last-modified']).slice(0, 100);
-    if (!force && !firstFetch && hash === feed.body_hash) {
+    if (!force && !firstFetch && !reparse && hash === feed.body_hash) {
       await col.updateOne({ _id: feed._id }, {
         $set: { ...cond, status: 'ok', last_fetch_at: now, last_ok_at: now, error_count: 0, next_poll_at: new Date(Date.now() + jitter(pollInterval())) },
         $unset: { error: '' },
@@ -177,7 +200,7 @@ async function pollFeed(feed, { force = false } = {}) {
       return { feed_id: feed._id, status: 'unchanged' };
     }
 
-    const full = force || firstFetch || !feed.last_full_at || Date.now() - new Date(feed.last_full_at).getTime() > FULL_EVERY;
+    const full = force || firstFetch || reparse || !feed.last_full_at || Date.now() - new Date(feed.last_full_at).getTime() > FULL_EVERY;
     const { show, episodes, itemCount, complete } = parseFeed(res.body.toString('utf8'), { all: full });
     if (!episodes.length) {
       const e = new Error('no playable episodes');
@@ -194,16 +217,17 @@ async function pollFeed(feed, { force = false } = {}) {
       return { feed_id: twin._id, status: 'merged', merged: twin._id };
     }
 
-    const set = { ...showSet(show).set, ...cond, body_hash: hash, item_count: itemCount, status: 'ok', last_fetch_at: now, last_ok_at: now, error_count: 0 };
+    const set = { ...showSet(show).set, ...cond, body_hash: hash, parse_version: PARSE_VERSION, item_count: itemCount, status: 'ok', last_fetch_at: now, last_ok_at: now, error_count: 0 };
     if (full) set.last_full_at = now;
     const unset = { ...showSet(show).unset, error: '' };
     const addKeys = [];
     // The feed really moved (all redirects permanent, or itunes:new-feed-url).
-    if (res.permanent && finalKey && finalKey !== feed.url_key) {
+    // A private feed stays where its listener put it (see the header).
+    if (!feed.private && res.permanent && finalKey && finalKey !== feed.url_key) {
       set.url = res.url;
       set.url_key = finalKey;
       addKeys.push(feed.url_key);
-    } else if (show.new_feed_url && urlKey(show.new_feed_url) && urlKey(show.new_feed_url) !== feed.url_key) {
+    } else if (!feed.private && show.new_feed_url && urlKey(show.new_feed_url) && urlKey(show.new_feed_url) !== feed.url_key) {
       const nk = urlKey(show.new_feed_url);
       if (!(await col.findOne({ $or: [{ url_key: nk }, { alt_keys: nk }] }, { projection: { _id: 1 } }))) {
         set.url = show.new_feed_url;
@@ -279,15 +303,20 @@ async function tick() {
   };
 }
 
-/** A user added a URL we did not have: create the row and fetch it right away. */
-async function probe(url) {
+/**
+ * A user added a URL we did not have: create the row and fetch it right away.
+ * `private` (with `owner`, the listener): their own row, see the header.
+ */
+async function probe(url, { private: isPrivate = false, owner = '' } = {}) {
   await connect();
-  const key = urlKey(url);
+  const key = isPrivate ? privateKey(owner, url) : urlKey(url);
+  if (!key) return { error: 'bad_url' };
   const col = db.collection(FEEDS);
-  let feed = await col.findOne({ $or: [{ url_key: key }, { alt_keys: key }] });
+  let feed = await col.findOne(isPrivate ? { url_key: key } : { $or: [{ url_key: key }, { alt_keys: key }], private: { $ne: true } });
   if (feed && feed.status !== 'pending' && feed.last_ok_at) return { feed_id: feed._id.toHexString(), existed: true };
   if (!feed) {
     const doc = { url, url_key: key, alt_keys: [], status: 'pending', subscribers: 0, error_count: 0, created_at: new Date(), next_poll_at: new Date() };
+    if (isPrivate) Object.assign(doc, { private: true, owner });
     try {
       const ins = await col.insertOne(doc);
       feed = { ...doc, _id: ins.insertedId };
@@ -321,7 +350,8 @@ async function notes(feedId, epId) {
   if (!hit || Date.now() - hit.at > NOTES_TTL) {
     const feed = await db.collection(FEEDS).findOne({ _id: new ObjectId(feedId) }, { projection: { url: 1 } });
     if (!feed) return { error: 'not_found' };
-    const res = await safeFetch(feed.url, { timeoutMs: 25000, maxBytes: 32 * 1024 * 1024 });
+    const { url: fetchUrl, auth } = splitCredentials(feed.url);
+    const res = await safeFetch(fetchUrl, { auth, timeoutMs: 25000, maxBytes: 32 * 1024 * 1024 });
     const byId = new Map();
     for (const [guid, html] of notesByGuid(res.body.toString('utf8'))) byId.set(episodeId(feedId, guid), html);
     hit = { at: Date.now(), byId };
@@ -342,7 +372,7 @@ if (parentPort) parentPort.on('message', async (msg) => {
       ticking = true;
       try { reply({ ok: true, ...(await tick()) }); } finally { ticking = false; }
     } else if (msg.type === 'probe') {
-      const r = await probe(msg.url);
+      const r = await probe(msg.url, { private: msg.private === true, owner: String(msg.owner || '') });
       reply(r.error ? { ok: false, code: r.error } : { ok: true, ...r });
     } else if (msg.type === 'notes') {
       const r = await notes(String(msg.feed_id), String(msg.episode_id));
@@ -355,4 +385,4 @@ if (parentPort) parentPort.on('message', async (msg) => {
   }
 });
 
-module.exports = { _test: { pollInterval, backoff, showSet } };
+module.exports = { _test: { pollInterval, backoff, showSet, parsedByCurrent } };

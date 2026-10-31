@@ -16,6 +16,11 @@ const crypto = require('crypto');
 const { XMLParser } = require('fast-xml-parser');
 
 const TRUNCATE_ITEMS = 60;
+// Raise it whenever the parser reads more from a feed. A show stored by an older
+// parser is then read again in full at its next poll, even when the feed itself
+// has not changed (304, same body), so its stored episodes get the new fields.
+// 2: seasons, chapters, transcripts, people, soundbites, video, live items.
+const PARSE_VERSION = 2;
 const MAX_ALL_ITEMS = 3000;
 
 const ARRAY_PATHS = new Set([
@@ -26,6 +31,18 @@ const ARRAY_PATHS = new Set([
   'rss.channel.item.podcast:value.podcast:valueRecipient',
   'rss.channel.podcast:funding',
   'rss.channel.itunes:category',
+  'rss.channel.podcast:person',
+  'rss.channel.podcast:liveItem',
+  'rss.channel.podcast:liveItem.enclosure',
+  'rss.channel.podcast:liveItem.podcast:alternateEnclosure',
+  'rss.channel.podcast:liveItem.podcast:alternateEnclosure.podcast:source',
+  'rss.channel.item.enclosure',
+  'rss.channel.item.podcast:person',
+  'rss.channel.item.podcast:transcript',
+  'rss.channel.item.podcast:soundbite',
+  'rss.channel.item.podcast:alternateEnclosure',
+  'rss.channel.item.podcast:alternateEnclosure.podcast:source',
+  'rss.channel.item.psc:chapters.psc:chapter',
 ]);
 
 const parser = new XMLParser({
@@ -55,6 +72,17 @@ function urlKey(raw) {
   } catch (_) {
     return '';
   }
+}
+
+/**
+ * The url_key of a PRIVATE feed: one row per listener (their password or token is
+ * theirs), so the key names the listener, and is a hash so the token in a URL
+ * never sits in an index. It never matches a public feed's key.
+ */
+function privateKey(user, raw) {
+  const k = urlKey(raw);
+  if (!k) return '';
+  return `private:${user}:${crypto.createHash('sha256').update(k).digest('base64url').slice(0, 32)}`;
 }
 
 /** Stable, short episode id: the feed's id plus a hash of the episode's guid. */
@@ -164,10 +192,8 @@ function fundingOf(channel) {
     .filter((f) => f.url);
 }
 
-function mediaOf(item) {
-  const enc = item.enclosure;
-  const e = Array.isArray(enc) ? enc[0] : enc;
-  if (!e) return null;
+function enclosureOf(e) {
+  if (!e || typeof e !== 'object') return null;
   const url = httpUrl(e['@_url']);
   if (!url) return null;
   const mime = String(e['@_type'] || '').toLowerCase().slice(0, 40);
@@ -176,18 +202,201 @@ function mediaOf(item) {
   return { url, mime, bytes: Number.isFinite(bytes) && bytes > 0 ? bytes : 0 };
 }
 
+const isVideo = (m) => m.mime.startsWith('video/') || (!m.mime && /\.(mp4|m4v|webm)(\?|$)/i.test(m.url));
+
+/**
+ * The episode's playable file. With several enclosures (rare, but some shows list
+ * an audio and a video file) the audio one plays and the video one is `video`.
+ */
+function mediaOf(item) {
+  const list = (Array.isArray(item.enclosure) ? item.enclosure : [item.enclosure]).slice(0, 4).map(enclosureOf).filter(Boolean);
+  if (!list.length) return null;
+  const audio = list.find((m) => !isVideo(m));
+  const video = list.find(isVideo);
+  return { ...(audio || video), video: video ? { url: video.url, mime: video.mime || 'video/mp4' } : null };
+}
+
+/** A video version from podcast:alternateEnclosure (video/* with a web source). */
+function alternateVideo(node) {
+  for (const alt of (node['podcast:alternateEnclosure'] || []).slice(0, 10)) {
+    const mime = String(alt['@_type'] || '').toLowerCase().slice(0, 40);
+    if (!mime.startsWith('video/')) continue;
+    for (const src of (alt['podcast:source'] || []).slice(0, 5)) {
+      const url = httpUrl(src && src['@_uri']);
+      if (url) return { url, mime };
+    }
+  }
+  return null;
+}
+
+/** "01:02:03.500", "62:03", "3723.5" → seconds (psc:chapter start, soundbites). */
+function timeOf(v) {
+  const s = text(v).trim();
+  if (/^\d+(\.\d+)?$/.test(s)) return parseFloat(s);
+  const m = s.match(/^(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:[.,](\d{1,3}))?$/);
+  if (!m) return NaN;
+  return (parseInt(m[1] || '0', 10) * 3600) + parseInt(m[2], 10) * 60 + parseInt(m[3], 10) + (m[4] ? parseInt(m[4].padEnd(3, '0'), 10) / 1000 : 0);
+}
+
+const round3 = (n) => Math.round(n * 1000) / 1000;
+
+function positiveNumber(v, max) {
+  const n = parseFloat(text(v));
+  return Number.isFinite(n) && n > 0 && n <= max ? n : 0;
+}
+
+const MAX_PERSONS = 8;
+
+/** podcast:person: host, guest, editor... (role and group lowercased, the spec's defaults). */
+function personsOf(node) {
+  return (node['podcast:person'] || []).map((p) => {
+    const name = cap(p, 120);
+    if (!name) return null;
+    const out = {
+      name,
+      role: cap(p && p['@_role'], 40).toLowerCase() || 'host',
+      group: cap(p && p['@_group'], 40).toLowerCase() || 'cast',
+    };
+    const img = httpUrl(p && p['@_img']);
+    if (img) out.img = img;
+    const href = httpUrl(p && p['@_href']);
+    if (href) out.href = href;
+    return out;
+  }).filter(Boolean).slice(0, MAX_PERSONS);
+}
+
+// Inline chapters (Podlove Simple Chapters), kept on the episode: a few dozen at most.
+const MAX_INLINE_CHAPTERS = 80;
+function inlineChapters(item) {
+  const psc = item['psc:chapters'];
+  const list = (psc && psc['psc:chapter']) || [];
+  return list.slice(0, MAX_INLINE_CHAPTERS).map((c) => {
+    const start = timeOf(c && c['@_start']);
+    if (!Number.isFinite(start) || start < 0) return null;
+    const out = { start: round3(start), title: cap(c['@_title'], 200) };
+    const url = httpUrl(c['@_href']);
+    if (url) out.url = url;
+    const img = httpUrl(c['@_image']);
+    if (img) out.img = img;
+    return out;
+  }).filter(Boolean);
+}
+
+const MAX_TRANSCRIPTS = 6;
+/** podcast:transcript: where each language's transcript is. The URLs stay on the server. */
+function transcriptsOf(item, show) {
+  const fallback = show.language ? show.language.split(/[-_]/)[0] : 'und';
+  const out = [];
+  for (const t of item['podcast:transcript'] || []) {
+    const url = httpUrl(t && t['@_url']);
+    if (!url) continue;
+    const lang = cap(t['@_language'], 12).toLowerCase() || fallback;
+    out.push({ url, type: cap(t['@_type'], 40).toLowerCase() || 'text/plain', lang });
+    if (out.length >= MAX_TRANSCRIPTS) break;
+  }
+  return out;
+}
+
+const MAX_SOUNDBITES = 8;
+function soundbitesOf(item) {
+  return (item['podcast:soundbite'] || []).map((b) => {
+    const start = timeOf(b && b['@_startTime']);
+    const dur = positiveNumber(b && b['@_duration'], 600);
+    if (!Number.isFinite(start) || start < 0 || !dur) return null;
+    const out = { start: round3(start), duration: round3(dur) };
+    const title = cap(b, 200);
+    if (title) out.title = title;
+    return out;
+  }).filter(Boolean).slice(0, MAX_SOUNDBITES);
+}
+
+/** A whole number, or a decimal like podcast:episode 1.5, within reason. */
+function seasonNumber(v) {
+  const n = parseFloat(text(v));
+  return Number.isFinite(n) && n >= 0 && n < 100000 ? n : null;
+}
+
+const LIVE_STATUS = new Set(['pending', 'live']);
+const MAX_LIVE = 3;
+
+/**
+ * podcast:liveItem, the show's upcoming and running live streams. Ended ones are
+ * dropped here; the API also drops the ones whose time is clearly up, since an
+ * unchanged feed is not read again.
+ */
+function liveItemsOf(channel) {
+  const out = [];
+  for (const li of channel['podcast:liveItem'] || []) {
+    const status = String((li && li['@_status']) || '').toLowerCase();
+    if (!LIVE_STATUS.has(status)) continue;
+    const enc = (li.enclosure || []).map(enclosureOf).find(Boolean)
+      || (() => {
+        for (const alt of li['podcast:alternateEnclosure'] || []) {
+          for (const src of alt['podcast:source'] || []) {
+            const url = httpUrl(src && src['@_uri']);
+            if (url) return { url, mime: String(alt['@_type'] || '').toLowerCase().slice(0, 40) };
+          }
+        }
+        return null;
+      })()
+      || (() => {
+        // An HLS stream as the enclosure: no audio/video type, no media extension.
+        const e = (li.enclosure || [])[0];
+        const url = httpUrl(e && e['@_url']);
+        return url ? { url, mime: String(e['@_type'] || '').toLowerCase().slice(0, 40) } : null;
+      })();
+    if (!enc) continue;
+    // Not date(): an upcoming stream's start is in the future on purpose.
+    const startRaw = text(li['@_start']).trim();
+    const start = startRaw && !Number.isNaN(new Date(startRaw).getTime()) ? new Date(startRaw) : null;
+    const guid = text(li.guid) || enc.url;
+    const item = {
+      id: crypto.createHash('sha1').update(String(guid)).digest('base64url').slice(0, 12),
+      title: cap(li.title, 300),
+      status,
+      start: start || null,
+      url: enc.url,
+      mime: enc.mime || '',
+    };
+    const endRaw = text(li['@_end']).trim();
+    const end = endRaw ? new Date(endRaw) : null;
+    if (end && !Number.isNaN(end.getTime())) item.end = end;
+    const cl = li['podcast:contentLink'];
+    const link = httpUrl(cl && (cl['@_href'] || text(cl)));
+    if (link) item.link = link;
+    out.push(item);
+    if (out.length >= MAX_LIVE) break;
+  }
+  return out;
+}
+
 function sameJson(a, b) {
   return JSON.stringify(a || null) === JSON.stringify(b || null);
 }
 
-/** Cut a document after its Nth </item> and close it again. */
+/**
+ * Cut a document after its Nth </item> and close it again. Live items placed
+ * after the episodes (most feeds put them first) are carried over, so a routine
+ * poll still sees a stream going live.
+ */
 function truncateItems(xml, n) {
   let idx = -1;
   for (let i = 0; i < n; i += 1) {
     idx = xml.indexOf('</item>', idx + 1);
     if (idx < 0) return { xml, cut: false };
   }
-  return { xml: `${xml.slice(0, idx + 7)}</channel></rss>`, cut: true };
+  const head = xml.slice(0, idx + 7);
+  let live = '';
+  let from = idx + 7;
+  for (let i = 0; i < MAX_LIVE * 2; i += 1) {
+    const a = xml.indexOf('<podcast:liveItem', from);
+    if (a < 0) break;
+    const b = xml.indexOf('</podcast:liveItem>', a);
+    if (b < 0) break;
+    live += xml.slice(a, b + 19);
+    from = b + 19;
+  }
+  return { xml: `${head}${live}</channel></rss>`, cut: true };
 }
 
 function parseDoc(xml) {
@@ -222,6 +431,8 @@ function readChannel(channel) {
     medium: cap(channel['podcast:medium'], 20).toLowerCase(),
     funding: fundingOf(channel),
     value: valueOf(channel),
+    persons: personsOf(channel),
+    live: liveItemsOf(channel),
   };
 }
 
@@ -249,6 +460,32 @@ function readItems(rawItems, show) {
     if (link) ep.link = link;
     const value = valueOf(item);
     if (value && !sameJson(value, show.value)) ep.value = value;
+
+    const season = seasonNumber(item['podcast:season'] || item['itunes:season']);
+    if (season != null) ep.season = season;
+    const number = seasonNumber(item['podcast:episode'] || item['itunes:episode']);
+    if (number != null) ep.episode = number;
+    const type = text(item['itunes:episodeType']).trim().toLowerCase();
+    if (type === 'trailer' || type === 'bonus') ep.episode_type = type;
+    // Chapters: a JSON file (read on demand, routes/podcasts.js) or inline ones.
+    const ch = item['podcast:chapters'];
+    const chaptersUrl = httpUrl(ch && ch['@_url']);
+    if (chaptersUrl) {
+      ep.chapters_url = chaptersUrl;
+      ep.chapters_type = cap(ch['@_type'], 60).toLowerCase();
+    }
+    const inline = inlineChapters(item);
+    if (inline.length) ep.chapters_inline = inline;
+    if (chaptersUrl || inline.length) ep.chapters = true;
+    const transcripts = transcriptsOf(item, show);
+    if (transcripts.length) ep.transcripts = transcripts;
+    // Episode people only when they are not just the show's (which then apply).
+    const persons = personsOf(item);
+    if (persons.length && !sameJson(persons, show.persons)) ep.persons = persons;
+    const soundbites = soundbitesOf(item);
+    if (soundbites.length) ep.soundbites = soundbites;
+    const video = media.video || alternateVideo(item);
+    if (video) ep.video = video;
     out.push(ep);
   }
   return out;
@@ -325,4 +562,4 @@ function notesByGuid(xml) {
   return out;
 }
 
-module.exports = { notesByGuid, parseFeed, urlKey, episodeId, plain, duration, valueOf, TRUNCATE_ITEMS, MAX_ALL_ITEMS, _test: { truncateItems } };
+module.exports = { PARSE_VERSION, notesByGuid, parseFeed, urlKey, privateKey, episodeId, plain, decodeEntities, duration, timeOf, valueOf, TRUNCATE_ITEMS, MAX_ALL_ITEMS, _test: { truncateItems } };
