@@ -31,7 +31,7 @@ const { parentPort } = require('worker_threads');
 const { MongoClient } = require('mongodb');
 const { MONGODB_URI, DATABASE_NAME } = require('../utils/config');
 const { safeFetch, splitCredentials } = require('../utils/safeFetch');
-const { parseFeed, urlKey, privateKey, episodeId, notesByGuid } = require('../utils/podcastParse');
+const { PARSE_VERSION, parseFeed, urlKey, privateKey, episodeId, notesByGuid } = require('../utils/podcastParse');
 const { ObjectId } = require('mongodb');
 
 const FEEDS = 'podcast_feeds';
@@ -164,11 +164,16 @@ async function findTwin(feed, key, guid) {
  * Fetch, parse and store one feed.
  * @returns {{feed_id, status, error?, announce?: [{id,title}], merged?: ObjectId}}
  */
+/** Stored by the current parser: an unchanged feed (304, same body) may be skipped. */
+const parsedByCurrent = (feed) => feed.parse_version === PARSE_VERSION;
+
 async function pollFeed(feed, { force = false } = {}) {
   const now = new Date();
   const firstFetch = feed.status === 'pending' || !feed.last_ok_at;
+  // A show the current parser has not read yet is read in full, changed or not.
+  const reparse = !parsedByCurrent(feed);
   const headers = {};
-  if (!force && !firstFetch) {
+  if (!force && !firstFetch && !reparse) {
     if (feed.etag) headers['If-None-Match'] = feed.etag;
     if (feed.last_modified) headers['If-Modified-Since'] = feed.last_modified;
   }
@@ -187,7 +192,7 @@ async function pollFeed(feed, { force = false } = {}) {
     const cond = {};
     if (res.headers.etag) cond.etag = String(res.headers.etag).slice(0, 200);
     if (res.headers['last-modified']) cond.last_modified = String(res.headers['last-modified']).slice(0, 100);
-    if (!force && !firstFetch && hash === feed.body_hash) {
+    if (!force && !firstFetch && !reparse && hash === feed.body_hash) {
       await col.updateOne({ _id: feed._id }, {
         $set: { ...cond, status: 'ok', last_fetch_at: now, last_ok_at: now, error_count: 0, next_poll_at: new Date(Date.now() + jitter(pollInterval())) },
         $unset: { error: '' },
@@ -195,7 +200,7 @@ async function pollFeed(feed, { force = false } = {}) {
       return { feed_id: feed._id, status: 'unchanged' };
     }
 
-    const full = force || firstFetch || !feed.last_full_at || Date.now() - new Date(feed.last_full_at).getTime() > FULL_EVERY;
+    const full = force || firstFetch || reparse || !feed.last_full_at || Date.now() - new Date(feed.last_full_at).getTime() > FULL_EVERY;
     const { show, episodes, itemCount, complete } = parseFeed(res.body.toString('utf8'), { all: full });
     if (!episodes.length) {
       const e = new Error('no playable episodes');
@@ -212,7 +217,7 @@ async function pollFeed(feed, { force = false } = {}) {
       return { feed_id: twin._id, status: 'merged', merged: twin._id };
     }
 
-    const set = { ...showSet(show).set, ...cond, body_hash: hash, item_count: itemCount, status: 'ok', last_fetch_at: now, last_ok_at: now, error_count: 0 };
+    const set = { ...showSet(show).set, ...cond, body_hash: hash, parse_version: PARSE_VERSION, item_count: itemCount, status: 'ok', last_fetch_at: now, last_ok_at: now, error_count: 0 };
     if (full) set.last_full_at = now;
     const unset = { ...showSet(show).unset, error: '' };
     const addKeys = [];
@@ -380,4 +385,4 @@ if (parentPort) parentPort.on('message', async (msg) => {
   }
 });
 
-module.exports = { _test: { pollInterval, backoff, showSet } };
+module.exports = { _test: { pollInterval, backoff, showSet, parsedByCurrent } };

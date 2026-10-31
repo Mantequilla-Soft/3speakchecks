@@ -646,3 +646,14 @@ describe('listen credit at higher speeds', () => {
     expect(L.MAX_CONTIGUOUS_RATE).toBe(4);
   });
 });
+
+describe('a parser upgrade re-reads stored shows', () => {
+  const { PARSE_VERSION } = require('../utils/podcastParse');
+  const { _test: { parsedByCurrent } } = require('../services/podcastFeedsWorker');
+
+  test('a show stored by an older parser (or none recorded) is not skipped as unchanged', () => {
+    expect(parsedByCurrent({})).toBe(false);
+    expect(parsedByCurrent({ parse_version: PARSE_VERSION - 1 })).toBe(false);
+    expect(parsedByCurrent({ parse_version: PARSE_VERSION })).toBe(true);
+  });
+});

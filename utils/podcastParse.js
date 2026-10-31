@@ -16,6 +16,11 @@ const crypto = require('crypto');
 const { XMLParser } = require('fast-xml-parser');
 
 const TRUNCATE_ITEMS = 60;
+// Raise it whenever the parser reads more from a feed. A show stored by an older
+// parser is then read again in full at its next poll, even when the feed itself
+// has not changed (304, same body), so its stored episodes get the new fields.
+// 2: seasons, chapters, transcripts, people, soundbites, video, live items.
+const PARSE_VERSION = 2;
 const MAX_ALL_ITEMS = 3000;
 
 const ARRAY_PATHS = new Set([
@@ -557,4 +562,4 @@ function notesByGuid(xml) {
   return out;
 }
 
-module.exports = { notesByGuid, parseFeed, urlKey, privateKey, episodeId, plain, decodeEntities, duration, timeOf, valueOf, TRUNCATE_ITEMS, MAX_ALL_ITEMS, _test: { truncateItems } };
+module.exports = { PARSE_VERSION, notesByGuid, parseFeed, urlKey, privateKey, episodeId, plain, decodeEntities, duration, timeOf, valueOf, TRUNCATE_ITEMS, MAX_ALL_ITEMS, _test: { truncateItems } };
