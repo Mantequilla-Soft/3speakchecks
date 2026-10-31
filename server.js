@@ -119,6 +119,7 @@ app.use('/verify', verifyRoutes);
 app.use('/scheduled-posts', scheduledPostsRoutes);
 app.use('/', communitiesRoutes);
 app.use('/', analyticsRoutes);
+app.use('/', require('./routes/galaxy')); // galaxy follow graph from HafSQL; before the streamStats gate
 app.use('/', gdprRoutes);
 app.use('/gdpr-admin', gdprAdminRoutes);
 app.use('/', userFiltersRoutes);

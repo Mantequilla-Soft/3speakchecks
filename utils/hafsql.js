@@ -29,8 +29,9 @@ function getPool() {
   return pool;
 }
 
-async function query(sql, params) {
-  const { rows } = await getPool().query(sql, params);
+// `timeoutMs` lifts the pool's 20 s read timeout for one known-heavy query.
+async function query(sql, params, { timeoutMs } = {}) {
+  const { rows } = await getPool().query(timeoutMs ? { text: sql, values: params, query_timeout: timeoutMs } : sql, timeoutMs ? undefined : params);
   return rows;
 }
 
