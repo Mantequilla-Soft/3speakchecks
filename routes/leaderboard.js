@@ -157,10 +157,14 @@ function rankedBoard(rows, metric) {
     .sort(byMetric(metric));
 }
 
-// How many users are strictly ahead on this metric. NOTE: deliberately NOT
-// exclusion-filtered — the countDocuments call this replaces wasn't either, and a
-// rank that changed depending on the hidden list would be a behaviour change.
-const aheadOf = (rows, metric, value) => rows.reduce((n, d) => n + ((d[metric] || 0) > value ? 1 : 0), 0);
+// How many users are strictly ahead on this metric. Exclusion-filtered like the
+// board itself (rankedBoard): a hidden / excluded account must not push anyone
+// down, or a creator listed #1 on /leaderboard reads #2 on their own stats,
+// recap and profile badges (seen 2026-10-30: @vynith on Stories).
+const aheadOf = (rows, metric, value) => {
+  const excluded = new Set(excludedCreators());
+  return rows.reduce((n, d) => n + ((d[metric] || 0) > value && !excluded.has(d.user) ? 1 : 0), 0);
+};
 
 /**
  * GET /leaderboard?window=7d&metric=video_uploads&limit=50&page=1

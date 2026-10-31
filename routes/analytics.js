@@ -391,6 +391,185 @@ router.get(['/analytics/timeseries', '/creator-stats/timeseries'], async (req, r
   }
 });
 
+// GET /creator-stats/weekly-top?username=X&days=&per=  → for each week (Monday
+// start, ISO weeks), the videos that earned the most watch time in it, best
+// first: { weeks: { "YYYY-MM-DD": [{ permlink, title, thumbnail, short, watchSeconds }] } }.
+// The yearly recap shows them next to a week's bar.
+router.get(['/analytics/weekly-top', '/creator-stats/weekly-top'], async (req, res) => {
+  try {
+    const username = String(req.query.username || '').toLowerCase();
+    if (!HIVE_RE.test(username)) return res.status(400).json({ success: false, error: 'invalid username' });
+    const db = getDb();
+    const days = parseDays(req) || 365;
+    const per = Math.min(Math.max(parseInt(req.query.per, 10) || 3, 1), 5);
+
+    const rows = await db.collection(WATCH_LOG).aggregate([
+      { $match: { owner: username, ...dateMatch(days) } },
+      { $group: {
+        _id: {
+          week: { $dateFromParts: { isoWeekYear: { $isoWeekYear: '$updatedAt' }, isoWeek: { $isoWeek: '$updatedAt' }, isoDayOfWeek: 1 } },
+          permlink: '$permlink',
+        },
+        watchSeconds: { $sum: WATCH_SEC },
+      } },
+      { $sort: { '_id.week': 1, watchSeconds: -1 } },
+      { $group: { _id: '$_id.week', top: { $push: { permlink: '$_id.permlink', watchSeconds: '$watchSeconds' } } } },
+      { $project: { _id: 0, week: { $dateToString: { format: '%Y-%m-%d', date: '$_id' } }, top: { $slice: ['$top', per] } } },
+    ]).toArray();
+
+    const permlinks = [...new Set(rows.flatMap((r) => r.top.map((v) => v.permlink)))];
+    const meta = permlinks.length ? await resolveVideoMeta(db, username, permlinks) : {};
+    const weeks = {};
+    for (const r of rows) {
+      weeks[r.week] = r.top
+        .filter((v) => v.watchSeconds > 0)
+        .map((v) => {
+          const m = meta[v.permlink] || {};
+          return {
+            permlink: v.permlink,
+            title: m.short ? (m.hiveTitle || m.docSnippet || 'Untitled short') : (m.hiveTitle || m.filename || v.permlink),
+            thumbnail: m.thumbnail || null,
+            short: !!m.short,
+            hiveAuthor: m.hiveAuthor || username,
+            hivePermlink: m.hivePermlink || v.permlink,
+            watchSeconds: Math.round(v.watchSeconds),
+          };
+        });
+    }
+    res.json({ success: true, username, days, weeks });
+  } catch (err) {
+    console.error('analytics/weekly-top error:', err);
+    res.status(500).json({ success: false, error: 'internal error' });
+  }
+});
+
+// GET /creator-stats/ad-income?username=X&days=  → the account's PAID 3Speak ad
+// payouts in the window, each with its split by kind (creator, viewer,
+// referral, audio, ...): { periods: { "<periodKey>": { creator: hbd, viewer: hbd } } }.
+// A payout to someone who earned as a creator AND a viewer in one period is a
+// single transfer (memo kind "creator+viewer"); this is what splits it. The
+// yearly recap uses it; the amounts themselves are public on chain anyway.
+router.get(['/analytics/ad-income', '/creator-stats/ad-income'], async (req, res) => {
+  try {
+    const username = String(req.query.username || '').toLowerCase();
+    if (!HIVE_RE.test(username)) return res.status(400).json({ success: false, error: 'invalid username' });
+    const days = parseDays(req) || 365;
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const rows = await getDb().collection(process.env.AD_PAYOUTS_COLLECTION || 'ad_payouts')
+      .find({ account: username, status: 'paid', paidAt: { $gte: since } }, { projection: { _id: 0, periodKey: 1, parts: 1, kind: 1, hbd: 1 } })
+      .toArray();
+    const periods = {};
+    for (const r of rows) {
+      periods[r.periodKey] = r.parts && Object.keys(r.parts).length ? r.parts : { [r.kind || 'creator']: r.hbd || 0 };
+    }
+    res.json({ success: true, username, days, periods });
+  } catch (err) {
+    console.error('analytics/ad-income error:', err);
+    res.status(500).json({ success: false, error: 'internal error' });
+  }
+});
+
+// GET /creator-stats/follows?username=X&days=  → who started following the
+// account in the window and still follows, and whom the account started
+// following and still follows, newest first, from HafSQL's follow table (it
+// keeps the block of each follow). { followers: [{ account, block }], following: [...], headBlock }
+// The yearly recap uses it: Hive's own APIs can't date a follower further back
+// than the ~90 days notifications keep.
+const BLOCKS_PER_DAY = 28800; // one block every 3 s
+router.get(['/analytics/follows', '/creator-stats/follows'], async (req, res) => {
+  try {
+    const username = String(req.query.username || '').toLowerCase();
+    if (!HIVE_RE.test(username)) return res.status(400).json({ success: false, error: 'invalid username' });
+    const days = parseDays(req) || 365;
+    const hafsql = require('../utils/hafsql');
+    const [{ head }] = await hafsql.query('select block_num as head from hafsql.follows order by block_num desc limit 1');
+    const since = Number(head) - days * BLOCKS_PER_DAY;
+    // Two queries, not one with OR: each uses its own index (HafSQL's advice).
+    const [followers, following] = await Promise.all([
+      hafsql.query('select follower_name as account, block_num as block from hafsql.follows where following_name = $1 and block_num >= $2 order by block_num desc limit 2000', [username, since]),
+      hafsql.query('select following_name as account, block_num as block from hafsql.follows where follower_name = $1 and block_num >= $2 order by block_num desc limit 2000', [username, since]),
+    ]);
+    res.json({ success: true, username, days, headBlock: Number(head), followers, following });
+  } catch (err) {
+    console.error('analytics/follows error:', err.message);
+    res.status(500).json({ success: false, error: 'internal error' });
+  }
+});
+
+// GET /creator-stats/hive-year?username=X&days=  → the account's year on Hive
+// from HafSQL, for the yearly recap (it used to page through account history
+// in the browser, up to 40 requests for busy accounts):
+//   fans:   who voted on / replied to its content, counted once per post
+//   author: post rewards (HBD, HIVE, VESTS), in total and per permlink
+//   ads:    3Speak ad revenue payments (amount, symbol, memo)
+// One result per account and window is kept for 30 minutes.
+const HIVE_YEAR_TTL_MS = 30 * 60 * 1000;
+const hiveYearCache = new Map(); // `${user}:${days}` -> { at, promise }
+// Service accounts that vote or reply on everything: not fans (same list as the recap).
+const NOT_FANS = ['hivebuzz', 'pizzabot', 'lolzbot', 'hiq.smartbot', 'beerlover', 'peak.snaps',
+  'ecency', 'threespeak', 'spk.beneficiary', 'hive.helps', 'tipu', 'wine.bot',
+  // Left out of every recap stat at the team's request.
+  'kgakakillerg', 'bpcvoter1'];
+
+async function loadHiveYear(username, days) {
+  const hafsql = require('../utils/hafsql');
+  const [{ head }] = await hafsql.query('select block_num as head from hafsql.follows order by block_num desc limit 1');
+  const sinceBlock = Number(head) - days * BLOCKS_PER_DAY;
+  // HAF operation ids carry their block number in the high 32 bits.
+  const minId = (BigInt(sinceBlock) << 32n).toString();
+  const [votes, replies, rewards, ads] = await Promise.all([
+    hafsql.query(`select voter as account, count(distinct permlink)::int as n from hafsql.operation_vote_view
+      where author = $1 and block_num >= $2 and voter <> $1 and weight > 0 group by voter`, [username, sinceBlock]),
+    hafsql.query(`select author as account, count(distinct permlink)::int as n from hafsql.operation_comment_view
+      where parent_author = $1 and block_num >= $2 and author <> $1 group by author`, [username, sinceBlock]),
+    hafsql.query(`select permlink, sum(hbd_payout)::float as hbd, sum(hive_payout)::float as hive, sum(vesting_payout)::float as vests, count(*)::int as n
+      from hafsql.operation_author_reward_table where author = $1 and id >= $2 group by permlink`, [username, minId]),
+    hafsql.query(`select amount::float as amount, symbol, memo from hafsql.operation_transfer_table
+      where to_account = $1 and id >= $2 and memo like '3Speak ad revenue share%'`, [username, minId]),
+  ]);
+  const fans = new Map();
+  const add = (rows, key) => rows.forEach((r) => {
+    if (NOT_FANS.includes(r.account)) return;
+    if (!fans.has(r.account)) fans.set(r.account, { account: r.account, votes: 0, comments: 0 });
+    fans.get(r.account)[key] = r.n;
+  });
+  add(votes, 'votes');
+  add(replies, 'comments');
+  const score = (f) => f.votes + f.comments * 3; // a reply says more than a vote
+  const author = { hbd: 0, hive: 0, vests: 0, count: 0, byPost: {} };
+  rewards.forEach((r) => {
+    author.hbd += r.hbd; author.hive += r.hive; author.vests += r.vests; author.count += r.n;
+    author.byPost[r.permlink] = { hbd: r.hbd, hive: r.hive, vests: r.vests };
+  });
+  return {
+    sinceBlock,
+    fans: [...fans.values()].sort((a, b) => score(b) - score(a) || a.account.localeCompare(b.account)).slice(0, 20),
+    author,
+    ads,
+  };
+}
+
+router.get(['/analytics/hive-year', '/creator-stats/hive-year'], async (req, res) => {
+  try {
+    const username = String(req.query.username || '').toLowerCase();
+    if (!HIVE_RE.test(username)) return res.status(400).json({ success: false, error: 'invalid username' });
+    const days = parseDays(req) || 365;
+    const key = `${username}:${days}`;
+    let hit = hiveYearCache.get(key);
+    if (!hit || Date.now() - hit.at > HIVE_YEAR_TTL_MS) {
+      hit = { at: Date.now(), promise: loadHiveYear(username, days) };
+      hiveYearCache.set(key, hit);
+      hit.promise.catch(() => hiveYearCache.delete(key));
+      // Keep the cache small.
+      if (hiveYearCache.size > 500) hiveYearCache.delete(hiveYearCache.keys().next().value);
+    }
+    res.json({ success: true, username, days, ...(await hit.promise) });
+  } catch (err) {
+    console.error('analytics/hive-year error:', err.message);
+    res.status(500).json({ success: false, error: 'internal error' });
+  }
+});
+
 // GET /analytics/has-data?username=X&permlink=Y
 router.get(['/analytics/has-data', '/creator-stats/has-data'], async (req, res) => {
   try {
