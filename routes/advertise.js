@@ -39,7 +39,7 @@ const { ObjectId } = require('mongodb');
 const { getDb } = require('../utils/db');
 const { verifyHiveSignedMessage, verifyHiveAuthority, verifyDelegateVouch } = require('../utils/hiveAuth');
 const { hiveRpcBatch } = require('../utils/hive');
-const { getSnapshot, runOnce } = require('../services/adInventory');
+const { getSnapshot, runOnce, liveAudiences } = require('../services/adInventory');
 const { ObjectId: AdObjectId } = require('mongodb');
 const { CREATIVE_STATES, missingAssetFor } = require('../utils/adModel');
 const {
@@ -415,6 +415,9 @@ router.get('/inventory', featureVisible, async (req, res) => {
         error: 'Inventory forecast has not run yet',
       });
     }
+    // Audio and uploads are read live when this snapshot predates them, so the page
+    // never says "not measured" about numbers that are in the database.
+    const { audio, uploads } = await liveAudiences(snap);
     res.set('Cache-Control', 'public, max-age=900');
     res.json({
       success: true,
@@ -448,20 +451,20 @@ router.get('/inventory', featureVisible, async (req, res) => {
         note: `These figures cover the whole of 3Speak. Ads are still in a closed trial and currently run only on ${ADS_ALLOWED_OWNERS.map((o) => `@${o}`).join(', ')}'s videos, so a booking made today would reach far less than the numbers below.`,
       } : { active: false, owners: [], note: null },
       // The audio player's audience and the 3speak.tv uploads, for their own tabs.
-      // Null until the forecast has run with them.
-      audio: snap.audio ? {
-        measuredDays: snap.audio.measuredDays,
-        since: snap.audio.since,
-        listensPerDay: snap.audio.listensPerDay,
-        tracks: snap.audio.tracks,
-        listenHours: snap.audio.listenHours,
-        catalogue: snap.audio.catalogue,
-        trial: snap.audio.trial,
-        trialListensPerDay: snap.audio.trialListensPerDay,
-        slots: snap.audio.slots,
-        countries: snap.audio.countries,
+      // Null only when reading them failed.
+      audio: audio ? {
+        measuredDays: audio.measuredDays,
+        since: audio.since,
+        listensPerDay: audio.listensPerDay,
+        tracks: audio.tracks,
+        listenHours: audio.listenHours,
+        catalogue: audio.catalogue,
+        trial: audio.trial,
+        trialListensPerDay: audio.trialListensPerDay,
+        slots: audio.slots,
+        countries: audio.countries,
       } : null,
-      uploads: snap.uploads || null,
+      uploads: uploads || null,
       // Stated openly on purpose. An advertiser who can see how much traffic we
       // threw away trusts the number that is left; one who only sees the headline
       // has no reason to.

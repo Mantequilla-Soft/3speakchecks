@@ -2698,11 +2698,19 @@ router.post('/:sid/posted', servingVisible, express.json({ limit: '2kb' }), asyn
     // served — so an old upload cannot be pointed at to settle a new spot.
     // Named directly, as adCampaigns.js and shorts.js do — there is no config constant
     // for it and inventing one here would make two names for one collection.
+    // An audio upload (the audio upload modal plays the same spot) lives in embed-audio,
+    // found by its own permlink or the Hive post it is linked to.
+    const since = new Date(new Date(session.startedAt).getTime() - 60 * 60 * 1000);
     const video = await db.collection('embed-video').findOne({
       owner: session.viewer,
       $or: [{ permlink }, { hive_permlink: permlink }],
-      createdAt: { $gte: new Date(new Date(session.startedAt).getTime() - 60 * 60 * 1000) },
-    }, { projection: { _id: 1 } });
+      createdAt: { $gte: since },
+    }, { projection: { _id: 1 } })
+      || await db.collection('embed-audio').findOne({
+        owner: session.viewer,
+        $or: [{ permlink }, { post_permlink: permlink }],
+        createdAt: { $gte: since },
+      }, { projection: { _id: 1 } });
     if (!video) return res.json({ ok: false, reason: 'no_matching_upload' });
 
     await recordDelivery({

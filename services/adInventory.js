@@ -188,9 +188,9 @@ function slotPipeline(percent, since, ownerFilter, duration) {
  * young log would read as a dead one. `trialListensPerDay` is the part a booking
  * reaches today: audio spots play only on AD_AUDIO_TICKER_ALLOWED_OWNERS' audio.
  *
- * UPLOADS reads `embed-video`: uploads made on 3speak.tv (frontend_app '3speak-tv'),
- * which is where the pre-upload spot plays, once per upload. Other apps' uploads
- * never see it, so they are not counted. */
+ * UPLOADS reads `embed-video` (uploads made on 3speak.tv, frontend_app '3speak-tv';
+ * other apps' video uploads never see the pre-upload spot) and `embed-audio` (every
+ * audio upload: 3speak.tv's and Snapie's carry the same frontend_app). */
 const LISTEN_LOG = process.env.LISTEN_LOG_COLLECTION || 'listen-durations';
 const LISTENED = { $ifNull: ['$contentSeconds', { $ifNull: ['$listenedSeconds', 0] }] };
 const LISTEN_REACHED = { $ifNull: ['$maxPosition', { $ifNull: ['$lastPosition', LISTENED] }] };
@@ -262,28 +262,41 @@ async function computeAudio(db, since, windowDays, excludedOwners) {
 
 async function computeUploads(db, since, windowDays) {
   const since7 = new Date(Date.now() - 7 * DAY_MS);
-  const [f] = await db.collection('embed-video').aggregate([
-    { $match: { frontend_app: '3speak-tv', createdAt: { $gte: since } } },
-    { $facet: {
-      total: [{ $group: {
-        _id: null,
-        n: { $sum: 1 },
-        shorts: { $sum: { $cond: [{ $eq: ['$short', true] }, 1, 0] } },
-        creators: { $addToSet: '$owner' },
-      } }, { $project: { n: 1, shorts: 1, creators: { $size: '$creators' } } }],
-      recent7: [{ $match: { createdAt: { $gte: since7 } } }, { $count: 'n' }],
-    } },
-  ]).toArray();
-  const total = (f.total || [])[0] || { n: 0, shorts: 0, creators: 0 };
-  const recent7 = ((f.recent7 || [])[0] || {}).n || 0;
+  const [[v], [a]] = await Promise.all([
+    db.collection('embed-video').aggregate([
+      { $match: { frontend_app: '3speak-tv', createdAt: { $gte: since } } },
+      { $facet: {
+        total: [{ $group: {
+          _id: null,
+          n: { $sum: 1 },
+          shorts: { $sum: { $cond: [{ $eq: ['$short', true] }, 1, 0] } },
+          creators: { $addToSet: '$owner' },
+        } }],
+        recent7: [{ $match: { createdAt: { $gte: since7 } } }, { $count: 'n' }],
+      } },
+    ]).toArray(),
+    // Audio has its own collection. 3speak.tv's audio upload and Snapie's write the
+    // same frontend_app, so every audio upload counts.
+    db.collection('embed-audio').aggregate([
+      { $match: { createdAt: { $gte: since } } },
+      { $facet: {
+        total: [{ $group: { _id: null, n: { $sum: 1 }, creators: { $addToSet: '$owner' } } }],
+        recent7: [{ $match: { createdAt: { $gte: since7 } } }, { $count: 'n' }],
+      } },
+    ]).toArray(),
+  ]);
+  const vt = (v.total || [])[0] || { n: 0, shorts: 0, creators: [] };
+  const at = (a.total || [])[0] || { n: 0, creators: [] };
+  const recent7 = (((v.recent7 || [])[0] || {}).n || 0) + (((a.recent7 || [])[0] || {}).n || 0);
   const perDay = (n) => Math.round((n / windowDays) * 10) / 10;
   return {
-    uploads: total.n,
+    uploads: vt.n + at.n,
     // Trailing 7 days, like the video sessions: the number a booking is likeliest to see.
     uploadsPerDay: Math.round((recent7 / 7) * 10) / 10,
-    videosPerDay: perDay(total.n - total.shorts),
-    shortsPerDay: perDay(total.shorts),
-    creators: total.creators,
+    videosPerDay: perDay(vt.n - vt.shorts),
+    shortsPerDay: perDay(vt.shorts),
+    audioPerDay: perDay(at.n),
+    creators: new Set([...(vt.creators || []), ...(at.creators || [])]).size,
   };
 }
 
@@ -491,4 +504,24 @@ async function forecastPerDay({ percent, minVideoSeconds, maxVideoSeconds, roll 
   }
 }
 
-module.exports = { runOnce, getSnapshot, computeSnapshot, forecastPerDay };
+/**
+ * The audio and upload audiences straight from their collections, for a snapshot that
+ * does not carry them yet (written before they existed, or before the first run after
+ * a restart). The data is always there; only the cached copy can be missing.
+ */
+async function liveAudiences(snap) {
+  const db = getDb();
+  const windowDays = (snap && snap.windowDays) || AD_INVENTORY_WINDOW_DAYS;
+  const since = new Date(Date.now() - windowDays * DAY_MS);
+  const excluded = (snap && snap.excluded) ? [
+    ...((snap.excluded.suspectAccounts || []).map((s) => s.owner)),
+    ...(snap.excluded.optedOutAccounts || []),
+  ] : [];
+  const [audio, uploads] = await Promise.all([
+    snap && snap.audio ? snap.audio : computeAudio(db, since, windowDays, excluded).catch(() => null),
+    snap && snap.uploads ? snap.uploads : computeUploads(db, since, windowDays).catch(() => null),
+  ]);
+  return { audio, uploads };
+}
+
+module.exports = { runOnce, getSnapshot, computeSnapshot, forecastPerDay, liveAudiences };
