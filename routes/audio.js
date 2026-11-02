@@ -1,5 +1,6 @@
 const express = require('express');
 const crypto = require('crypto');
+const { PLAY_MIN_SECONDS, LISTEN_LOG_COUNTED_ELSEWHERE } = require('../utils/audioPlays');
 const router = express.Router();
 const { getDb } = require('../utils/db');
 const { decodePlaylistMeta } = require('../utils/playlistMeta');
@@ -89,12 +90,18 @@ const playlistJoin = [
 ];
 
 // Pipeline stages that overwrite each audio doc's `plays` with the *derived*
-// listen count = (number of audio-listen-log rows for the track) + the
-// consolidated `archivedListens` (older rows folded into embed-audio by the
-// consolidation worker). This is the single source of truth for listen counts;
-// the stored `plays` field is no longer trusted (it held legacy count-on-load
-// values and was reset to 0). Apply BEFORE a `$sort: { plays }` to sort by it,
-// or after `$limit` to derive only the returned page.
+// listen count, the single source of truth for listen counts (the stored
+// `plays` field held legacy count-on-load values and was reset to 0):
+//   - listening sessions from 3speak.tv's player and the audio.3speak.tv embed
+//     (`listen-durations`, routes/audioListen.js) that heard at least
+//     PLAY_MIN_SECONDS of audio, or half of a shorter track;
+//   - `audio-listen-log` rows: Snapie's plays and everything from before those
+//     sessions existed. Pay-per-listen rows written since then are left out,
+//     the same listen is already one of the sessions;
+//   - the consolidated `archivedListens` (older rows folded into embed-audio by
+//     services/listenConsolidation.js, which applies the same rule).
+// Apply BEFORE a `$sort: { plays }` to sort by it, or after `$limit` to derive
+// only the returned page.
 const listenCountStages = [
     {
         $lookup: {
@@ -102,9 +109,26 @@ const listenCountStages = [
             let: { perm: '$permlink' },
             pipeline: [
                 { $match: { $expr: { $eq: ['$permlink', '$$perm'] } } },
+                { $match: { $nor: [LISTEN_LOG_COUNTED_ELSEWHERE] } },
                 { $count: 'c' },
             ],
             as: '_llc',
+        },
+    },
+    {
+        $lookup: {
+            from: 'listen-durations',
+            let: { perm: '$permlink' },
+            pipeline: [
+                { $match: { $expr: { $and: [{ $eq: ['$kind', 'audio'] }, { $eq: ['$id', '$$perm'] }] } } },
+                { $match: { $expr: { $gte: [
+                    { $ifNull: ['$contentSeconds', 0] },
+                    { $min: [PLAY_MIN_SECONDS, { $multiply: [{ $ifNull: ['$duration', 0] }, 0.5] }] },
+                ] } } },
+                { $match: { contentSeconds: { $gt: 0 } } },
+                { $count: 'c' },
+            ],
+            as: '_ldc',
         },
     },
     {
@@ -112,12 +136,13 @@ const listenCountStages = [
             plays: {
                 $add: [
                     { $ifNull: [{ $arrayElemAt: ['$_llc.c', 0] }, 0] },
+                    { $ifNull: [{ $arrayElemAt: ['$_ldc.c', 0] }, 0] },
                     { $ifNull: ['$archivedListens', 0] },
                 ],
             },
         },
     },
-    { $project: { _llc: 0 } },
+    { $project: { _llc: 0, _ldc: 0 } },
 ];
 
 // Build a Mongo permlink filter from one or more auto-tag names (OR semantics).
@@ -1029,3 +1054,6 @@ router.get('/:permlink/subtitles', async (req, res) => {
 });
 
 module.exports = router;
+
+// For tests: the derived listen count.
+router._test = { listenCountStages };
