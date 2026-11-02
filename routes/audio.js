@@ -1,6 +1,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const { PLAY_MIN_SECONDS, LISTEN_LOG_COUNTED_ELSEWHERE } = require('../utils/audioPlays');
+const { getCurationCounts } = require('../utils/curation');
 const router = express.Router();
 const { getDb } = require('../utils/db');
 const { decodePlaylistMeta } = require('../utils/playlistMeta');
@@ -144,6 +145,30 @@ const listenCountStages = [
     },
     { $project: { _llc: 0, _ldc: 0 } },
 ];
+
+// Hypes (3Speak reshares: distinct people, the author's own left out, from the
+// cached curation map in utils/curation.js, keyed by Hive author/permlink) as
+// `hypes` on each audio doc. A hype is a deliberate act, so in the popular
+// ranking it weighs as much as HYPE_WEIGHT plays.
+const HYPE_WEIGHT = 3;
+async function hypeStages(db) {
+    const counts = await getCurationCounts(db);
+    const list = [];
+    for (const [k, c] of counts) if (c.reshares > 0) list.push({ k, v: c.reshares });
+    const key = { $concat: [{ $toLower: { $ifNull: ['$owner', ''] } }, '/', { $ifNull: ['$post_permlink', ''] }] };
+    return [{
+        $addFields: {
+            hypes: {
+                $let: {
+                    vars: { m: { $filter: { input: { $literal: list }, cond: { $eq: ['$$this.k', key] } } } },
+                    in: { $ifNull: [{ $arrayElemAt: ['$$m.v', 0] }, 0] },
+                },
+            },
+        },
+    }];
+}
+// What the popular ranking weighs: plays plus weighted hypes.
+const popularityExpr = { $add: [{ $ifNull: ['$plays', 0] }, { $multiply: [HYPE_WEIGHT, { $ifNull: ['$hypes', 0] }] }] };
 
 // Build a Mongo permlink filter from one or more auto-tag names (OR semantics).
 // Returns null if no valid tags. Always queries the subtitles-tags collection.
@@ -512,10 +537,10 @@ router.get('/', async (req, res) => {
             ];
         }
 
-        // Sort: popular = derived listen count, else newest/duration.
+        // Sort: popular = derived listen count plus weighted hypes, else newest/duration.
         const popularSort = req.query.sort === 'popular';
         let sort = { createdAt: -1 };
-        if (popularSort) sort = { plays: -1, createdAt: -1 };
+        if (popularSort) sort = { _rank: -1, createdAt: -1 };
         if (req.query.sort === 'longest') sort = { duration: -1 };
         if (req.query.sort === 'shortest') sort = { duration: 1 };
 
@@ -557,11 +582,13 @@ router.get('/', async (req, res) => {
         // Derive `plays` from the listen log. When sorting by popularity the
         // derived count must exist before the $sort; otherwise derive it after
         // paging so only the returned page pays for the lookup.
+        const hypes = await hypeStages(db);
         const pipeline = [{ $match: audioQuery }];
         if (popularSort) {
-            pipeline.push(...listenCountStages, { $sort: sort }, { $skip: skip }, { $limit: limit });
+            pipeline.push(...listenCountStages, ...hypes, { $addFields: { _rank: popularityExpr } },
+                { $sort: sort }, { $skip: skip }, { $limit: limit }, { $project: { _rank: 0 } });
         } else {
-            pipeline.push({ $sort: sort }, { $skip: skip }, { $limit: limit }, ...listenCountStages);
+            pipeline.push({ $sort: sort }, { $skip: skip }, { $limit: limit }, ...listenCountStages, ...hypes);
         }
         pipeline.push(...subtitleStages, ...playlistJoin);
 
@@ -683,9 +710,8 @@ router.get('/grouped', async (req, res) => {
         //  - constrained to a recent window + a decaying recency boost for
         //    brand-new audio (so fresh tracks surface and old tracks with years
         //    of plays don't dominate), honoring a tighter caller `from`, and
-        //  - the popularity signal is the DERIVED listen count (listenCountStages
-        //    sets `plays` = audio-listen-log rows + archivedListens), since the
-        //    stored `plays` field is no longer trusted.
+        //  - the popularity signal is the DERIVED listen count (listenCountStages;
+        //    the stored `plays` field is no longer trusted) plus weighted hypes.
         const POPULAR_WINDOW_DAYS = 60;
         const POPULAR_BOOST_DAYS = 7;
         const POPULAR_RECENCY_BOOST = 3;
@@ -700,7 +726,8 @@ router.get('/grouped', async (req, res) => {
         const popular = await audioCollection.aggregate([
             { $match: popularMatch },
             ...listenCountStages,
-            { $match: { plays: { $gt: 0 } } },
+            ...(await hypeStages(db)),
+            { $match: { $or: [{ plays: { $gt: 0 } }, { hypes: { $gt: 0 } }] } },
             {
                 $addFields: {
                     _ageDays: { $divide: [{ $subtract: ['$$NOW', '$createdAt'] }, 86400000] },
@@ -710,7 +737,7 @@ router.get('/grouped', async (req, res) => {
                 $addFields: {
                     _score: {
                         $multiply: [
-                            { $ifNull: ['$plays', 0] },
+                            popularityExpr,
                             {
                                 $add: [
                                     1,
@@ -1056,4 +1083,4 @@ router.get('/:permlink/subtitles', async (req, res) => {
 module.exports = router;
 
 // For tests: the derived listen count.
-router._test = { listenCountStages };
+router._test = { listenCountStages, hypeStages, popularityExpr };
