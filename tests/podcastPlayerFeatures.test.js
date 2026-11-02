@@ -72,6 +72,15 @@ function mockCollection(name) {
       for (const k of Object.keys(update.$unset || {})) delete doc[k];
       return { matchedCount: upserted ? 0 : 1, modifiedCount: 1, upsertedCount: upserted };
     },
+    bulkWrite: async (ops) => {
+      for (const { updateOne: u } of ops) {
+        let doc = rows().find((d) => matches(d, u.filter));
+        if (!doc) { doc = { ...u.filter }; rows().push(doc); }
+        Object.assign(doc, u.update.$set || {});
+        for (const [k, x] of Object.entries(u.update.$max || {})) doc[k] = doc[k] === undefined || x > doc[k] ? x : doc[k];
+      }
+      return { ok: 1 };
+    },
   };
 }
 jest.mock('../utils/db', () => ({ getDb: () => ({ collection: mockCollection }) }));
@@ -655,5 +664,32 @@ describe('a parser upgrade re-reads stored shows', () => {
     expect(parsedByCurrent({})).toBe(false);
     expect(parsedByCurrent({ parse_version: PARSE_VERSION - 1 })).toBe(false);
     expect(parsedByCurrent({ parse_version: PARSE_VERSION })).toBe(true);
+  });
+});
+
+// ─── Listening progress: outside episodes and 3Speak tracks ──────────────────
+
+describe('listening progress', () => {
+  const EP = `${'a'.repeat(24)}:${'B'.repeat(16)}`;
+  const TRACK = 'c'.repeat(24);
+  const save = (items) => request(app).post('/podcasts/progress')
+    .send({ user: 'alice', items, signature: 'good-alice', timestamp: Date.now() });
+
+  it('saves and reads a 3Speak track by its embed-audio id, with no show', async () => {
+    const res = await save([{ id: TRACK, pos: 290, dur: 300 }, { id: EP, pos: 10, dur: 600 }]);
+    expect(res.status).toBe(200);
+    const track = store.podcast_progress.find((r) => r.ep === TRACK);
+    expect(track.feed_id).toBeUndefined();
+    expect(track.done).toBe(true);
+    expect(String(store.podcast_progress.find((r) => r.ep === EP).feed_id)).toBe('a'.repeat(24));
+
+    const read = await request(app).get(`/podcasts/progress?user=alice&ids=${TRACK},${EP}`);
+    expect(read.body.progress[TRACK]).toMatchObject({ done: true });
+    expect(read.body.progress[EP]).toMatchObject({ pos: 10, done: false });
+  });
+
+  it('still refuses ids of any other shape', async () => {
+    const res = await save([{ id: 'not-an-id', pos: 1, dur: 2 }]);
+    expect(res.status).toBe(400);
   });
 });
