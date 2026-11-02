@@ -940,7 +940,7 @@ router.get('/playlists', async (req, res) => {
         }
         const audioDocs = await db.collection('embed-audio').find(
             audioQuery,
-            { projection: { owner: 1, permlink: 1, post_permlink: 1, title: 1, thumbnail_url: 1, duration: 1, audio_cid: 1, category: 1 } },
+            { projection: { owner: 1, permlink: 1, post_permlink: 1, title: 1, thumbnail_url: 1, duration: 1, audio_cid: 1, category: 1, createdAt: 1 } },
         ).toArray();
         const audioByKey = new Map();
         for (const a of audioDocs) audioByKey.set(`${a.owner}|${a.post_permlink}`, a);
@@ -975,6 +975,8 @@ router.get('/playlists', async (req, res) => {
                         thumbnail_url: a.thumbnail_url || null,
                         duration: a.duration,
                         category: a.category || null,
+                        // The player queues an album oldest first.
+                        createdAt: a.createdAt || null,
                     };
                 });
             // Cover priority: playlist's own image → album meta → any track
