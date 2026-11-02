@@ -21,8 +21,10 @@ const { ENABLE_MONGO_WRITES } = require('../utils/config');
  * Public like the playlists endpoint it replaces for reading: history is not
  * gated there either.
  *
- * `type`: shorts = `short: true`; videos = everything else, because older rows
- * never had the flag set (same rule as the playlists service).
+ * `type`: shorts = `short: true`; audio = `audio: true` (3Speak audio the player
+ * recorded once it was really listened to); videos = everything else, because
+ * older rows never had the short flag set (same rule as the playlists service).
+ * Audio entries come back as `embed-audio` docs flagged `_audio`.
  * `since`: entries whose LAST watch is at or after it.
  * ──────────────────────────────────────────────────────────────────── */
 
@@ -75,10 +77,44 @@ async function classifyUnflagged(db, username) {
   })), { ordered: false });
 }
 
+/**
+ * Settle `audio` on this user's history rows that never got it. The playlists
+ * service stores only `short`, so an audio listen is recognised here, once per
+ * row, by matching our own `embed-audio` (asset permlink or Hive post permlink).
+ */
+async function classifyAudio(db, username) {
+  if (!ENABLE_MONGO_WRITES) return;
+  const history = db.collection('watch_history');
+  const rows = await history.find(
+    { username, audio: { $exists: false } },
+    { projection: { author: 1, permlink: 1 } },
+  ).limit(CLASSIFY_BATCH).toArray();
+  if (!rows.length) return;
+
+  const permlinks = [...new Set(rows.map((r) => r.permlink))];
+  const projection = { owner: 1, permlink: 1, post_permlink: 1 };
+  const [byAsset, byPost] = await Promise.all([
+    db.collection('embed-audio').find({ permlink: { $in: permlinks } }, { projection }).toArray(),
+    db.collection('embed-audio').find({ post_permlink: { $in: permlinks } }, { projection }).toArray(),
+  ]);
+  const isAudio = new Set([
+    ...byAsset.map((a) => `${a.owner}/${a.permlink}`),
+    ...byPost.map((a) => `${a.owner}/${a.post_permlink}`),
+  ]);
+
+  await history.bulkWrite(rows.map((r) => ({
+    updateOne: {
+      filter: { _id: r._id, audio: { $exists: false } },
+      update: { $set: { audio: isAudio.has(`${r.author}/${r.permlink}`) } },
+    },
+  })), { ordered: false });
+}
+
 function historyFilter(username, type, since) {
   const filter = { username };
   if (type === 'shorts') filter.short = true;
-  else if (type === 'videos') filter.short = { $ne: true };
+  else if (type === 'audio') filter.audio = true;
+  else if (type === 'videos') { filter.short = { $ne: true }; filter.audio = { $ne: true }; }
   if (since > 0) filter.last_watched_at = { $gte: new Date(since * 1000) };
   return filter;
 }
@@ -124,7 +160,7 @@ router.get('/watched/:username', async (req, res) => {
     if (!username || username.length > 64) {
       return res.status(400).json({ success: false, error: 'Invalid username' });
     }
-    const type = ['videos', 'shorts'].includes(req.query.type) ? req.query.type : '';
+    const type = ['videos', 'shorts', 'audio'].includes(req.query.type) ? req.query.type : '';
     const since = Math.max(0, parseInt(req.query.since, 10) || 0);
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), MAX_LIMIT);
@@ -133,13 +169,13 @@ router.get('/watched/:username', async (req, res) => {
     const history = db.collection('watch_history');
     // Before counting, so the tabs split on the real answer. Never fatal: an
     // unclassified row only lands in the wrong tab.
-    await classifyUnflagged(db, username).catch((err) => {
+    await Promise.all([classifyUnflagged(db, username), classifyAudio(db, username)]).catch((err) => {
       console.error('[watched-feed] classify failed:', err && err.message);
     });
 
     // Both tab counts on every call: the tabs label themselves with them, and
     // they follow the date filter, so they cannot be fetched once and reused.
-    const [rows, videosCount, shortsCount] = await Promise.all([
+    const [rows, videosCount, shortsCount, audioCount] = await Promise.all([
       history.find(historyFilter(username, type, since))
         .sort({ last_watched_at: -1 })
         .skip((page - 1) * limit)
@@ -147,7 +183,26 @@ router.get('/watched/:username', async (req, res) => {
         .toArray(),
       history.countDocuments(historyFilter(username, 'videos', since)),
       history.countDocuments(historyFilter(username, 'shorts', since)),
+      history.countDocuments(historyFilter(username, 'audio', since)),
     ]);
+
+    // Audio entries: the track's own embed-audio doc, the shape every audio tile
+    // renders. Matched by asset permlink or Hive post permlink, like videos.
+    const audioRows = rows.filter((r) => r.audio === true);
+    const audioDocs = audioRows.length
+      ? await db.collection('embed-audio').find({
+        status: 'published',
+        $or: audioRows.flatMap((r) => [
+          { owner: r.author, permlink: r.permlink },
+          { owner: r.author, post_permlink: r.permlink },
+        ]),
+      }).toArray()
+      : [];
+    const audioByKey = new Map();
+    for (const a of audioDocs) {
+      audioByKey.set(`${a.owner}/${a.permlink}`, a);
+      if (a.post_permlink && !audioByKey.has(`${a.owner}/${a.post_permlink}`)) audioByKey.set(`${a.owner}/${a.post_permlink}`, a);
+    }
 
     // History rows carry whichever permlink the player had: the asset id for
     // newer uploads, the Hive permlink for others. Match either, in one query.
@@ -179,6 +234,20 @@ router.get('/watched/:username', async (req, res) => {
     const videos = [];
     for (const r of rows) {
       const key = `${r.author}/${r.permlink}`;
+      if (r.audio === true) {
+        const a = audioByKey.get(key);
+        if (a) {
+          videos.push({
+            ...a,
+            _id: String(a._id),
+            _audio: true,
+            _historyKey: key,
+            watched_at: Math.floor(new Date(r.last_watched_at || r.watched_at).getTime() / 1000),
+            watch_count: r.watch_count || 1,
+          });
+        }
+        continue;
+      }
       const ev = byKey.get(key);
       const legacy = ev ? null : legacyByKey.get(key);
       // A video we no longer hold anywhere is left out, as the page always did.
@@ -198,14 +267,16 @@ router.get('/watched/:username', async (req, res) => {
       });
     }
 
-    const total = type === 'shorts' ? shortsCount : (type === 'videos' ? videosCount : videosCount + shortsCount);
+    const total = type === 'shorts' ? shortsCount
+      : type === 'audio' ? audioCount
+        : type === 'videos' ? videosCount : videosCount + shortsCount + audioCount;
     res.json({
       success: true,
       page,
       limit,
       total,
       totalPages: Math.max(1, Math.ceil(total / limit)),
-      counts: { videos: videosCount, shorts: shortsCount },
+      counts: { videos: videosCount, shorts: shortsCount, audio: audioCount },
       videos,
     });
   } catch (error) {
