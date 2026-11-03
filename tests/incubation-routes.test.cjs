@@ -46,6 +46,17 @@ const { MongoClient } = require('mongodb');
     { permlink: 'v2', owner: 'alice' },
     { permlink: 'v3', owner: 'someone-else' },
   ]);
+  await d.collection('incubation_listen').insertMany([
+    { handle: 'alice', kind: 'audio', id: 'a1', listenedSeconds: 300.4 },
+    { handle: 'alice', kind: 'podcast', id: 'e1', listenedSeconds: 600 },
+    { handle: 'bob', kind: 'audio', id: 'a1', listenedSeconds: 999 },
+  ]);
+  await d.collection('embed-audio').insertMany([
+    { permlink: 'a1', owner: 'alice', status: 'published' },
+    { permlink: 'a2', owner: 'alice', status: 'deleted' },
+    { permlink: 'a3', owner: 'alice', status: 'failed' },
+    { permlink: 'a4', owner: 'someone-else', status: 'published' },
+  ]);
 
   const { connectToMongo } = require('../utils/db');
   await connectToMongo();
@@ -98,10 +109,23 @@ const { MongoClient } = require('mongodb');
   const viaReal = await req('GET', '/incubation/internal/watch/alice', { headers: { 'X-Real-IP': '1.2.3.4' } });
   check('X-Real-IP alone also counts as proxied', viaReal.status === 404, viaReal);
 
+  const listen = await req('GET', '/incubation/internal/listen/alice');
+  check('listen sums this handle only', listen.body?.seconds === 900 && listen.body?.handle === 'alice', listen.body);
+  check('listen is internal only', (await req('GET', '/incubation/internal/listen/alice', { headers: { 'X-Real-IP': '1.2.3.4' } })).status === 404);
+  check('listen refuses a malformed handle', (await req('GET', '/incubation/internal/listen/Not%20A%20Handle')).status === 400);
+  const audio = await req('GET', '/incubation/internal/audio/alice');
+  check('audio counts live uploads, not deleted or failed ones', audio.body?.uploads === 1 && audio.body?.handle === 'alice', audio.body);
+  check('audio is internal only', (await req('GET', '/incubation/internal/audio/alice', { headers: { 'X-Forwarded-For': '1.2.3.4' } })).status === 404);
+
   const claim = await req('POST', '/incubation/internal/claim-assets', { body: { handle: 'alice', hiveUsername: 'alice-hive' } });
   check('claim moves only that handle\'s uploads', claim.body?.claimed === 2, claim.body);
   const again = await req('POST', '/incubation/internal/claim-assets', { body: { handle: 'alice', hiveUsername: 'alice-hive' } });
-  check('claim is idempotent', again.body?.claimed === 0, again.body);
+  check('claim moves that handle\'s audio too', claim.body?.audioClaimed === 3, claim.body);
+  check('claim is idempotent', again.body?.claimed === 0 && again.body?.audioClaimed === 0, again.body);
+  const movedAudio = await d.collection('embed-audio').findOne({ permlink: 'a1' });
+  check('claimed audio records where it came from', movedAudio.owner === 'alice-hive' && movedAudio.owner_claimed_from === 'alice', movedAudio);
+  const otherAudio = await d.collection('embed-audio').findOne({ permlink: 'a4' });
+  check('someone else\'s audio is untouched', otherAudio.owner === 'someone-else', otherAudio);
   const other = await d.collection('embed-video').findOne({ permlink: 'v3' });
   check('someone else\'s upload is untouched', other.owner === 'someone-else', other);
   const same = await req('POST', '/incubation/internal/claim-assets', { body: { handle: 'carol', hiveUsername: 'carol' } });
