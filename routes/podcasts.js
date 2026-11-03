@@ -961,6 +961,62 @@ router.post('/progress', express.json({ limit: '8kb' }), async (req, res) => {
   }
 });
 
+// Continue listening (the audio page's Mine): what the listener left half way,
+// newest first, ready to play. Their own listening history, so it takes the same
+// session vouch as saving progress (a POST, so the vouch stays out of URLs and logs).
+// Outside episodes come with their show; 3Speak tracks are the published
+// embed-audio rows, as GET /audio lists them. Gone or unreadable ones are left out.
+const CONTINUE_MAX = 12;
+const CONTINUE_MIN_POS = 15; // a few seconds in is a sample, not something to continue
+
+router.post('/progress/recent', express.json({ limit: '2kb' }), async (req, res) => {
+  const user = await proveProgressUser(req.body || {});
+  if (!user) return res.status(401).json({ success: false, error: 'Invalid signature' });
+  try {
+    const db = getDb();
+    const rows = await db.collection(PROGRESS)
+      .find({ user, done: { $ne: true }, pos: { $gte: CONTINUE_MIN_POS } }, { projection: { ep: 1, pos: 1, dur: 1, at: 1 } })
+      .sort({ at: -1 }).limit(CONTINUE_MAX * 3).toArray();
+    const epIds = rows.map((r) => r.ep).filter((id) => EPISODE_RE.test(id));
+    const trackIds = rows.map((r) => r.ep).filter((id) => TRACK_RE.test(id));
+    const [eps, tracks] = await Promise.all([
+      epIds.length ? db.collection(EPISODES).find({ _id: { $in: epIds } }, { projection: EPISODE_LIST }).toArray() : [],
+      trackIds.length ? db.collection('embed-audio').find({ _id: { $in: trackIds.map((id) => new ObjectId(id)) }, status: 'published' }).toArray() : [],
+    ]);
+    const feedIds = [...new Set(eps.map((e) => hexOf(e.feed_id)))];
+    const [feeds, follows] = await Promise.all([
+      feedIds.length ? db.collection(FEEDS).find({ _id: { $in: feedIds.map((id) => new ObjectId(id)) } }, { projection: FEED_CARD }).toArray() : [],
+      // A private show's episodes only while the listener still follows it.
+      feedIds.length ? db.collection(SUBS).find({ _id: { $in: feedIds.map((id) => `${user}|${id}`) } }, { projection: { _id: 1 } }).toArray() : [],
+    ]);
+    await fillMissingArt(feeds);
+    const feedById = new Map(feeds.map((f) => [f._id.toHexString(), f]));
+    const followed = new Set(follows.map((f) => String(f._id).split('|')[1]));
+    const epById = new Map(eps.map((e) => [e._id, e]));
+    const trackById = new Map(tracks.map((a) => [a._id.toHexString(), a]));
+
+    const items = [];
+    for (const r of rows) {
+      if (items.length >= CONTINUE_MAX) break;
+      const base = { id: r.ep, pos: r.pos, dur: r.dur, at: r.at };
+      const ep = epById.get(r.ep);
+      if (ep) {
+        const feed = feedById.get(hexOf(ep.feed_id));
+        if (!feed || ((ep.private || feed.private) && !followed.has(hexOf(ep.feed_id)))) continue;
+        items.push({ ...base, kind: 'episode', episode: presentEpisode(ep), feed: feedCard(feed) });
+        continue;
+      }
+      const track = trackById.get(r.ep);
+      if (track) items.push({ ...base, kind: 'track', track });
+    }
+    res.set('Cache-Control', 'no-store');
+    res.json({ success: true, items });
+  } catch (err) {
+    console.error('[podcasts] continue listening:', err.message);
+    res.status(500).json({ success: false, error: 'could not load' });
+  }
+});
+
 // ─── Writes ───────────────────────────────────────────────────────────────────
 
 /** 3Speak's own channel feeds belong in the 3Speak tab, not here. */

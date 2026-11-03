@@ -103,6 +103,8 @@ async function ensureIndexes() {
     db.collection(EPISODES).createIndex({ feed_id: 1, published_at: -1 }),
     db.collection(EPISODES).createIndex({ feed_id: 1, first_seen_at: -1 }),
     db.collection(PROGRESS).createIndex({ user: 1, feed_id: 1 }),
+    // Continue listening: one listener's newest unfinished (routes/podcasts.js).
+    db.collection(PROGRESS).createIndex({ user: 1, at: -1 }),
     db.collection(PROGRESS).createIndex({ at: 1 }, { expireAfterSeconds: 180 * 24 * 3600 }),
   ]);
 }
