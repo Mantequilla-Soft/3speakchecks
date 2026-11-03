@@ -22,6 +22,7 @@
  */
 
 const { getDb } = require('../utils/db');
+const { countedElsewhere } = require('../utils/audioPlays');
 
 const LISTEN_LOG_COLLECTION = 'audio-listen-log';
 const AUDIO_COLLECTION = 'embed-audio';
@@ -78,13 +79,15 @@ async function runConsolidation(now = new Date()) {
     // eslint-disable-next-line no-constant-condition
     while (true) {
         // eslint-disable-next-line no-await-in-loop
-        const batch = await log.find(query).project({ _id: 1, permlink: 1, payable: 1 }).limit(BATCH).toArray();
+        const batch = await log.find(query).project({ _id: 1, permlink: 1, payable: 1, ppl: 1, createdAt: 1 }).limit(BATCH).toArray();
         if (batch.length === 0) break;
 
         const perTrack = new Map();
         for (const r of batch) {
             const t = perTrack.get(r.permlink) || { total: 0, payable: 0 };
-            t.total += 1;
+            // A listen also kept as a listening session is already in the
+            // play count (utils/audioPlays.js): not archived a second time.
+            if (!countedElsewhere(r)) t.total += 1;
             if (r.payable === true) t.payable += 1;
             perTrack.set(r.permlink, t);
         }
