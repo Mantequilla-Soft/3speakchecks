@@ -1141,7 +1141,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
 
     const b = req.body || {};
     const owner = str(b.owner, 32).toLowerCase();
-    const permlink = str(b.permlink, 64);
+    let permlink = str(b.permlink, 64);
     const viewer = str(b.viewer, 32).toLowerCase() || null;
     // Frequency capping for viewers we cannot name. The client generates this per
     // PAGE LOAD and holds it in memory only — never localStorage, never a cookie —
@@ -1199,6 +1199,27 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     /* The pre-upload gate has no video behind it. It runs before anything is posted, so
      * there is no owner and no permlink to validate, and demanding them would reject
      * every honest request from the surface. */
+    /* An outside podcast episode that is really 3Speak audio: someone follows a
+     * 3Speak RSS feed (routes/rss.js), or any feed whose episode links to the
+     * 3Speak post. The player knows the post from that link (owner + HIVE
+     * permlink, the same check that gives the episode votes and comments) and asks
+     * with `postPermlink`. It becomes the track's own embed-audio permlink here,
+     * before anything reads it, so the creator's audio settings, the track check
+     * in serveAudioSpot, the impression and the payout all treat the episode like
+     * the same audio played from 3Speak. No audio behind the post = no ad. */
+    if (surface === 'audio' && !permlink && b.postPermlink !== undefined) {
+      const postPermlink = str(b.postPermlink, 255);
+      if (!ID_RE.test(owner) || !ID_RE.test(postPermlink)) {
+        return res.status(400).json({ error: 'Invalid owner/postPermlink' });
+      }
+      const linked = await getDb().collection('embed-audio').findOne(
+        // A few rows store "author/permlink" (see routes/rss.js fromAudio).
+        { owner, post_permlink: { $in: [postPermlink, `${owner}/${postPermlink}`] } },
+        { projection: { permlink: 1 } },
+      );
+      if (!linked || !linked.permlink) return res.json({ ad: null, reason: 'no_audio' });
+      permlink = String(linked.permlink);
+    }
     if (surface !== 'upload' && (!ID_RE.test(owner) || !ID_RE.test(permlink))) {
       return res.status(400).json({ error: 'Invalid owner/permlink' });
     }
