@@ -3,7 +3,8 @@
  * (preview-player watchTracking.js): 3Speak's own audio AND outside podcast
  * episodes, from 3speak.tv's audio player and the audio.3speak.tv embed.
  *
- *   POST /audio/listen/start   { kind: 'audio'|'podcast', id, duration?, position?, source?, private? }
+ *   POST /audio/listen/start   { kind: 'audio'|'podcast', id, duration?, position?, source?, private?,
+ *                                incubationListener? }
  *        → { sid, token, beatSeconds } or { tracked: false, reason }
  *   POST /audio/listen/beat    { sid, token, position, rate?, hidden? }
  *   GET  /audio/listen/heatmap?kind=&id=   the "most replayed" curve of one item
@@ -43,6 +44,18 @@
  *   listener per UTC day; one row per (listener, kind, id), only ever raised ($max).
  * Recording is not paying: services/adPayouts.js pays from these rows only when the
  * listener pools are switched on (AD_LISTENER_*_POOL_PCT, default 0).
+ *
+ * Warm-up listening, `incubation_listen`, is the listening goal of the musician and
+ * podcaster warm-up tracks (read by GET /incubation/internal/listen/:handle), the
+ * audio twin of the player's incubation_watch. A warm-up user has no Hive name, so
+ * 3speak.tv sends their handle as `incubationListener`; it is a goal measure, never
+ * a reward, and it is kept apart from the ledger above (which pays Hive names):
+ * - only on 3speak.tv, not in private mode, not on your own track;
+ * - no consent, no % bar: it asks "how long have they listened?", not "did they
+ *   finish it?", so partial listens count for what they were;
+ * - wall-clock listening (listenedSeconds), so 3x speed does not triple it;
+ * - at most INCUBATION_LISTEN_MAX_SECONDS per item, one row per (handle, kind, id),
+ *   only ever raised ($max): replaying one track cannot build the goal.
  */
 const crypto = require('crypto');
 const express = require('express');
@@ -81,6 +94,16 @@ const SESSION_SECRET = crypto.randomBytes(32);
 const KINDS = new Set(['audio', 'podcast']);
 // A Hive account: listener rewards are paid on Hive, so a warm-up `~handle` never qualifies.
 const HIVE_ACCOUNT_RE = /^[a-z][a-z0-9.-]{2,15}$/;
+// A warm-up handle: the Hive account charset, because it has to be free to become
+// one at graduation. Same rule as the player (preview-player watchTracking.js).
+const INCUBATION_HANDLE_RE = /^[a-z0-9.-]{3,16}$/;
+const incubationName = (v) => {
+  const h = String(v || '').trim().toLowerCase();
+  return INCUBATION_HANDLE_RE.test(h) ? h : null;
+};
+const INCUBATION_LISTEN_COLLECTION = 'incubation_listen';
+// Per item, so the 15 minutes cannot come from one long track left playing.
+const INCUBATION_LISTEN_MAX_SECONDS = parseInt(process.env.INCUBATION_LISTEN_MAX_SECONDS, 10) || 1200;
 const LISTEN_VOUCH_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // Must match the vouch our API signs (preview-3speak server/index.cjs, /api/podcasts/signature).
 const listenVouchMessage = (user, timestamp) => ['3speak-podcasts', 'listen-vouch', user, 'session', String(timestamp)].join('|');
@@ -256,6 +279,35 @@ async function recordListenerReward(db, s, stats, now = new Date()) {
   }
 }
 
+/** Seconds of warm-up listening this session is worth (0 when it does not count). Pure. */
+function incubationListenSeconds(s, { listenedSeconds }) {
+  const handle = incubationName(s.incListener);
+  if (!handle || s.source !== '3speak' || s.private) return 0;
+  // Listening to your own upload on a loop is not listening to 3Speak.
+  if (s.owner && String(s.owner).toLowerCase() === handle) return 0;
+  return Math.min(Math.max(0, Math.round(listenedSeconds) || 0), INCUBATION_LISTEN_MAX_SECONDS);
+}
+
+/** A warm-up user's listening into incubation_listen. Never throws. */
+async function recordIncubationListen(db, s, stats, now = new Date()) {
+  try {
+    const seconds = incubationListenSeconds(s, stats);
+    if (seconds <= 0) return;
+    await db.collection(INCUBATION_LISTEN_COLLECTION).updateOne(
+      { handle: incubationName(s.incListener), kind: s.kind, id: s.id },
+      {
+        $max: { listenedSeconds: seconds },
+        $set: { owner: s.owner || null, feed_id: s.feed_id || null, at: now },
+        $setOnInsert: { firstAt: now },
+      },
+      { upsert: true },
+    );
+  } catch (err) {
+    // A goal measure must never break measuring.
+    console.error('[listen] incubation listen:', err.message);
+  }
+}
+
 let indexesEnsured = false;
 async function ensureIndexes(db) {
   if (indexesEnsured) return;
@@ -273,6 +325,9 @@ async function ensureIndexes(db) {
     await ledger.createIndex({ listener: 1, kind: 1, id: 1 }, { unique: true });
     await ledger.createIndex({ kind: 1, payoutId: 1 });   // what the payout reads
     await ledger.createIndex({ listener: 1, day: 1 });    // the daily allowance
+    const incListen = db.collection(INCUBATION_LISTEN_COLLECTION);
+    await incListen.createIndex({ handle: 1, kind: 1, id: 1 }, { unique: true }); // the upsert key
+    await incListen.createIndex({ handle: 1 });                                   // the goal's sum
   } catch (err) {
     indexesEnsured = false;
     console.error('[listen] indexes:', err.message);
@@ -333,6 +388,9 @@ router.post('/start', express.json({ limit: '4kb' }), limiter(60), async (req, r
       // Named only when our API vouched for it (see proveListener). Never copied
       // into listen-durations, which stays anonymous.
       listener,
+      // A warm-up handle (no Hive name, nothing vouched): only ever a goal measure,
+      // see recordIncubationListen. Fixed here, like the listener.
+      incListener: source === '3speak' ? incubationName(b.incubationListener) : null,
       country: isPrivate ? null : countryOf(clientIp(req)),
       private: isPrivate,
       userAgent: String(req.headers['user-agent'] || '').slice(0, 300),
@@ -390,7 +448,10 @@ router.post('/beat', express.json({ limit: '4kb' }), limiter(240), async (req, r
       },
       { upsert: true },
     );
-    if (beat.counted) await recordListenerReward(db, s, beat.stats);
+    if (beat.counted) {
+      await recordListenerReward(db, s, beat.stats);
+      await recordIncubationListen(db, s, beat.stats);
+    }
     res.json({ ...beat.stats, duration: s.duration, position: st.lastPosition });
   } catch (err) {
     console.error('[listen] beat:', err.message);
@@ -418,4 +479,4 @@ router.get('/heatmap', limiter(120), async (req, res) => {
 });
 
 module.exports = router;
-module.exports._test = { MAX_CONTIGUOUS_RATE, applyBeat, bucketIndex, resolveDuration, normalizeSource, clientIp, qualifies, creditSeconds, listenVouchMessage, proveListener, recordListenerReward, MAX_BEAT_CREDIT_MS, BUCKET_COUNT };
+module.exports._test = { MAX_CONTIGUOUS_RATE, applyBeat, bucketIndex, resolveDuration, normalizeSource, clientIp, qualifies, creditSeconds, listenVouchMessage, proveListener, recordListenerReward, incubationName, incubationListenSeconds, recordIncubationListen, INCUBATION_LISTEN_MAX_SECONDS, MAX_BEAT_CREDIT_MS, BUCKET_COUNT };

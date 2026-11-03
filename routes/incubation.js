@@ -13,8 +13,9 @@
 // to Hive.
 //
 // Two things stay HERE, because the data they touch is 3Speak's and never moved:
-// watch time (written by the player into incubation_watch) and the upload
-// records in embed-video. Both are INTERNAL routes for 3Speak's own API server
+// watch time (written by the player into incubation_watch), listening time
+// (written by routes/audioListen.js into incubation_listen) and the upload
+// records in embed-video and embed-audio. Both are INTERNAL routes for 3Speak's own API server
 // on this machine; see isInternal() below.
 
 const express = require('express');
@@ -425,6 +426,43 @@ router.get('/internal/watch/:handle', internalOnly, async (req, res) => {
     }
 });
 
+// GET /incubation/internal/listen/:handle — seconds of audio this warm-up user
+// has listened to (3Speak audio and outside podcast episodes), the listening goal
+// of the musician and podcaster tracks. routes/audioListen.js writes
+// incubation_listen from beats it times itself: wall-clock seconds, capped per item.
+router.get('/internal/listen/:handle', internalOnly, async (req, res) => {
+    try {
+        const handle = String(req.params.handle || '').toLowerCase();
+        if (!HANDLE_RE.test(handle)) return res.status(400).json({ error: 'Invalid handle' });
+        const [row] = await getDb().collection('incubation_listen').aggregate([
+            { $match: { handle } },
+            { $group: { _id: null, seconds: { $sum: '$listenedSeconds' } } },
+        ]).toArray();
+        res.json({ handle, seconds: Math.round(row?.seconds || 0) });
+    } catch (err) {
+        console.error('[incubation] internal listen:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
+// GET /incubation/internal/audio/:handle — how many audio uploads this warm-up
+// user has (embed-audio rows still owned by the handle), the upload goal of the
+// musician and podcaster tracks. Deleted and failed uploads do not count.
+router.get('/internal/audio/:handle', internalOnly, async (req, res) => {
+    try {
+        const handle = String(req.params.handle || '').toLowerCase();
+        if (!HANDLE_RE.test(handle)) return res.status(400).json({ error: 'Invalid handle' });
+        const uploads = await getDb().collection('embed-audio').countDocuments({
+            owner: handle,
+            status: { $nin: ['deleted', 'failed'] },
+        });
+        res.json({ handle, uploads });
+    } catch (err) {
+        console.error('[incubation] internal audio:', err.message);
+        res.status(500).json({ error: 'Internal error' });
+    }
+});
+
 /* ─── Advertiser business contact (warm-up accounts) ─────────────────────────
  *
  * 🚨 PRIVATE, OFF-CHAIN, FOREVER. An advertiser in warm-up gives us an email (required)
@@ -633,12 +671,12 @@ router.post('/internal/claim-assets', internalOnly, async (req, res) => {
         });
         // Same string: a no-op that would also sweep in anything uploaded after
         // graduation.
-        if (handle === hiveUsername) return res.json({ claimed: 0, reason: 'same_name', linksMoved });
-        const result = await getDb().collection('embed-video').updateMany(
-            { owner: handle },
-            { $set: { owner: hiveUsername, owner_claimed_from: handle, owner_claimed_at: new Date() } },
-        );
-        res.json({ claimed: result.modifiedCount, from: handle, to: hiveUsername, linksMoved });
+        if (handle === hiveUsername) return res.json({ claimed: 0, audioClaimed: 0, reason: 'same_name', linksMoved });
+        const claim = { $set: { owner: hiveUsername, owner_claimed_from: handle, owner_claimed_at: new Date() } };
+        const result = await getDb().collection('embed-video').updateMany({ owner: handle }, claim);
+        // Audio uploads (musician and podcaster tracks) move the same way.
+        const audio = await getDb().collection('embed-audio').updateMany({ owner: handle }, claim);
+        res.json({ claimed: result.modifiedCount, audioClaimed: audio.modifiedCount, from: handle, to: hiveUsername, linksMoved });
     } catch (err) {
         console.error('[incubation] internal claim-assets:', err.message);
         res.status(500).json({ error: 'Internal error' });
