@@ -131,7 +131,10 @@ router.get('/shorts', async (req, res) => {
     }
 });
 
-// Endpoint to get shorts "stories" — creators with unseen shorts in the past 7 days, grouped by creator
+// How long a short keeps its creator in the stories row above the feeds.
+const SHORTS_ROW_DAYS = Number(process.env.SHORTS_ROW_DAYS) > 0 ? Number(process.env.SHORTS_ROW_DAYS) : 3;
+
+// Endpoint to get shorts "stories" — creators with unseen shorts in the past SHORTS_ROW_DAYS (3) days, grouped by creator
 // Returns a list of creators with their unseen short count, plus whether the current user posted a short recently
 router.get('/shorts/stories', async (req, res) => {
     try {
@@ -141,9 +144,8 @@ router.get('/shorts/stories', async (req, res) => {
 
         const embedVideoCollection = db.collection('embed-video');
 
-        // Fetch published shorts from last 7 days
-        const sevenDaysAgo = new Date();
-        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+        // Fetch published shorts from the last SHORTS_ROW_DAYS days
+        const since = new Date(Date.now() - SHORTS_ROW_DAYS * 24 * 60 * 60 * 1000);
 
         const query = {
             short: true,
@@ -151,7 +153,7 @@ router.get('/shorts/stories', async (req, res) => {
             processed: true,
             listed_on_3speak: { $ne: false }, // hide unlisted shorts (matches the video feeds)
             embed_url: { $exists: true, $ne: null },
-            createdAt: { $gte: sevenDaysAgo },
+            createdAt: { $gte: since },
             owner: { $nin: [...HIDDEN_AUTHORS, ...hiddenListSync()] },
             ...unavailableMatch(), ...hiddenFromFeedMatch(),
             ...nsfwFilterHiveTags(req)
@@ -228,7 +230,7 @@ router.get('/shorts/stories', async (req, res) => {
         // Sort creators by unseen_count descending
         const creators = [...creatorMap.values()].sort((a, b) => b.unseen_count - a.unseen_count);
 
-        // Check if currentuser has posted a short in the last 7 days + get following list
+        // Check if currentuser has posted a short in the same window + get following list
         let currentUserHasShort = false;
         if (currentuser) {
             const [userShort, followingList] = await Promise.all([
@@ -236,7 +238,7 @@ router.get('/shorts/stories', async (req, res) => {
                     short: true,
                     status: 'published',
                     owner: currentuser,
-                    createdAt: { $gte: sevenDaysAgo }
+                    createdAt: { $gte: since }
                 }),
                 getFollowingList(currentuser)
             ]);
