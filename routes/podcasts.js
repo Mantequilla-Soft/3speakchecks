@@ -975,7 +975,7 @@ router.post('/progress/recent', express.json({ limit: '2kb' }), async (req, res)
   try {
     const db = getDb();
     const rows = await db.collection(PROGRESS)
-      .find({ user, done: { $ne: true }, pos: { $gte: CONTINUE_MIN_POS } }, { projection: { ep: 1, pos: 1, dur: 1, at: 1 } })
+      .find({ user, done: { $ne: true }, hidden: { $ne: true }, pos: { $gte: CONTINUE_MIN_POS } }, { projection: { ep: 1, pos: 1, dur: 1, at: 1 } })
       .sort({ at: -1 }).limit(CONTINUE_MAX * 3).toArray();
     const epIds = rows.map((r) => r.ep).filter((id) => EPISODE_RE.test(id));
     const trackIds = rows.map((r) => r.ep).filter((id) => TRACK_RE.test(id));
@@ -1014,6 +1014,25 @@ router.post('/progress/recent', express.json({ limit: '2kb' }), async (req, res)
   } catch (err) {
     console.error('[podcasts] continue listening:', err.message);
     res.status(500).json({ success: false, error: 'could not load' });
+  }
+});
+
+// Remove one from Continue listening (and Undo: `hidden: false`). Only that list
+// leaves it out: the position, the progress bars and the listen history stay.
+router.post('/progress/hide', express.json({ limit: '2kb' }), async (req, res) => {
+  const b = req.body || {};
+  const user = await proveProgressUser(b);
+  if (!user) return res.status(401).json({ success: false, error: 'Invalid signature' });
+  const id = String(b.id || '');
+  if (!PROGRESS_ID_RE(id)) return res.status(400).json({ success: false, error: 'invalid id' });
+  if (tooManyIn(progressBrake, user, 720)) return res.status(429).json({ success: false, error: 'too many updates' });
+  try {
+    const update = b.hidden === false ? { $unset: { hidden: '' } } : { $set: { hidden: true } };
+    const r = await getDb().collection(PROGRESS).updateOne({ _id: `${user}|${id}` }, update);
+    res.json({ success: true, found: r.matchedCount > 0 });
+  } catch (err) {
+    console.error('[podcasts] continue listening hide:', err.message);
+    res.status(500).json({ success: false, error: 'could not save' });
   }
 });
 

@@ -22,7 +22,7 @@ const at = (n) => new Date(Date.UTC(2026, 10, n));
 
 const DATA = {
   podcast_progress: [
-    { user: 'alice', ep: ep(FEED, 1), pos: 600, dur: 1800, at: at(5) },
+    { _id: `alice|${ep(FEED, 1)}`, user: 'alice', ep: ep(FEED, 1), pos: 600, dur: 1800, at: at(5) },
     { user: 'alice', ep: TRACK.toHexString(), pos: 90, dur: 240, at: at(4) },
     { user: 'alice', ep: ep(PRIV, 2), pos: 300, dur: 1200, at: at(6) },
     { user: 'alice', ep: GONE.toHexString(), pos: 50, dur: 200, at: at(7) },
@@ -65,6 +65,13 @@ function fakeDb() {
         return cur;
       },
       aggregate: () => ({ toArray: async () => [] }),
+      updateOne: async (q, u) => {
+        const doc = (DATA[name] || []).find((d) => matches(d, q));
+        if (!doc) return { matchedCount: 0 };
+        Object.assign(doc, u.$set || {});
+        for (const k of Object.keys(u.$unset || {})) delete doc[k];
+        return { matchedCount: 1 };
+      },
     }),
   };
 }
@@ -99,5 +106,18 @@ describe('continue listening', () => {
     DATA.podcast_subs = [{ _id: `alice|${PRIV.toHexString()}` }];
     const res = await ask({ user: 'alice', signature: 'good', timestamp: Date.now() });
     expect(res.body.items[0]).toMatchObject({ kind: 'episode', id: ep(PRIV, 2), feed: { private: true, url: '' } });
+  });
+
+  test('Remove hides one from the list only, and Undo brings it back', async () => {
+    const hide = (hidden) => request(app).post('/podcasts/progress/hide').send({ user: 'alice', signature: 'good', timestamp: Date.now(), id: ep(FEED, 1), hidden });
+    expect((await request(app).post('/podcasts/progress/hide').send({ user: 'alice', signature: 'bad', timestamp: Date.now(), id: ep(FEED, 1) })).status).toBe(401);
+    expect((await hide(true)).body).toMatchObject({ success: true, found: true });
+    let res = await ask({ user: 'alice', signature: 'good', timestamp: Date.now() });
+    expect(res.body.items.map((i) => i.id)).toEqual([TRACK.toHexString()]);
+    const row = DATA.podcast_progress.find((r) => r.ep === ep(FEED, 1));
+    expect(row).toMatchObject({ pos: 600, hidden: true });
+    await hide(false);
+    res = await ask({ user: 'alice', signature: 'good', timestamp: Date.now() });
+    expect(res.body.items[0].id).toBe(ep(FEED, 1));
   });
 });
