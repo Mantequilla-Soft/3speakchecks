@@ -3,13 +3,20 @@
  * (preview-player watchTracking.js): 3Speak's own audio AND outside podcast
  * episodes, from 3speak.tv's audio player and the audio.3speak.tv embed.
  *
- *   POST /audio/listen/start   { kind: 'audio'|'podcast', id, duration?, position?, source?, private? }
+ *   POST /audio/listen/start   { kind: 'audio'|'podcast', id, duration?, position?, source?, private?,
+ *                                owner?, postPermlink? }
  *        → { sid, token, beatSeconds } or { tracked: false, reason }
  *   POST /audio/listen/beat    { sid, token, position, rate?, hidden? }
  *   GET  /audio/listen/heatmap?kind=&id=   the "most replayed" curve of one item
  *
  * `id` is the embed-audio permlink for 3Speak audio, the episode id
  * (<feed id>:<hash>) for a podcast episode.
+ *
+ * A podcast episode that is really 3Speak audio (its link names the 3Speak post,
+ * utils/linkedAudio.js) comes with `owner` + `postPermlink` and is counted as that
+ * track (kind 'audio'): the creator's listening stats, the 3Speak audio listener
+ * pool and the own-track rule then apply as when it plays on 3Speak. No audio
+ * behind the post: it stays a podcast listen.
  *
  * How time is measured (the same rules as video, so the numbers compare):
  * - The server times every beat itself and credits at most MAX_BEAT_CREDIT_MS per
@@ -51,6 +58,7 @@ const { ipKeyGenerator } = rateLimit;
 const geoip = require('geoip-lite');
 const { getDb } = require('../utils/db');
 const { verifyDelegateVouch } = require('../utils/hiveAuth');
+const { linkedAudioPermlink } = require('../utils/linkedAudio');
 const {
   AD_SIGNING_DELEGATES, AD_VIEWER_PREFS_COLLECTION, AD_LISTENER_LISTEN_COLLECTION,
   AD_LISTENER_MIN_PCT, AD_LISTENER_MAX_SECONDS, AD_LISTENER_DAILY_MAX_SECONDS,
@@ -294,13 +302,17 @@ async function findItem(db, kind, id) {
 router.post('/start', express.json({ limit: '4kb' }), limiter(60), async (req, res) => {
   try {
     const b = req.body || {};
-    const kind = KINDS.has(b.kind) ? b.kind : '';
-    const id = typeof b.id === 'string' ? b.id.trim() : '';
+    let kind = KINDS.has(b.kind) ? b.kind : '';
+    let id = typeof b.id === 'string' ? b.id.trim() : '';
     if (!kind || !(kind === 'audio' ? AUDIO_ID_RE : EPISODE_RE).test(id)) {
       return res.status(400).json({ error: 'Invalid kind/id' });
     }
     const db = getDb();
     await ensureIndexes(db);
+    if (kind === 'podcast' && b.owner && b.postPermlink) {
+      const linked = await linkedAudioPermlink(db, b.owner, b.postPermlink);
+      if (linked) { kind = 'audio'; id = linked; }
+    }
     const item = await findItem(db, kind, id);
     if (!item) return res.status(404).json({ error: 'Not found' });
     const duration = Math.round(resolveDuration(b.duration, item.storedDuration));

@@ -35,6 +35,7 @@ const fs = require('fs');
 const router = express.Router();
 const { getDb } = require('../utils/db');
 const { adDecision, audioAdDecision, isPremiumViewer } = require('../utils/adEligibility');
+const { linkedAudioPermlink } = require('../utils/linkedAudio');
 const {
   AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_IMPRESSIONS_COLLECTION, ADVERTISERS_COLLECTION,
   AD_SELFPROMO_ALLOWED_OWNERS, AD_TICKER_ALLOWED_OWNERS, AD_TICKER_FREQUENCY_CAP_MINUTES,
@@ -54,8 +55,9 @@ const { formatOf } = require('../utils/adFormats');
 const { burnSegment } = require('../services/adBurner');
 const { isDatacenterIp } = require('../utils/datacenterIp');
 const {
-  AUDIO_TICKER_ENABLED, audioTickerAllowedOn, readyRendersFor, ttsFilePath,
+  AUDIO_TICKER_ENABLED, AUDIO_TICKER_ALLOWED_OWNERS, audioTickerAllowedOn, readyRendersFor, ttsFilePath,
 } = require('../utils/adTts');
+const { ObjectId } = require('mongodb');
 
 const SESSIONS = process.env.AD_SESSIONS_COLLECTION || 'ad_sessions';
 /* Owners whose content skips the two rules keyed on the viewer's ADDRESS: one ad per
@@ -64,6 +66,11 @@ const SESSIONS = process.env.AD_SESSIONS_COLLECTION || 'ad_sessions';
  * (AD_EXCLUDED_ACCOUNTS), so testing from the team's own networks has to work.
  * Every other cap (per campaign, per viewer / browser, rate limit, datacenter) stays.
  * Set-but-empty = nobody exempt. */
+// Spots on outside podcast episodes with no 3Speak creator behind them (their
+// creator share goes to the platform). On unless set to false.
+const AD_AUDIO_EXTERNAL_ENABLED = String(process.env.AD_AUDIO_EXTERNAL_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
+// An outside episode id as the podcast service makes it: <feed id>:<hash> (routes/audioListen.js).
+const EPISODE_RE = /^[0-9a-f]{24}:[A-Za-z0-9_-]{16}$/;
 const AD_IP_CAP_EXEMPT_OWNERS = String(process.env.AD_IP_CAP_EXEMPT_OWNERS ?? 'badadib')
   .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
 const ipCapExempt = (owner) => AD_IP_CAP_EXEMPT_OWNERS.includes(String(owner || '').toLowerCase());
@@ -986,21 +993,34 @@ function publicBaseOf(req) {
  * The AUDIO SPOT format (`audio_spot`) rides the same path with the advertiser's own
  * uploaded clip (utils/adAudioSpot.js) instead of speech, and no text: the player
  * shows the Ad label, the advertiser and the link. Same caps, click and impression. */
-async function serveAudioSpot({ req, res, db, b, owner, permlink, viewer, capId, country, app, decision }) {
+/** An outside episode has no creator settings: only the listener's side decides (premium = no ads). */
+async function outsideEpisodeDecision(viewer) {
+  const premium = await isPremiumViewer(viewer);
+  if (premium === null) return { ads: false, reason: 'unknown_premium_state' };
+  if (premium) return { ads: false, reason: 'premium_viewer' };
+  return { ads: true, reason: null };
+}
+
+async function serveAudioSpot({ req, res, db, b, owner, permlink, viewer, capId, country, app, decision, episode = null }) {
   if (!AUDIO_TICKER_ENABLED) return res.json({ ad: null, reason: 'audio_ads_off' });
   // Only a player that can play one is handed one.
   if (!(b.audioSpot === true || String(b.audioSpot) === 'true')) return res.json({ ad: null, reason: 'no_audio_spot' });
-  if (!audioTickerAllowedOn(owner)) return res.json({ ad: null, reason: 'owner_not_in_trial' });
+  // An outside episode has no owner to be in the trial; it runs only once the
+  // trial is open to everyone (allow-list empty).
+  if (episode ? AUDIO_TICKER_ALLOWED_OWNERS.length > 0 : !audioTickerAllowedOn(owner)) {
+    return res.json({ ad: null, reason: 'owner_not_in_trial' });
+  }
   // The creator's audio choice (account + this track) was decided in audioAdDecision.
   if (!decision.ads) return res.json({ ad: null, reason: decision.reason });
 
   // The track has to exist and be this owner's: the owner is who gets paid.
-  const track = await db.collection('embed-audio').findOne(
+  // An outside episode was checked in /session (it exists, its feed is public).
+  const track = episode ? null : await db.collection('embed-audio').findOne(
     { permlink, owner },
     { projection: { post_permlink: 1, duration: 1, mp3_duration: 1, status: 1 } },
   );
-  if (!track || (track.status && track.status !== 'published')) return res.json({ ad: null, reason: 'no_audio' });
-  const trackSeconds = Number(track.duration) || Number(track.mp3_duration) || null;
+  if (!episode && (!track || (track.status && track.status !== 'published'))) return res.json({ ad: null, reason: 'no_audio' });
+  const trackSeconds = episode ? episode.duration : (Number(track.duration) || Number(track.mp3_duration) || null);
 
   const now = new Date();
   const candidates = await db.collection(AD_CAMPAIGNS_COLLECTION).find({
@@ -1089,10 +1109,12 @@ async function serveAudioSpot({ req, res, db, b, owner, permlink, viewer, capId,
       clickUrl: creative.clickUrl || null,
       tts: render.hash,
     },
-    owner,
+    // No owner for an outside episode: nobody is credited the creator share.
+    owner: episode ? null : owner,
     // The Hive post, which is what payout resolves the community from.
-    permlink: track.post_permlink || permlink,
-    audioPermlink: permlink,
+    permlink: episode ? null : (track.post_permlink || permlink),
+    audioPermlink: episode ? null : permlink,
+    ...(episode ? { podcastEpisode: episode.id, podcastFeed: episode.feedId } : {}),
     viewer,
     capId,
     country,
@@ -1199,28 +1221,43 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     /* The pre-upload gate has no video behind it. It runs before anything is posted, so
      * there is no owner and no permlink to validate, and demanding them would reject
      * every honest request from the surface. */
-    /* An outside podcast episode that is really 3Speak audio: someone follows a
-     * 3Speak RSS feed (routes/rss.js), or any feed whose episode links to the
-     * 3Speak post. The player knows the post from that link (owner + HIVE
-     * permlink, the same check that gives the episode votes and comments) and asks
-     * with `postPermlink`. It becomes the track's own embed-audio permlink here,
-     * before anything reads it, so the creator's audio settings, the track check
-     * in serveAudioSpot, the impression and the payout all treat the episode like
-     * the same audio played from 3Speak. No audio behind the post = no ad. */
+    /* An outside podcast episode that is really 3Speak audio (utils/linkedAudio.js):
+     * the player asks with `postPermlink`, the HIVE permlink from the episode's
+     * link. It becomes the track's own embed-audio permlink here, before anything
+     * reads it, so the creator's audio settings, the track check in serveAudioSpot,
+     * the impression and the payout all treat the episode like the same audio
+     * played from 3Speak. No audio behind the post = no ad. */
     if (surface === 'audio' && !permlink && b.postPermlink !== undefined) {
-      const postPermlink = str(b.postPermlink, 255);
-      if (!ID_RE.test(owner) || !ID_RE.test(postPermlink)) {
+      if (!ID_RE.test(owner) || !ID_RE.test(str(b.postPermlink, 255))) {
         return res.status(400).json({ error: 'Invalid owner/postPermlink' });
       }
-      const linked = await getDb().collection('embed-audio').findOne(
-        // A few rows store "author/permlink" (see routes/rss.js fromAudio).
-        { owner, post_permlink: { $in: [postPermlink, `${owner}/${postPermlink}`] } },
-        { projection: { permlink: 1 } },
-      );
-      if (!linked || !linked.permlink) return res.json({ ad: null, reason: 'no_audio' });
-      permlink = String(linked.permlink);
+      const linked = await linkedAudioPermlink(getDb(), owner, b.postPermlink);
+      if (!linked) return res.json({ ad: null, reason: 'no_audio' });
+      permlink = linked;
     }
-    if (surface !== 'upload' && (!ID_RE.test(owner) || !ID_RE.test(permlink))) {
+    /* An outside podcast episode with NO 3Speak creator behind it (owner, 2026-11-03):
+     * it carries ads too, and the creator's share of those goes to the platform. That
+     * needs nothing in the payout: an impression without an owner counts in the
+     * creator pool's per-impression rate but credits nobody (adPayouts.js skips it),
+     * so its share stays with the platform. The episode has to exist and its feed be
+     * public: a private feed is paid or password-protected, no ads in it. */
+    let episode = null;
+    if (surface === 'audio' && !owner && b.episodeId !== undefined) {
+      if (!AD_AUDIO_EXTERNAL_ENABLED) return res.json({ ad: null, reason: 'external_audio_ads_off' });
+      const episodeId = str(b.episodeId, 64);
+      if (!EPISODE_RE.test(episodeId)) return res.status(400).json({ error: 'Invalid episodeId' });
+      const ep = await getDb().collection('podcast_episodes').findOne(
+        { _id: episodeId }, { projection: { feed_id: 1, duration: 1 } },
+      );
+      if (!ep) return res.json({ ad: null, reason: 'no_audio' });
+      const feedHex = String(ep.feed_id || episodeId.slice(0, 24));
+      const feed = ObjectId.isValid(feedHex)
+        ? await getDb().collection('podcast_feeds').findOne({ _id: new ObjectId(feedHex) }, { projection: { private: 1 } })
+        : null;
+      if (!feed || feed.private) return res.json({ ad: null, reason: 'private_feed' });
+      episode = { id: episodeId, feedId: feedHex, duration: Number(ep.duration) || null };
+    }
+    if (surface !== 'upload' && !episode && (!ID_RE.test(owner) || !ID_RE.test(permlink))) {
       return res.status(400).json({ error: 'Invalid owner/permlink' });
     }
     // A shorts spot is its own item in the feed, and the pre-upload gate runs before
@@ -1236,7 +1273,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
      * actually delivered (repeatPlayed, from recordDelivery). Wrapping res.json
      * covers every one of the many return paths below without touching them. */
     if (surface !== 'upload' && !ipCapExempt(owner)) {
-      const repeatKey = repeatKeyOf(callerIp(req), owner, permlink);
+      const repeatKey = episode ? repeatKeyOf(callerIp(req), 'podcast', episode.id) : repeatKeyOf(callerIp(req), owner, permlink);
       if (await seenRepeat(repeatKey)) return res.json({ ad: null, reason: 'repeat_viewer' });
       if (await isOwnerConnection(callerIp(req), owner)) return res.json({ ad: null, reason: 'own_video' });
       const sendJson = res.json.bind(res);
@@ -1394,9 +1431,11 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
 
     // Premium viewers and opted-out creators, decided in one place. Audio has its
     // own creator settings ("Ads on your audio" and the uploader's per-track switch).
-    const decision = surface === 'audio'
-      ? await audioAdDecision({ viewer, owner, permlink })
-      : await adDecision({ viewer, owner, permlink });
+    const decision = episode
+      ? await outsideEpisodeDecision(viewer)
+      : surface === 'audio'
+        ? await audioAdDecision({ viewer, owner, permlink })
+        : await adDecision({ viewer, owner, permlink });
     if (!decision.ads) {
       // `premium` is echoed so the player can flag the watch session accordingly.
       // The inventory forecast excludes premium sessions, and it can only do that
@@ -1544,7 +1583,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
 
     // The audio player's spoken ticker. Its own branch: nothing to splice, no banner.
     if (surface === 'audio') {
-      return await serveAudioSpot({ req, res, db, b, owner, permlink, viewer, capId, country, app, decision });
+      return await serveAudioSpot({ req, res, db, b, owner, permlink, viewer, capId, country, app, decision, episode });
     }
 
     // How long THIS video is, for campaigns that target video length. Looked up
@@ -2577,6 +2616,8 @@ router.post('/:sid/ticker-shown', servingVisible, express.json({ limit: '1kb' })
         ...(session.surface === 'live' ? { live: true } : {}),
         // Heard in the audio player rather than seen over a video.
         ...(session.surface === 'audio' ? { audio: true } : {}),
+        // An outside podcast episode: no creator, the creator share stays with the platform.
+        ...(session.podcastEpisode ? { podcastEpisode: session.podcastEpisode, podcastFeed: session.podcastFeed || null } : {}),
       },
       completed: true,
     });
