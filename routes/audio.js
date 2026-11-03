@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const { getDb } = require('../utils/db');
+const { warmupAudio, capWarmup } = require('../utils/warmupAudio');
 const { decodePlaylistMeta } = require('../utils/playlistMeta');
 const { nsfwFilter } = require('../utils/filters');
 
@@ -494,6 +495,11 @@ router.get('/', async (req, res) => {
         if (req.query.sort === 'longest') sort = { duration: -1 };
         if (req.query.sort === 'shortest') sort = { duration: 1 };
 
+        // Warm-up audio: one per account, three in all (utils/warmupAudio.js). A
+        // lookup of one track by its permlink (its own page, a shared link) is not capped.
+        const warm = await warmupAudio();
+        if (!req.query.permlink) capWarmup(audioQuery, warm);
+
         const total = await audioCollection.countDocuments(audioQuery);
         const totalPages = Math.ceil(total / limit);
 
@@ -570,6 +576,9 @@ router.get('/', async (req, res) => {
         }
 
         const audio = await audioCollection.aggregate(pipeline).toArray();
+        // A warm-up track has no Hive post yet: the page leaves out votes and tips.
+        const warmOwners = new Set(warm.owners);
+        for (const a of audio) if (warmOwners.has(a.owner)) a.warmup = true;
 
         res.json({
             page,
@@ -608,6 +617,9 @@ router.get('/grouped', async (req, res) => {
             if (!isNaN(minDur) && minDur > 0) baseMatch.duration.$gte = minDur;
             if (!isNaN(maxDur) && maxDur > 0) baseMatch.duration.$lte = maxDur;
         }
+
+        // Warm-up audio: one per account, three in all (utils/warmupAudio.js).
+        capWarmup(baseMatch, await warmupAudio());
 
         const categories = ['podcast', 'voice_message', 'song', 'audiobook', 'interview'];
         const groups = {};
@@ -863,6 +875,11 @@ router.get('/creators', async (req, res) => {
             }
         }
 
+        // Warm-up audio: one per account, three in all (utils/warmupAudio.js).
+        const warm = await warmupAudio();
+        capWarmup(audioQuery, warm);
+        const warmOwners = new Set(warm.owners);
+
         // Get distinct audio creators with play counts (within the filtered set).
         // Derive each track's listen count first, then sum per owner.
         const creators = await audioCollection.aggregate([
@@ -885,6 +902,7 @@ router.get('/creators', async (req, res) => {
                 totalPlays: c.totalPlays,
                 latestTrack: c.latestTrack,
                 avatar: `https://images.hive.blog/u/${c._id}/avatar/small`,
+                ...(warmOwners.has(c._id) ? { warmup: true } : {}),
             })),
         });
     } catch (error) {
