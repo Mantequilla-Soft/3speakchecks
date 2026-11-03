@@ -850,6 +850,8 @@ async function settlePeriod(db, period, deps = {}) {
 
   for (const imp of impressions) {
     const owner = imp.owner;
+    // No creator (an ad on an outside podcast episode, routes/adServe.js): the
+    // impression counts in `rate` but credits nobody, so its share stays with the platform.
     if (!owner) continue;
     if (!prefCache.has(owner)) prefCache.set(owner, await communitySharePctOf(db, owner));
     const communityPct = prefCache.get(owner);
