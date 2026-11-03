@@ -447,7 +447,8 @@ router.get('/internal/listen/:handle', internalOnly, async (req, res) => {
 
 // GET /incubation/internal/audio/:handle — how many audio uploads this warm-up
 // user has (embed-audio rows still owned by the handle), the upload goal of the
-// musician and podcaster tracks. Deleted and failed uploads do not count.
+// musician and podcaster tracks. Deleted and failed uploads do not count, and
+// neither do voice messages (a recorded reply is not publishing audio).
 router.get('/internal/audio/:handle', internalOnly, async (req, res) => {
     try {
         const handle = String(req.params.handle || '').toLowerCase();
@@ -455,6 +456,7 @@ router.get('/internal/audio/:handle', internalOnly, async (req, res) => {
         const uploads = await getDb().collection('embed-audio').countDocuments({
             owner: handle,
             status: { $nin: ['deleted', 'failed'] },
+            context_type: { $ne: 'voice_message' },
         });
         res.json({ handle, uploads });
     } catch (err) {
