@@ -36,6 +36,7 @@ const router = express.Router();
 const { getDb } = require('../utils/db');
 const { adDecision, audioAdDecision, isPremiumViewer } = require('../utils/adEligibility');
 const { linkedAudioPermlink } = require('../utils/linkedAudio');
+const { warmupAudio } = require('../utils/warmupAudio');
 const {
   AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_IMPRESSIONS_COLLECTION, ADVERTISERS_COLLECTION,
   AD_SELFPROMO_ALLOWED_OWNERS, AD_TICKER_ALLOWED_OWNERS, AD_TICKER_FREQUENCY_CAP_MINUTES,
@@ -1001,7 +1002,7 @@ async function outsideEpisodeDecision(viewer) {
   return { ads: true, reason: null };
 }
 
-async function serveAudioSpot({ req, res, db, b, owner, permlink, viewer, capId, country, app, decision, episode = null }) {
+async function serveAudioSpot({ req, res, db, b, owner, permlink, viewer, capId, country, app, decision, episode = null, warmupTrack = false }) {
   if (!AUDIO_TICKER_ENABLED) return res.json({ ad: null, reason: 'audio_ads_off' });
   // Only a player that can play one is handed one.
   if (!(b.audioSpot === true || String(b.audioSpot) === 'true')) return res.json({ ad: null, reason: 'no_audio_spot' });
@@ -1109,12 +1110,14 @@ async function serveAudioSpot({ req, res, db, b, owner, permlink, viewer, capId,
       clickUrl: creative.clickUrl || null,
       tts: render.hash,
     },
-    // No owner for an outside episode: nobody is credited the creator share.
-    owner: episode ? null : owner,
+    // No owner for an outside episode or a warm-up track: nobody is credited the
+    // creator share, it stays with the platform.
+    owner: (episode || warmupTrack) ? null : owner,
     // The Hive post, which is what payout resolves the community from.
-    permlink: episode ? null : (track.post_permlink || permlink),
+    permlink: (episode || warmupTrack) ? null : (track.post_permlink || permlink),
     audioPermlink: episode ? null : permlink,
     ...(episode ? { podcastEpisode: episode.id, podcastFeed: episode.feedId } : {}),
+    ...(warmupTrack ? { warmupOwner: owner } : {}),
     viewer,
     capId,
     country,
@@ -1260,6 +1263,13 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     if (surface !== 'upload' && !episode && (!ID_RE.test(owner) || !ID_RE.test(permlink))) {
       return res.status(400).json({ error: 'Invalid owner/permlink' });
     }
+    /* A warm-up account's own audio (utils/warmupAudio.js): its owner is a handle
+     * with no Hive account, so there is nobody the payout could send a creator
+     * share to (and its Hive post does not exist yet). It carries ads like an
+     * outside-only episode: no owner on the impression, the creator share stays
+     * with the platform, and no creator settings to ask. */
+    const warmupTrack = surface === 'audio' && !episode && owner
+      && (await warmupAudio()).owners.includes(owner);
     // A shorts spot is its own item in the feed, and the pre-upload gate runs before
     // any video exists at all, so neither has a content manifest to splice into and
     // neither is asked for one.
@@ -1431,7 +1441,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
 
     // Premium viewers and opted-out creators, decided in one place. Audio has its
     // own creator settings ("Ads on your audio" and the uploader's per-track switch).
-    const decision = episode
+    const decision = (episode || warmupTrack)
       ? await outsideEpisodeDecision(viewer)
       : surface === 'audio'
         ? await audioAdDecision({ viewer, owner, permlink })
@@ -1583,7 +1593,7 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
 
     // The audio player's spoken ticker. Its own branch: nothing to splice, no banner.
     if (surface === 'audio') {
-      return await serveAudioSpot({ req, res, db, b, owner, permlink, viewer, capId, country, app, decision, episode });
+      return await serveAudioSpot({ req, res, db, b, owner, permlink, viewer, capId, country, app, decision, episode, warmupTrack });
     }
 
     // How long THIS video is, for campaigns that target video length. Looked up
@@ -2618,6 +2628,8 @@ router.post('/:sid/ticker-shown', servingVisible, express.json({ limit: '1kb' })
         ...(session.surface === 'audio' ? { audio: true } : {}),
         // An outside podcast episode: no creator, the creator share stays with the platform.
         ...(session.podcastEpisode ? { podcastEpisode: session.podcastEpisode, podcastFeed: session.podcastFeed || null } : {}),
+        // A warm-up account's own track: also no creator, the share stays with the platform.
+        ...(session.warmupOwner ? { warmupOwner: session.warmupOwner } : {}),
       },
       completed: true,
     });
