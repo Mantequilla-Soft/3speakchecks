@@ -70,6 +70,10 @@ const { FEEDS, EPISODES, SUBS, PROGRESS } = podcastFeeds.collections;
 const USER_RE = /^~?[a-z0-9][a-z0-9.-]{1,31}$/;
 const ID_RE = /^[0-9a-f]{24}$/;
 const EPISODE_RE = /^[0-9a-f]{24}:[A-Za-z0-9_-]{16}$/;
+// Listening progress also covers 3Speak's own audio tracks, keyed by their
+// embed-audio _id (the player leaves finished ones out of a playlist it queues).
+const TRACK_RE = /^[0-9a-f]{24}$/;
+const PROGRESS_ID_RE = (id) => EPISODE_RE.test(id) || TRACK_RE.test(id);
 const MAX_FEEDS_PER_USER = Math.max(1, parseInt(process.env.PODCAST_MAX_FEEDS_PER_USER, 10) || 150);
 const MAX_URLS_PER_CALL = 200;
 const NOTIFY_DAYS = 14;
@@ -909,7 +913,7 @@ router.get('/progress', async (req, res) => {
     if (!ID_RE.test(String(req.query.feed))) return res.status(400).json({ success: false, error: 'invalid feed' });
     q.feed_id = new ObjectId(String(req.query.feed));
   } else {
-    const ids = String(req.query.ids || '').split(',').filter((id) => EPISODE_RE.test(id)).slice(0, 150);
+    const ids = String(req.query.ids || '').split(',').filter((id) => PROGRESS_ID_RE(id)).slice(0, 150);
     if (!ids.length) return res.json({ success: true, progress: {} });
     q._id = { $in: ids.map((id) => `${user}|${id}`) };
   }
@@ -927,7 +931,7 @@ router.post('/progress', express.json({ limit: '8kb' }), async (req, res) => {
   const b = req.body || {};
   const user = await proveProgressUser(b);
   if (!user) return res.status(401).json({ success: false, error: 'Invalid signature' });
-  const items = (Array.isArray(b.items) ? b.items : []).slice(0, 20).filter((it) => it && EPISODE_RE.test(String(it.id)));
+  const items = (Array.isArray(b.items) ? b.items : []).slice(0, 20).filter((it) => it && PROGRESS_ID_RE(String(it.id)));
   if (!items.length) return res.status(400).json({ success: false, error: 'no items' });
   if (tooManyIn(progressBrake, user, 720)) return res.status(429).json({ success: false, error: 'too many updates' });
   const now = new Date();
@@ -942,7 +946,8 @@ router.post('/progress', express.json({ limit: '8kb' }), async (req, res) => {
         filter: { _id: `${user}|${id}` },
         // `done` only ever goes from false to true: playing a finished episode
         // again from the start keeps it marked as listened.
-        update: { $set: { user, ep: id, feed_id: new ObjectId(id.slice(0, 24)), pos, dur, at: now }, $max: { done } },
+        // An outside episode's id starts with its show's; a 3Speak track has no show.
+        update: { $set: { user, ep: id, ...(EPISODE_RE.test(id) ? { feed_id: new ObjectId(id.slice(0, 24)) } : {}), pos, dur, at: now }, $max: { done } },
         upsert: true,
       },
     };
