@@ -347,8 +347,8 @@ function publicCampaign(c, creative, watch = null) {
     // the raw field.
     format: formatOf(c).key,
     formatLabel: formatOf(c).label,
-    // Video tickers only: is it read aloud in the audio player too? Absent = yes.
-    audioSpot: formatOf(c).key === 'video_ticker' ? c.audioSpot !== false : null,
+    // Video tickers only: is it read aloud in the audio player too? Opt-in: absent = no.
+    audioSpot: formatOf(c).key === 'video_ticker' ? c.audioSpot === true : null,
     creativeKind: formatOf(c).creativeKind,
     // EVERY kind this flight can run, not just the one its copy leads with. The
     // banner takes a still or a video; publishing only the singular is what made the
@@ -842,9 +842,9 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
       // utils/adFormats.js — but only campaigns booked BEFORE formats existed should
       // ever be relying on that default.
       format: formatKey,
-      // A video ticker is also read aloud in the audio player unless the advertiser
-      // turns that off (the "Also play on audio" switch). Only the ticker has it.
-      ...(formatKey === 'video_ticker' ? { audioSpot: b.audioSpot !== false } : {}),
+      // A video ticker is also read aloud in the audio player only when the advertiser
+      // ticks "Also play it in the audio player" (opt-in). Only the ticker has it.
+      ...(formatKey === 'video_ticker' ? { audioSpot: b.audioSpot === true } : {}),
       status: STATES.AWAITING_PAYMENT,
       slotPercent,
       days,

@@ -987,8 +987,9 @@ function publicBaseOf(req) {
  *   - only owners in AD_AUDIO_TICKER_ALLOWED_OWNERS (default badadib);
  *   - the creator's own audio settings decide (utils/adEligibility.js
  *     audioAdDecision): "Ads on your audio", overridden per track by the uploader;
- *   - a video ticker's booking can refuse audio (`audioSpot: false`, the advertiser's
- *     switch on /advertise);
+ *   - a video ticker plays on audio ONLY when its booking says so (`audioSpot: true`,
+ *     the advertiser's switch on /advertise). Opt-in (owner, 2026-11-01): tickers booked
+ *     before audio existed carry no choice and stay on video;
  *   - only a message whose speech is rendered; until then it simply is not offered.
  *
  * The AUDIO SPOT format (`audio_spot`) rides the same path with the advertiser's own
@@ -1046,8 +1047,7 @@ async function serveAudioSpot({ req, res, db, b, owner, permlink, viewer, capId,
 
   const now = new Date();
   const candidates = await db.collection(AD_CAMPAIGNS_COLLECTION).find({
-    format: { $in: ['video_ticker', 'audio_spot'] },
-    audioSpot: { $ne: false },
+    $or: [{ format: 'audio_spot' }, { format: 'video_ticker', audioSpot: true }],
     ...selfPromoFilter(owner),
     status: { $in: [STATES.SCHEDULED, STATES.RUNNING] },
     startAt: { $lte: now },
