@@ -41,6 +41,7 @@ const {
   AD_VIEWER_POOL_PCT, AD_VIEWER_WATCH_COLLECTION, AD_REFERRAL_POOL_PCT,
   AD_ENCODER_POOL_PCT, AD_ENCODER_ACCOUNT,
   AD_LISTENER_AUDIO_POOL_PCT, AD_LISTENER_PODCAST_POOL_PCT, AD_LISTENER_LISTEN_COLLECTION,
+  AD_EARNER_REFERRAL_PCT, AD_EARNER_REFERRAL_DAYS,
 } = require('../utils/config');
 
 // Listener reward pools, by what was listened to (owner, 2026-10-30): 3Speak's own
@@ -58,7 +59,7 @@ const { hiveRpcBatch } = require('../utils/hive');
 const ACTIVE_KEY = (process.env.AD_PAYOUT_ACTIVE_KEY || '').trim();
 const SOURCE_ACCOUNT = (process.env.AD_PAYOUT_SOURCE || AD_PAYMENT_ACCOUNT || '').trim();
 const DAY_MS = 24 * 60 * 60 * 1000;
-const { referrersFor } = require('./adReferrals');
+const { referrersFor, referralsFor, PAID_SOURCES } = require('./adReferrals');
 
 const PERIOD_MS = () => AD_PAYOUT_PERIOD_DAYS * DAY_MS;
 const fmt3 = (n) => (Math.round(n * 1000) / 1000).toFixed(3);
@@ -341,6 +342,108 @@ async function planReferralPayouts(db, campaigns, period, deps = {}) {
   return { rows, poolHbd: Math.round(rows.reduce((a, r) => a + r.hbd, 0) * 1000) / 1000, skipped };
 }
 
+// What a referred user earns that counts toward their referrer's bonus: their OWN
+// creator, viewer and listener money. Never community rows (another party's
+// money) and never referral rows of any kind, so a bonus is never the basis of
+// another bonus (single level, owner 2026-11-04).
+const EARNER_KINDS = new Set(['creator', 'viewer', 'listener-audio', 'listener-podcast']);
+
+/**
+ * The earner referral bonus for this period, in native units.
+ *
+ * Whoever referred a user (link or invite only) gets AD_EARNER_REFERRAL_PCT of
+ * that user's own earner payouts while the user is within AD_EARNER_REFERRAL_DAYS
+ * of being referred (= signup: Butter Auth records it at the naming step). A
+ * period counts when it STARTS inside that window.
+ *
+ * 🚨 PAID ON TOP, BY THE PLATFORM. The earner rows are not touched: the referred
+ * user keeps 100%. Rows are kind 'earner-referral' and go through the same one
+ * merged write as everything else (unique on periodKey + account).
+ *
+ * 🚨 NEVER MORE THAN THE PLATFORM HAS LEFT. `roomHbd` is what the platform keeps
+ * from this period's shown revenue after every other share; if the bonuses add up
+ * to more, all of them are scaled down by the same factor.
+ *
+ * Same gates as the advertiser referral: the referrer must be a real Hive account
+ * (fails CLOSED), not reward-blocked, and not the earner. Butter Auth unreachable
+ * = no bonus this period (fails OPEN, the earner is unaffected either way).
+ */
+async function planEarnerReferralBonus(db, earnerRows, period, roomHbd, deps = {}) {
+  const empty = { rows: [], poolHbd: 0, skipped: [], scaled: 1 };
+  if (!(AD_EARNER_REFERRAL_PCT > 0) || !(AD_EARNER_REFERRAL_DAYS > 0) || !(roomHbd > 0)) return empty;
+
+  // Per earner: total HBD-equivalent and the assets it is actually paid in.
+  const byEarner = new Map();
+  for (const r of earnerRows || []) {
+    if (!r || !EARNER_KINDS.has(r.kind) || !(r.hbd > 0)) continue;
+    const acct = String(r.account || '').trim().toLowerCase();
+    if (!acct) continue;
+    const cur = byEarner.get(acct) || { hbd: 0, assets: {} };
+    cur.hbd += r.hbd;
+    for (const leg of r.amounts || []) {
+      const n = Number(leg?.amount) || 0;
+      if (leg?.symbol && n > 0) cur.assets[leg.symbol] = (cur.assets[leg.symbol] || 0) + n;
+    }
+    byEarner.set(acct, cur);
+  }
+  if (!byEarner.size) return empty;
+
+  const referrals = deps.referralsFor
+    ? await deps.referralsFor([...byEarner.keys()])
+    : await referralsFor([...byEarner.keys()]);
+  if (!referrals.size) return empty;
+
+  const windowMs = AD_EARNER_REFERRAL_DAYS * 864e5;
+  const candidates = [];
+  const skipped = [];
+  for (const [earner, ref] of referrals) {
+    if (!byEarner.has(earner) || !ref?.referrer) continue;
+    const referrer = String(ref.referrer).trim().toLowerCase();
+    if (!PAID_SOURCES.has(ref.source)) { skipped.push({ earner, referrer, why: `source_${ref.source || 'unknown'}` }); continue; }
+    const at = ref.referredAt instanceof Date ? ref.referredAt.getTime() : NaN;
+    if (!Number.isFinite(at)) { skipped.push({ earner, referrer, why: 'no_date' }); continue; }
+    if (period.start.getTime() >= at + windowMs) continue; // window over: not a skip, just done
+    if (referrer === earner) { skipped.push({ earner, referrer, why: 'self' }); continue; }
+    candidates.push({ earner, referrer });
+  }
+  if (!candidates.length) return { ...empty, skipped };
+
+  const names = [...new Set(candidates.map((c) => c.referrer))];
+  const real = await existingHiveAccounts(names, deps);
+  const blocked = await rewardBlockedSet(db, names);
+
+  const fraction = AD_EARNER_REFERRAL_PCT / 100;
+  const owed = new Map();
+  for (const { earner, referrer } of candidates) {
+    if (!real.has(referrer)) { skipped.push({ earner, referrer, why: 'no_such_account' }); continue; }
+    if (blocked.has(referrer)) { skipped.push({ earner, referrer, why: 'reward_blocked' }); continue; }
+    const acc = byEarner.get(earner);
+    const cur = owed.get(referrer) || { hbd: 0, assets: {} };
+    cur.hbd += acc.hbd * fraction;
+    cur.assets = mergeAssets(cur.assets, scaleAssets(acc.assets, fraction));
+    owed.set(referrer, cur);
+  }
+
+  const wantHbd = [...owed.values()].reduce((a, v) => a + v.hbd, 0);
+  const scaled = wantHbd > roomHbd ? roomHbd / wantHbd : 1;
+  if (scaled < 1) {
+    console.warn(`[adPayout] period ${period.key}: earner referral bonuses ${fmt3(wantHbd)} HBD exceed the platform's `
+      + `${fmt3(roomHbd)} HBD left — all scaled by ${scaled.toFixed(4)}`);
+  }
+
+  const rows = [...owed.entries()]
+    .map(([account, v]) => ({
+      account,
+      hbd: Math.floor(v.hbd * scaled * 1000) / 1000,
+      amounts: splitAmounts(scaled, Object.fromEntries(
+        Object.entries(v.assets).map(([sym, n]) => [sym, Math.floor(n * 1000) / 1000]),
+      )),
+      kind: 'earner-referral',
+    }))
+    .filter((r) => r.hbd > 0 && r.amounts.length);
+  return { rows, poolHbd: Math.round(rows.reduce((a, r) => a + r.hbd, 0) * 1000) / 1000, skipped, scaled };
+}
+
 /**
  * The encoders' cut for this period: AD_ENCODER_POOL_PCT of the revenue, as one
  * row for AD_ENCODER_ACCOUNT, in the assets the advertisers paid.
@@ -570,6 +673,18 @@ async function communitySharePctOf(db, owner) {
   return Math.min(n, AD_CREATOR_POOL_PCT);
 }
 
+/**
+ * The transfer memo. An earner referral bonus is named "referral bonus" (owner,
+ * 2026-11-04) so the recipient can tell it apart from their own earnings; a row
+ * that is ONLY a bonus says so outright.
+ */
+function payoutMemo(p) {
+  const kinds = String(p.kind || '').split('+').filter(Boolean);
+  if (kinds.length === 1 && kinds[0] === 'earner-referral') return `3Speak referral bonus - ${p.periodKey}`;
+  const label = kinds.map((k) => (k === 'earner-referral' ? 'referral bonus' : k)).join('+');
+  return `3Speak ad revenue share (${label}) - ${p.periodKey}`;
+}
+
 /** Settle one closed period. Idempotent — a settled period is skipped. */
 /**
  * Write payout rows, merging anything owed to the same account.
@@ -761,14 +876,38 @@ async function settlePeriod(db, period, deps = {}) {
    */
   const encoder = planEncoderPayout(shownRevenue, shownAssetTotals);
 
+  /* What the platform keeps from this period's SHOWN revenue after every other
+   * share: the ceiling for the earner referral bonus, which the platform pays on
+   * top (see planEarnerReferralBonus). */
+  const platformRoomHbd = Math.max(0,
+    shownRevenue * ((100 - AD_CREATOR_POOL_PCT - AD_VIEWER_POOL_PCT
+      - AD_LISTENER_AUDIO_POOL_PCT - AD_LISTENER_PODCAST_POOL_PCT) / 100)
+    - referral.poolHbd - encoder.poolHbd);
+  const planEarnerBonus = async (earnerRows) => {
+    const b = await planEarnerReferralBonus(db, earnerRows, period, platformRoomHbd, deps);
+    for (const sk of b.skipped) {
+      if (sk.why !== 'source_typed') console.warn(`[adPayout] period ${period.key}: earner referral for @${sk.earner} not paid to @${sk.referrer} (${sk.why})`);
+    }
+    if (b.poolHbd > 0) console.log(`[adPayout] period ${period.key}: ${fmt3(b.poolHbd)} HBD earner referral bonus to ${b.rows.length} referrer(s)`);
+    return b;
+  };
+  const earnerBonusSummary = (b) => ({
+    earnerReferralPoolHbd: b.poolHbd,
+    earnerReferralRecipients: b.rows.length,
+    earnerReferralScaled: b.scaled,
+    earnerReferralSkipped: b.skipped.filter((sk) => sk.why !== 'source_typed'),
+  });
+
   if (!impressions.length) {
     // No ad was shown, so this period adds nothing to the viewer pool; only a
     // carry from an earlier period (money from ads that WERE shown) can go out.
     const viewerPaidNoImp = await payViewers(db, period, viewerPoolHbd, viewerAssetPool, { defer: true });
     const listenersPaidNoImp = await payAllListeners();
-    // Referral and encoder rows are empty here (nothing was shown); kept in the
-    // ONE merged write so the shape matches the normal path.
-    await writePayoutRows(db, period.key, [...referral.rows, ...encoder.rows, ...viewerPaidNoImp.rows, ...listenerRows(listenersPaidNoImp)]);
+    // Referral, encoder and earner-bonus rows are empty here (nothing was shown,
+    // so the platform has no room); kept in the ONE merged write so the shape
+    // matches the normal path.
+    const earnerBonusNoImp = await planEarnerBonus([...viewerPaidNoImp.rows, ...listenerRows(listenersPaidNoImp)]);
+    await writePayoutRows(db, period.key, [...referral.rows, ...encoder.rows, ...viewerPaidNoImp.rows, ...listenerRows(listenersPaidNoImp), ...earnerBonusNoImp.rows]);
     // Nothing delivered. The money is not ours to keep — carry it forward, in the
     // assets it arrived as so the next period can actually send it.
     await periods.updateOne({ _id: period.key }, {
@@ -787,6 +926,7 @@ async function settlePeriod(db, period, deps = {}) {
         referralPoolHbd: referral.poolHbd,
         referralRecipients: referral.rows.length,
         referralSkipped: referral.skipped,
+        ...earnerBonusSummary(earnerBonusNoImp),
       encoderPoolHbd: encoder.poolHbd,
       shownRevenueHbd: Math.round(shownRevenue * 1000) / 1000,
       encoderAccount: encoder.rows.length ? AD_ENCODER_ACCOUNT : null,
@@ -906,7 +1046,11 @@ async function settlePeriod(db, period, deps = {}) {
   // Listeners the same way, from their own pools, folded into the same one write.
   const listenersPaid = await payAllListeners();
 
-  const written = await writePayoutRows(db, period.key, [...creatorRows, ...referral.rows, ...encoder.rows, ...viewerPaid.rows, ...listenerRows(listenersPaid)]);
+  // Computed from the earner rows as they will be paid (after dust thresholds),
+  // and added on top: nobody's own row is reduced.
+  const earnerBonus = await planEarnerBonus([...creatorRows, ...viewerPaid.rows, ...listenerRows(listenersPaid)]);
+
+  const written = await writePayoutRows(db, period.key, [...creatorRows, ...referral.rows, ...encoder.rows, ...viewerPaid.rows, ...listenerRows(listenersPaid), ...earnerBonus.rows]);
   const referralPaidHbd = Math.round(referral.rows.reduce((a, r) => a + r.hbd, 0) * 1000) / 1000;
   if (referralPaidHbd > 0) {
     console.log(`[adPayout] period ${period.key}: ${fmt3(referralPaidHbd)} HBD to ${referral.rows.length} referrer(s)`);
@@ -929,6 +1073,7 @@ async function settlePeriod(db, period, deps = {}) {
       referralPoolHbd: referral.poolHbd,
       referralRecipients: referral.rows.length,
       referralSkipped: referral.skipped,
+      ...earnerBonusSummary(earnerBonus),
       encoderPoolHbd: encoder.poolHbd,
       shownRevenueHbd: Math.round(shownRevenue * 1000) / 1000,
       encoderAccount: encoder.rows.length ? AD_ENCODER_ACCOUNT : null,
@@ -1103,7 +1248,7 @@ async function payPending(db, deps = {}) {
           from: SOURCE_ACCOUNT,
           to: p.account,
           amount: `${fmt3(amt)} ${symbol}`,
-          memo: `3Speak ad revenue share (${p.kind}) - ${p.periodKey}`,
+          memo: payoutMemo(p),
         }]], key);
         // Recorded immediately, before the next leg can fail. A crash between the
         // broadcast and this write is the one irreducible risk — Hive transfers carry
@@ -1565,4 +1710,4 @@ function schedule() {
   );
 }
 
-module.exports = { schedule, runOnce, settlePeriod, periodContaining, accrualFor, closeFinishedCampaigns, refundRefusedPayments, releaseStaleCredit, payViewers, payListeners, payPending, writePayoutRows };
+module.exports = { planEarnerReferralBonus, payoutMemo, schedule, runOnce, settlePeriod, periodContaining, accrualFor, closeFinishedCampaigns, refundRefusedPayments, releaseStaleCredit, payViewers, payListeners, payPending, writePayoutRows };

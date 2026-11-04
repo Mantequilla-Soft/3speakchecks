@@ -113,6 +113,24 @@ const ENCODER_POOL_PCT = (() => {
     return wanted;
 })();
 
+/* Earner referral bonus (owner, 2026-11-04): whoever referred a user gets
+ * AD_EARNER_REFERRAL_PCT of that user's OWN creator, viewer and listener payouts
+ * for their first AD_EARNER_REFERRAL_DAYS after signup.
+ *
+ * 🚨 A percentage of the EARNER'S PAYOUT, not of revenue, and paid ON TOP by the
+ * platform: the referred user keeps 100%. Single level: bonuses are never a basis
+ * for another bonus. Only link and invite referrals count (services/adReferrals.js).
+ * 0 switches it off. Never more than the platform has left in a period (adPayouts.js).
+ */
+const EARNER_REFERRAL_PCT = (() => {
+    const n = parseFloat(process.env.AD_EARNER_REFERRAL_PCT);
+    return Number.isFinite(n) && n >= 0 && n <= 100 ? n : 10;
+})();
+const EARNER_REFERRAL_DAYS = (() => {
+    const n = parseFloat(process.env.AD_EARNER_REFERRAL_DAYS);
+    return Number.isFinite(n) && n >= 0 ? n : 90;
+})();
+
 module.exports = {
     // ─── Social-link verifier (merged from mantequilla-social-verifier) ───
     SOCIAL_LINKS_COLLECTION: process.env.SOCIAL_LINKS_COLLECTION || 'social_links',
@@ -892,6 +910,8 @@ module.exports = {
     AD_CREATOR_POOL_PCT: CREATOR_POOL_PCT,
     AD_REFERRAL_POOL_PCT: REFERRAL_POOL_PCT,
     AD_ENCODER_POOL_PCT: ENCODER_POOL_PCT,
+    AD_EARNER_REFERRAL_PCT: EARNER_REFERRAL_PCT,
+    AD_EARNER_REFERRAL_DAYS: EARNER_REFERRAL_DAYS,
     // Who receives the encoders' cut. Empty switches it off (the platform keeps it).
     AD_ENCODER_ACCOUNT: (process.env.AD_ENCODER_ACCOUNT ?? 'encoder.pay').trim().toLowerCase().replace(/^@/, ''),
     /* Butter Auth, for asking who referred an advertiser. Credentials are a
