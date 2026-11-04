@@ -33,6 +33,8 @@ const MARK = 'vmtest';
 const r3 = (n) => Math.round(n * 1000) / 1000;
 
 const stubDeps = (referrerMap, realAccounts) => ({
+  // The earner referral bonus looks up the earners too; stubbed as "nobody referred".
+  referralsFor: async () => new Map(),
   referrersFor: async (accounts) => new Map(
     accounts.filter((a) => referrerMap[a]).map((a) => [a, referrerMap[a]]),
   ),

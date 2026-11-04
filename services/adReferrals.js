@@ -13,6 +13,12 @@
  * unreachable must cost nothing worse than the platform keeping 2% it would
  * otherwise have passed on, which is the status quo before this existed.
  *
+ * 🚨 LINK AND INVITE REFERRALS ONLY (owner, 2026-11-04). Butter Auth reports how
+ * each referral arrived (`source`): 'invite', 'link' (a `?ref=` link), or 'typed'
+ * (recorded before its naming screens dropped the free-text field; mostly "where
+ * did you hear about us" answers like @chatgpt). Only PAID_SOURCES are ever paid.
+ * A Butter Auth that does not report a source yet pays nobody.
+ *
  * 🚨 THE ANSWER IS NOT A VERIFIED IDENTITY. `referredBy` is a name the user
  * typed into a form. Butter Auth checks it has the shape of a Hive name and
  * refuses a self-referral, and that is all -- it does not check the account
@@ -28,13 +34,15 @@ const {
 const BATCH = 100;
 const TIMEOUT_MS = 8000;
 
+const PAID_SOURCES = new Set(['link', 'invite']);
+
 /**
- * @param {string[]} accounts Hive account names (advertisers).
- * @returns {Promise<Map<string,string>>} account -> referrer name. Accounts with
- *          no referrer, or any account at all if the lookup could not run, are
- *          simply absent.
+ * @param {string[]} accounts Hive account names or warm-up handles.
+ * @returns {Promise<Map<string,{referrer:string, source:string|null, referredAt:Date|null}>>}
+ *          Accounts with no referrer, or any account at all if the lookup could
+ *          not run, are simply absent. Not filtered by source.
  */
-async function referrersFor(accounts) {
+async function referralsFor(accounts) {
     const out = new Map();
     const wanted = [...new Set(
         (Array.isArray(accounts) ? accounts : [])
@@ -64,7 +72,7 @@ async function referrersFor(accounts) {
             const data = await res.json().catch(() => ({}));
             if (!res.ok || !Array.isArray(data.results)) {
                 console.warn(`[adReferrals] lookup failed (${res.status}) — `
-                    + `${chunk.length} advertiser(s) treated as unreferred this period`);
+                    + `${chunk.length} account(s) treated as unreferred this period`);
                 continue;
             }
             for (const r of data.results) {
@@ -73,14 +81,33 @@ async function referrersFor(accounts) {
                 // A self-referral should already be impossible (Butter Auth
                 // refuses one at write time), but it is checked again here
                 // because this is the side that spends money on the answer.
-                if (acct && who && who !== acct) out.set(acct, who);
+                if (acct && who && who !== acct) {
+                    const at = r?.referredAt ? new Date(r.referredAt) : null;
+                    out.set(acct, {
+                        referrer: who,
+                        source: typeof r?.source === 'string' ? r.source : null,
+                        referredAt: at && Number.isFinite(at.getTime()) ? at : null,
+                    });
+                }
             }
         } catch (err) {
             console.warn(`[adReferrals] lookup error: ${err.message} — `
-                + `${chunk.length} advertiser(s) treated as unreferred this period`);
+                + `${chunk.length} account(s) treated as unreferred this period`);
         }
     }
     return out;
 }
 
-module.exports = { referrersFor };
+/**
+ * Advertisers' referrers that may be PAID: link and invite referrals only.
+ * @returns {Promise<Map<string,string>>} account -> referrer name.
+ */
+async function referrersFor(accounts) {
+    const out = new Map();
+    for (const [acct, r] of await referralsFor(accounts)) {
+        if (PAID_SOURCES.has(r.source)) out.set(acct, r.referrer);
+    }
+    return out;
+}
+
+module.exports = { referralsFor, referrersFor, PAID_SOURCES };

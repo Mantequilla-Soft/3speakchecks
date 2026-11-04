@@ -43,6 +43,8 @@ const MARK = 'referral-test';
 // Stub Butter Auth and the chain. `deps` is threaded through settlePeriod for
 // exactly this: a test must never reach the real broker or broadcast anything.
 const stubDeps = (referrerMap, realAccounts) => ({
+  // The earner referral bonus looks up the earners too; stubbed as "nobody referred".
+  referralsFor: async () => new Map(),
   referrersFor: async (accounts) => new Map(
     accounts.filter((a) => referrerMap[a]).map((a) => [a, referrerMap[a]]),
   ),
