@@ -39,7 +39,7 @@ const { linkedAudioPermlink } = require('../utils/linkedAudio');
 const { warmupAudio } = require('../utils/warmupAudio');
 const {
   AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_IMPRESSIONS_COLLECTION, ADVERTISERS_COLLECTION,
-  AD_SELFPROMO_ALLOWED_OWNERS, AD_TICKER_ALLOWED_OWNERS, AD_TICKER_FREQUENCY_CAP_MINUTES,
+  AD_SELFPROMO_ALLOWED_OWNERS, AD_TICKER_ALLOWED_OWNERS, AD_TICKER_FREQUENCY_CAP_MINUTES, AD_AUDIO_COOLDOWN_MINUTES,
   AD_SESSION_TTL_MINUTES, AD_FREQUENCY_CAP_MINUTES, AD_SKIP_AFTER_SECONDS, AD_SKIP_MIN_SPOT_SECONDS,
   AD_BANNER_CLOSE_AFTER_SECONDS, AD_BANNER_FREQUENCY_CAP_MINUTES, AD_GATE_ALLOWED_UPLOADERS, ADS_STAGE,
   AD_COOLDOWN_MINUTES, AD_PACING_ENABLED, AD_PACING_MIN_FRACTION, AD_SESSION_RATE_PER_MIN,
@@ -1002,6 +1002,23 @@ async function outsideEpisodeDecision(viewer) {
   return { ads: true, reason: null };
 }
 
+/**
+ * Did this listener HEAR an audio ad (any advertiser) in the last
+ * AD_AUDIO_COOLDOWN_MINUTES? Counts only spots that were played to their end (an
+ * impression), so a spot skipped by changing track does not start the quiet period.
+ * Signed in: their sessions on the server. Anonymous: capId, which lives as long as
+ * the page, i.e. one listening session in the audio player.
+ */
+async function inAudioCooldown(db, capKey) {
+  if (!(AD_AUDIO_COOLDOWN_MINUTES > 0) || !capKey) return false;
+  const since = new Date(Date.now() - AD_AUDIO_COOLDOWN_MINUTES * 60 * 1000);
+  const sids = (await db.collection(SESSIONS)
+    .find({ ...capKey, surface: 'audio', startedAt: { $gte: since } }, { projection: { sid: 1 } })
+    .sort({ startedAt: -1 }).limit(20).toArray()).map((r) => r.sid);
+  if (!sids.length) return false;
+  return !!(await db.collection(AD_IMPRESSIONS_COLLECTION).findOne({ sid: { $in: sids } }, { projection: { _id: 1 } }));
+}
+
 async function serveAudioSpot({ req, res, db, b, owner, permlink, viewer, capId, country, app, decision, episode = null, warmupTrack = false }) {
   if (!AUDIO_TICKER_ENABLED) return res.json({ ad: null, reason: 'audio_ads_off' });
   // Only a player that can play one is handed one.
@@ -1013,6 +1030,10 @@ async function serveAudioSpot({ req, res, db, b, owner, permlink, viewer, capId,
   }
   // The creator's audio choice (account + this track) was decided in audioAdDecision.
   if (!decision.ads) return res.json({ ad: null, reason: decision.reason });
+  // One audio ad per listener per AD_AUDIO_COOLDOWN_MINUTES, whichever advertiser.
+  if (await inAudioCooldown(db, viewer ? { viewer } : (capId ? { capId } : null))) {
+    return res.json({ ad: null, reason: 'cooldown', cooldownMinutes: AD_AUDIO_COOLDOWN_MINUTES });
+  }
 
   // The track has to exist and be this owner's: the owner is who gets paid.
   // An outside episode was checked in /session (it exists, its feed is public).
@@ -3216,4 +3237,4 @@ module.exports = router;
 /* Reachable for scripts/test-ad-selfpromo.cjs. The trim rule is arithmetic on a
  * segment list with a boundary condition, which is exactly the kind of thing that
  * is cheap to test directly and expensive to test through a live playback. */
-module.exports.__test = { trimOf, adSecondsFor, selfPromoAllowedOn, loadAdSegments };
+module.exports.__test = { trimOf, adSecondsFor, selfPromoAllowedOn, loadAdSegments, inAudioCooldown };

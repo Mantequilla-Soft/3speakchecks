@@ -1027,6 +1027,12 @@ module.exports = {
     // window (owner, 2026-10-01): a line of text costs the viewer even less. Sent to the
     // page with each ticker so the browser's own seen-list uses the same number.
     AD_TICKER_FREQUENCY_CAP_MINUTES: parseInt(process.env.AD_TICKER_FREQUENCY_CAP_MINUTES) || 5,
+    // The quiet period between two audio ads for one listener, whichever advertiser
+    // (owner, 2026-11-04: 15 min). Without it only the 5-minute per-advertiser window
+    // above spaced them out, so with few advertisers an ad came every 5 minutes.
+    // 0 turns it off.
+    AD_AUDIO_COOLDOWN_MINUTES: Number.isFinite(parseInt(process.env.AD_AUDIO_COOLDOWN_MINUTES))
+        ? parseInt(process.env.AD_AUDIO_COOLDOWN_MINUTES) : 15,
     // Long enough for a sentence and a call to action, short enough to read while it moves.
     AD_TICKER_MAX_CHARS: parseInt(process.env.AD_TICKER_MAX_CHARS) || 140,
     /* How long a ticker must be on screen to be READABLE: base + per word, never under
