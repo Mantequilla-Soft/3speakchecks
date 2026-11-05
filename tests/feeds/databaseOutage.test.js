@@ -124,7 +124,7 @@ describe('routes that answer a JSON 500', () => {
   // (routes/snaps.js:328-347). On Express 4 a rejected handler promise is never
   // passed to the error middleware, so a database failure leaves the request
   // hanging until the client gives up, plus an unhandled rejection in the process.
-  test.skip('BUG: POST /snaps/hide never answers when the database fails', async () => {
+  test('POST /snaps/hide never answers when the database fails', async () => {
     await send('post', '/snaps/hide', { body: { user: 'viewer', author: 'a', permlink: 'b' } }).timeout(1000).expect(500);
   });
 });

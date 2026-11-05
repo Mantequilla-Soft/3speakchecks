@@ -16,6 +16,7 @@
 const express = require('express');
 const { getDb } = require('../utils/db');
 const { verifyHiveAuthority } = require('../utils/hiveAuth');
+const { asText } = require('../utils/input');
 const { SIGNATURE_TIMESTAMP_TOLERANCE_MS, AD_SIGNING_DELEGATES } = require('../utils/config');
 
 const router = express.Router();
@@ -50,9 +51,9 @@ function tooMany(author) {
 // POST /comments/pin — { author, permlink, comment, pinned: bool, signature, timestamp }
 router.post('/comments/pin', express.json({ limit: '8kb' }), async (req, res) => {
   const b = req.body || {};
-  const author = String(b.author || '').toLowerCase();
-  const permlink = String(b.permlink || '');
-  const comment = String(b.comment || '');
+  const author = asText(b.author).toLowerCase();
+  const permlink = asText(b.permlink);
+  const comment = asText(b.comment);
   const action = b.pinned === true ? 'pin' : b.pinned === false ? 'unpin' : '';
   if (!ACCOUNT_RE.test(author) || !PERMLINK_RE.test(permlink) || !PERMLINK_RE.test(comment) || !action) {
     return res.status(400).json({ success: false, error: 'invalid author, permlink, comment or action' });

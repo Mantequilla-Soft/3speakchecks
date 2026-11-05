@@ -1,4 +1,7 @@
 const express = require('express');
+// Before any route: async handlers' rejected promises go to the error middleware
+// instead of crashing the process (see utils/asyncErrors.js).
+const { handleRouteError } = require('./utils/asyncErrors');
 const cors = require('cors');
 const cron = require('node-cron');
 
@@ -154,6 +157,9 @@ app.use('/', announcementRoutes);         // same ordering rule as above
 app.use('/', require('./routes/stories')); // 24h stories row + follower notifications; same ordering rule
 app.use('/pulse', require('./routes/pulse')); // Video Pulse hot set (#93); same ordering rule
 app.use('/', streamStatsRoutes);
+
+// Last: any error a route did not answer itself becomes a JSON 500.
+app.use(handleRouteError);
 
 // Track whether heavy sync tasks are running
 let syncRunning = false;
@@ -519,6 +525,12 @@ async function startServer() {
         console.log(`Check user: http://localhost:${PORT}/check/{username}`);
     });
 }
+
+// A promise rejected outside a request (a background job, a fire-and-forget
+// write) is logged, not fatal: one failed side task must not stop every route.
+process.on('unhandledRejection', (reason) => {
+    console.error('[process] unhandled rejection:', reason && reason.stack ? reason.stack : reason);
+});
 
 // Handle graceful shutdown
 process.on('SIGINT', () => {

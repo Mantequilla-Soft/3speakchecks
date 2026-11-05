@@ -1,4 +1,5 @@
 const dhive = require('@hiveio/dhive');
+const { asText } = require('./input');
 const {
     HIVE_AUTH_REQUIRED,
     HIVE_RPC_ENDPOINTS,
@@ -168,11 +169,11 @@ function requireHiveSignature(action) {
     return async function (req, res, next) {
         if (!HIVE_AUTH_REQUIRED) return next();
 
-        const hive_username = String(req.query.hive_username || '').trim();
-        const platform = String(req.query.platform || '').trim();
-        const platform_username = String(req.query.platform_username || '').trim();
-        const signature = String(req.query.signature || req.headers['x-hive-signature'] || '').trim();
-        const tsRaw = String(req.query.timestamp || req.headers['x-hive-timestamp'] || '').trim();
+        const hive_username = asText(req.query.hive_username).trim();
+        const platform = asText(req.query.platform).trim();
+        const platform_username = asText(req.query.platform_username).trim();
+        const signature = asText(req.query.signature || req.headers['x-hive-signature']).trim();
+        const tsRaw = asText(req.query.timestamp || req.headers['x-hive-timestamp']).trim();
 
         if (!hive_username || !platform || !platform_username) {
             return res.status(400).json({ error: 'hive_username, platform, and platform_username are required' });

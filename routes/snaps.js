@@ -330,9 +330,14 @@ async function setHide(res, { user, owner, permlink, type, remove }) {
     return res.status(400).json({ success: false, error: 'missing fields' });
   }
   const _id = type === 'post' ? `${user}:post:${owner}/${permlink}` : `${user}:creator:${owner}`;
-  const col = getDb().collection(HIDDEN_COLLECTION);
-  if (remove) await col.deleteOne({ _id });
-  else await col.updateOne({ _id }, { $set: { user, type, owner, permlink: type === 'post' ? permlink : null, at: new Date() } }, { upsert: true });
+  try {
+    const col = getDb().collection(HIDDEN_COLLECTION);
+    if (remove) await col.deleteOne({ _id });
+    else await col.updateOne({ _id }, { $set: { user, type, owner, permlink: type === 'post' ? permlink : null, at: new Date() } }, { upsert: true });
+  } catch (err) {
+    console.error('snap hide failed:', err);
+    return res.status(500).json({ success: false, error: 'internal error' });
+  }
   dropCache(HIDDEN_KEY);       // hiding must take effect on the NEXT request
   return res.json({ success: true });
 }

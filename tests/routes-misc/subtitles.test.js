@@ -161,11 +161,11 @@ describe('POST /subtitles/edit', () => {
     // so on Node 22 the whole checker process exits. No signature is needed: a cue
     // of null, or an object with a non-callable toString where a string is expected,
     // is enough. Correct behaviour is a 400.
-    test.skip.each([
+    test.each([
       ['a null cue', { author: 'alice', permlink: 'my-video', lang: 'en', cues: [null] }],
       ['an author object that cannot become a string', { author: { toString: 1 }, permlink: 'my-video', lang: 'en', cues: CUES }],
       ['a language object that cannot become a string', { author: 'alice', permlink: 'my-video', lang: { toString: 1 }, cues: CUES }],
-    ])('BUG: %s is a 400, not an unhandled rejection that kills the process', async (_label, body) => {
+    ])('%s is a 400, not an unhandled rejection that kills the process', async (_label, body) => {
       await send(body).timeout(2000).expect(400);
     });
   });
