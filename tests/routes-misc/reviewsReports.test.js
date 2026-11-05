@@ -62,9 +62,16 @@ describe('POST /reviews', () => {
 
   test('builds its triage index on first use', async () => {
     await post('/reviews', { stars: 1 }).expect(201);
-    await new Promise((r) => setImmediate(r));
-    const indexes = await db().collection('reviews').indexes();
-    expect(indexes.map((i) => i.key)).toContainEqual({ processed: 1, created_at: -1 });
+    // Built in the background (the route does not wait for it): poll, bounded.
+    const { performance } = require('perf_hooks');
+    const deadline = performance.now() + 5000;
+    let keys = [];
+    while (performance.now() < deadline) {
+      keys = (await db().collection('reviews').indexes()).map((i) => i.key);
+      if (keys.some((k) => k.processed === 1 && k.created_at === -1)) break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(keys).toContainEqual({ processed: 1, created_at: -1 });
   });
 
   test('a database failure is a 500 without details', async () => {

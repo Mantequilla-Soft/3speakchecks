@@ -456,14 +456,19 @@ function childProcessMock() {
  * For writes the code deliberately does not wait for (fire-and-forget caches): retry
  * a read until it holds. Each try is a real round trip, so no fixed delay is needed.
  */
-async function eventually(check, tries = 100) {
+// Polls until `check` returns something truthy, for writes the code under test
+// deliberately does not wait for. Bounded by wall time, not by a number of ticks:
+// on a busy machine (the whole suite in parallel) a background write can take
+// many event-loop turns. performance.now, because these tests fake Date.
+const { performance } = require('perf_hooks');
+async function eventually(check, timeoutMs = 5000) {
+  const deadline = performance.now() + timeoutMs;
   let last;
-  for (let i = 0; i < tries; i += 1) {
+  for (;;) {
     last = await check();
-    if (last) return last;
-    await new Promise((r) => setImmediate(r));
+    if (last || performance.now() > deadline) return last;
+    await new Promise((r) => setTimeout(r, 5));
   }
-  return last;
 }
 
 /* ─── requests ───────────────────────────────────────────────────────── */
