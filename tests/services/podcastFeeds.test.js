@@ -39,6 +39,7 @@ jest.mock('worker_threads', () => {
 const path = require('path');
 const { ObjectId } = require('mongodb');
 const { Worker } = require('worker_threads');
+const { waitUntil } = require('../helpers/wait');
 const testDb = require('../helpers/db');
 const { DAY, MINUTE } = require('./_fixtures');
 
@@ -104,12 +105,10 @@ function load(env = {}) {
 // asks for (plus _id) is there.
 const INDEX_COUNTS = { podcast_feeds: 7, podcast_subs: 3, podcast_episodes: 3, podcast_progress: 4 };
 async function waitForIndexes() {
-  for (let i = 0; i < 5000; i += 1) {
+  await waitUntil(async () => {
     const counts = await Promise.all(Object.keys(INDEX_COUNTS).map((c) => col(c).indexes().then((x) => x.length, () => 0)));
-    if (counts.every((n, j) => n >= Object.values(INDEX_COUNTS)[j])) return;
-    await new Promise((r) => setImmediate(r));
-  }
-  throw new Error('indexes never built');
+    return counts.every((n, j) => n >= Object.values(INDEX_COUNTS)[j]);
+  }, { message: 'indexes never built' });
 }
 
 async function startService(env) {

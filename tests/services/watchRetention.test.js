@@ -7,6 +7,7 @@
 jest.mock('node-cron', () => ({ schedule: jest.fn() }));
 
 const cron = require('node-cron');
+const { waitUntil } = require('../helpers/wait');
 const testDb = require('../helpers/db');
 const { NOW, DAY } = require('./_fixtures');
 
@@ -178,10 +179,4 @@ function loadWith(env) {
 }
 
 // Polls a database condition between event-loop turns (no fixed sleep).
-async function waitFor(check, turns = 2000) {
-  for (let i = 0; i < turns; i += 1) {
-    if (await check()) return;
-    await new Promise((r) => setImmediate(r));
-  }
-  throw new Error('condition never became true');
-}
+const waitFor = (check) => waitUntil(check);

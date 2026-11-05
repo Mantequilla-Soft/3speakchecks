@@ -20,6 +20,7 @@ const { ObjectId, MongoClient } = require('mongodb');
 const { parentPort } = require('worker_threads');
 const { FetchError } = jest.requireActual('../../utils/safeFetch');
 const { episodeId, urlKey, privateKey, PARSE_VERSION } = require('../../utils/podcastParse');
+const { waitUntil } = require('../helpers/wait');
 const testDb = require('../helpers/db');
 const { DAY, MINUTE } = require('./_fixtures');
 
@@ -529,10 +530,4 @@ describe('pure helpers', () => {
   });
 });
 
-async function waitFor(check, turns = 2000) {
-  for (let i = 0; i < turns; i += 1) {
-    if (await check()) return;
-    await new Promise((r) => setImmediate(r));
-  }
-  throw new Error('condition never became true');
-}
+const waitFor = (check) => waitUntil(check);

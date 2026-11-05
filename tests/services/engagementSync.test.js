@@ -10,6 +10,7 @@ jest.mock('../../utils/hive', () => ({
   fetchAccountComments: jest.fn(),
 }));
 
+const { waitUntil } = require('../helpers/wait');
 const testDb = require('../helpers/db');
 const { NOW, DAY } = require('./_fixtures');
 const hive = require('../../utils/hive');
@@ -35,14 +36,8 @@ const comment = (rootAuthor, rootPermlink, daysAgo = 1, parent = rootAuthor) => 
   root_author: rootAuthor, root_permlink: rootPermlink, created: at(daysAgo), depth: 1,
 });
 
-/** Resolve until `check` passes, letting fire-and-forget work run. Bounded, no wall-clock sleeps. */
-async function eventually(check, rounds = 2000) {
-  for (let i = 0; i < rounds; i += 1) {
-    if (await check()) return;
-    await new Promise((r) => setImmediate(r));
-  }
-  throw new Error('condition never became true');
-}
+/** Resolve until `check` passes, letting fire-and-forget work run (tests/helpers/wait.js). */
+const eventually = (check) => waitUntil(check);
 
 describe('collecting what a viewer engaged with', () => {
   test('credits comments, reshares and playlist saves inside the window, and skips the rest', async () => {

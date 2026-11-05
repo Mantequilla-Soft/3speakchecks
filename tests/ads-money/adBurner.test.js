@@ -9,6 +9,7 @@
  * the orchestration and the numbers handed to ffmpeg: geometry, timing, codec
  * parameters, caching, single flight, failure handling and cache eviction.
  */
+const { waitUntil } = require('../helpers/wait');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -68,8 +69,7 @@ afterAll(() => fs.rmSync(CACHE, { recursive: true, force: true }));
 
 /** Wait for a condition that a fire-and-forget step (the cache sweep) will make true. */
 async function until(cond) {
-  for (let i = 0; i < 500 && !cond(); i += 1) await new Promise((r) => setImmediate(r));
-  return cond();
+  return waitUntil(cond).then(() => true, () => cond());
 }
 
 describe('the cache key', () => {
@@ -118,8 +118,8 @@ describe('burning a still banner', () => {
     // An ABSOLUTE end on the segment's own clock: 31.8s in, 6s long.
     expect(argAfter(args, '-to')).toBe('37.800');
     expect(argAfter(args, '-f')).toBe('mpegts');
-    // Nothing temporary is left behind.
-    expect(fs.readdirSync(CACHE).filter((f) => f.startsWith('.'))).toEqual([]);
+    // Nothing temporary is left behind (removed without being awaited, adBurner.js:498).
+    expect(await until(() => fs.readdirSync(CACHE).filter((f) => f.startsWith('.')).length === 0)).toBe(true);
   });
 
   test('a 728x90 strip on a 1280x720 frame: 60% wide, centred, above the bottom margin, labelled "Ad"', async () => {
