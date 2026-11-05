@@ -24,6 +24,6 @@ module.exports = {
   coverageReporters: ['text-summary', 'lcov', 'json-summary'],
   // Ratchet: raise these with the suite, never lower them to make a run pass.
   coverageThreshold: {
-    global: { lines: 0, statements: 0, functions: 0, branches: 0 },
+    global: { lines: 97, statements: 96, functions: 94, branches: 87 },
   },
 };
