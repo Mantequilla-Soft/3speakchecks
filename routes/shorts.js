@@ -11,7 +11,7 @@ const { recencyBoost, ageHours } = require('../utils/discoverScore');
 const { fetchHiveRewards, fetchLivePageData, fetchFollowerCounts, hiveReputationToScore, mulberry32, getFollowingList, reputationCache } = require('../utils/hive');
 const { sortedShortsCache, SORTED_SHORTS_CACHE_TTL, getCachedViews, setCachedViews } = require('../utils/cache');
 const { INTEREST_MULTIPLIER, parseInterests, fetchTranscriptionTags, normalizeTags, tagsMatchInterests } = require('../utils/interests');
-const { getUserFilters, applyUserFilters } = require('../utils/userFilters');
+const { getUserFilters, applyUserFilters, excludeHiddenCreators } = require('../utils/userFilters');
 const { wantsHideWatched } = require('../utils/feedRank');
 const { getWinners } = require('../utils/effectiveTags');
 const { applyRetention } = require('../utils/retentionRank');
@@ -54,6 +54,9 @@ router.get('/shorts', async (req, res) => {
             query.frontend_app = appFilter;
             console.log(`Fetching shorts for app: ${appFilter}`);
         }
+
+        // Creators this viewer dismissed (only when ?currentuser= is sent; additive).
+        await excludeHiddenCreators(db, query, req.query.currentuser);
 
         // Fetch recent shorts (last 7 days) sorted by newest first
         const shortsData = await embedVideoCollection

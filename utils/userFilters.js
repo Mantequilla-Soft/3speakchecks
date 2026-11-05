@@ -90,7 +90,32 @@ function applyUserFilterQuery(query, filters) {
   return query;
 }
 
+/**
+ * The creators `username` dismissed ("don't show this creator"), lowercased.
+ * Empty when there is no viewer or the lookup fails (never breaks a feed).
+ */
+async function hiddenCreatorsOf(db, username) {
+  if (!normUser(username)) return [];
+  return [...(await getUserFilters(db, username)).creators];
+}
+
+/**
+ * Drop a viewer's dismissed creators from a BROWSING query (audio, playlists,
+ * shorts...), on `field` (default `owner`). Added as its own $and clause, so it
+ * never clobbers an owner filter the route already has (warm-up caps, moderation).
+ *
+ * A dismissed creator disappears from every feed the viewer browses, whatever the
+ * content type (owner, 2026-11-05). Callers skip it when the request names an
+ * owner on purpose (their profile, one item): that is a visit, not a feed.
+ */
+async function excludeHiddenCreators(db, query, username, field = 'owner') {
+  const creators = await hiddenCreatorsOf(db, username);
+  if (creators.length) query.$and = [...(query.$and || []), { [field]: { $nin: creators } }];
+  return query;
+}
+
 module.exports = {
   HIDDEN_VIDEOS, HIDDEN_CREATORS,
   normUser, ensureUserFilterIndexes, getUserFilters, applyUserFilters, applyUserFilterQuery,
+  hiddenCreatorsOf, excludeHiddenCreators,
 };
