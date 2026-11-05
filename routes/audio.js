@@ -7,6 +7,7 @@ const { getDb } = require('../utils/db');
 const { warmupAudio, capWarmup } = require('../utils/warmupAudio');
 const { decodePlaylistMeta } = require('../utils/playlistMeta');
 const { nsfwFilter } = require('../utils/filters');
+const { excludeHiddenCreators, hiddenCreatorsOf } = require('../utils/userFilters');
 
 // Treat docs with no category as `voice_message` — the default snap-style
 // upload doesn't always set the field. Filtering for voice should catch them.
@@ -550,6 +551,9 @@ router.get('/', async (req, res) => {
         const warm = await warmupAudio();
         if (!req.query.permlink) capWarmup(audioQuery, warm);
 
+        // Browsing (no owner named): drop creators this viewer dismissed.
+        if (!req.query.owner && !req.query.permlink) await excludeHiddenCreators(db, audioQuery, req.query.currentuser);
+
         const total = await audioCollection.countDocuments(audioQuery);
         const totalPages = Math.ceil(total / limit);
 
@@ -672,6 +676,7 @@ router.get('/grouped', async (req, res) => {
 
         // Warm-up audio: one per account, three in all (utils/warmupAudio.js).
         capWarmup(baseMatch, await warmupAudio());
+        await excludeHiddenCreators(db, baseMatch, req.query.currentuser);
 
         const categories = ['podcast', 'voice_message', 'song', 'audiobook', 'interview'];
         const groups = {};
@@ -934,6 +939,7 @@ router.get('/creators', async (req, res) => {
 
         // Get distinct audio creators with play counts (within the filtered set).
         // Derive each track's listen count first, then sum per owner.
+        await excludeHiddenCreators(db, audioQuery, req.query.currentuser);
         const creators = await audioCollection.aggregate([
             { $match: audioQuery },
             ...listenCountStages,
@@ -977,9 +983,10 @@ router.get('/playlists', async (req, res) => {
         }
 
         // Recent public playlists that actually have items.
+        const hiddenOwners = owner ? [] : await hiddenCreatorsOf(db, req.query.currentuser);
         const candidates = await db.collection('playlists').find({
             access: 'public',
-            owner: owner || { $type: 'string', $ne: '' },
+            owner: owner || { $type: 'string', $ne: '', ...(hiddenOwners.length ? { $nin: hiddenOwners } : {}) },
             'items.0': { $exists: true },
         }).sort({ last_modified_block: -1, _id: -1 }).limit(400).toArray();
 
