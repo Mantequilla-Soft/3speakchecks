@@ -70,13 +70,23 @@ describe('recording a viewer tag', () => {
   // unsigned request can outweigh every real voter and every auto tag (each auto tag is
   // worth 10000). A Hive vote weight is at most 10000, so anything above it should be
   // refused or clamped. (routes/viewerTags.js:155)
-  test.skip('BUG: an unsigned caller can store an unbounded weight that outvotes everyone', async () => {
+  test('an unsigned caller can store an unbounded weight that outvotes everyone', async () => {
     const res = await vote({ username: 'mallory', weight: 1e12 });
     if (res.status === 200) {
       expect(Math.abs((await tags().findOne({ voter: 'mallory' })).weight)).toBeLessThanOrEqual(10000);
     } else {
       expect(res.status).toBe(400);
     }
+  });
+  test('a stored weight beyond a full vote (a row from before the clamp) counts as one full vote', async () => {
+    await tags().insertMany([
+      { _id: 'mallory:bob:vid', voter: 'mallory', author: 'bob', permlink: 'vid', 'viewer-tag': 'music', weight: 1e12 },
+      { _id: 'alice:bob:vid', voter: 'alice', author: 'bob', permlink: 'vid', 'viewer-tag': 'finance', weight: 10000 },
+      { _id: 'carol:bob:vid', voter: 'carol', author: 'bob', permlink: 'vid', 'viewer-tag': 'finance', weight: 500 },
+    ]);
+    const res = await request(app).get('/viewer-tags/bob/vid').expect(200);
+    expect(res.body.winner).toBe('finance');
+    expect(res.body.counts.find((c) => c.tag === 'music')).toMatchObject({ weight: 10000, voters: [{ voter: 'mallory', weight: 10000 }] });
   });
 });
 

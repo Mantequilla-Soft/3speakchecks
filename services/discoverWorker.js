@@ -279,7 +279,8 @@ async function run() {
     for (const d of viewerTagDocs) {
       const id = `${String(d.author).toLowerCase()}/${d.permlink}`;
       const obj = viewerWeightsByHive.get(id) || {};
-      obj[d['viewer-tag']] = (obj[d['viewer-tag']] || 0) + Math.max(Math.abs(Number(d.weight) || 1), 1);
+      // |weight| between 1 and a full vote (10000), as in routes/viewerTags.js.
+      obj[d['viewer-tag']] = (obj[d['viewer-tag']] || 0) + Math.min(Math.max(Math.abs(Number(d.weight) || 1), 1), 10000);
       viewerWeightsByHive.set(id, obj);
     }
 

@@ -91,7 +91,8 @@ async function fetchViewerWeights(db, keys) {
     {
       $group: {
         _id: { a: '$author', p: '$permlink', t: `$${TAG_FIELD}` },
-        w: { $sum: { $max: [{ $abs: { $ifNull: ['$weight', 1] } }, 1] } },
+        // |weight| between 1 and a full vote (10000), as in routes/viewerTags.js.
+        w: { $sum: { $min: [{ $max: [{ $abs: { $ifNull: ['$weight', 1] } }, 1] }, 10000] } },
       },
     },
   ]).toArray();
