@@ -115,7 +115,7 @@ describe('PUT /promote/claim: access and input', () => {
   // video, and the expected memo becomes "promote:[object object]/[object object]".
   // A payer who sends that literal memo promotes whichever video Mongo returns first.
   // author/permlink should be required to be strings. (routes/promote.js:86-98)
-  test.skip('BUG: an operator object as author/permlink is refused, not used as a query', async () => {
+  test('an operator object as author/permlink is refused, not used as a query', async () => {
     await embed({ owner: 'victim-or-random', permlink: 'whatever' });
     history = [transfer('1.000 HBD', 'promote:[object Object]/[object Object]')];
     await claim({ author: { $ne: null }, permlink: { $ne: null } }).expect(400);

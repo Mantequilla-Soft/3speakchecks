@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
 const { validateApiKey } = require('../utils/middleware');
+const { asText } = require('../utils/input');
 const { hiveRpcBatch } = require('../utils/hive');
 const { PROMOTION_ACCOUNT, COST_PER_24H_PROMOTION_HBD, MAX_PROMOTION_DAYS } = require('../utils/config');
 
@@ -83,7 +84,9 @@ router.get('/promote/status/:author/:permlink', async (req, res) => {
 router.put('/promote/claim', validateApiKey, async (req, res) => {
     const db = getDb();
     try {
-        const { author, permlink } = req.body;
+        // Strings only: an operator object ({"$ne": null}) would match any video.
+        const author = asText(req.body && req.body.author);
+        const permlink = asText(req.body && req.body.permlink);
         if (!author || !permlink) {
             return res.status(400).json({ success: false, error: 'Invalid request', message: 'author and permlink are required' });
         }

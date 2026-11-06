@@ -8,6 +8,7 @@ const { warmupAudio, capWarmup } = require('../utils/warmupAudio');
 const { decodePlaylistMeta } = require('../utils/playlistMeta');
 const { nsfwFilter } = require('../utils/filters');
 const { excludeHiddenCreators, hiddenCreatorsOf } = require('../utils/userFilters');
+const { asText } = require('../utils/input');
 
 // Treat docs with no category as `voice_message` — the default snap-style
 // upload doesn't always set the field. Filtering for voice should catch them.
@@ -488,19 +489,26 @@ router.get('/', async (req, res) => {
             }
         }
 
+        // tag, owner and permlink are matched as plain strings: an operator object
+        // (?permlink[$exists]=true) is ignored rather than becoming part of the
+        // query (and, for permlink, switching the warm-up cap off).
+        const tagFilter = asText(req.query.tag);
+        const ownerFilter = asText(req.query.owner);
+        const permlinkFilter = asText(req.query.permlink);
+
         // Tag filter
-        if (req.query.tag) {
-            audioQuery.tags = req.query.tag;
+        if (tagFilter) {
+            audioQuery.tags = tagFilter;
         }
 
         // Owner filter
-        if (req.query.owner) {
-            audioQuery.owner = req.query.owner;
+        if (ownerFilter) {
+            audioQuery.owner = ownerFilter;
         }
 
         // Exact-permlink lookup (used to resolve audio docs for playlist items, etc.)
-        if (req.query.permlink) {
-            audioQuery.permlink = req.query.permlink;
+        if (permlinkFilter) {
+            audioQuery.permlink = permlinkFilter;
         }
 
         // Date filter (ISO string or days-ago shorthand)
@@ -530,12 +538,14 @@ router.get('/', async (req, res) => {
         }
 
         // Search by title/description
-        if (req.query.q) {
-            const search = req.query.q.trim();
+        // The search text is matched literally, not as a pattern.
+        const search = asText(req.query.q).trim();
+        if (search) {
+            const pattern = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             audioQuery.$or = [
-                { title: { $regex: search, $options: 'i' } },
-                { description: { $regex: search, $options: 'i' } },
-                { owner: { $regex: search, $options: 'i' } },
+                { title: { $regex: pattern, $options: 'i' } },
+                { description: { $regex: pattern, $options: 'i' } },
+                { owner: { $regex: pattern, $options: 'i' } },
             ];
         }
 
@@ -549,10 +559,10 @@ router.get('/', async (req, res) => {
         // Warm-up audio: one per account, three in all (utils/warmupAudio.js). A
         // lookup of one track by its permlink (its own page, a shared link) is not capped.
         const warm = await warmupAudio();
-        if (!req.query.permlink) capWarmup(audioQuery, warm);
+        if (!permlinkFilter) capWarmup(audioQuery, warm);
 
         // Browsing (no owner named): drop creators this viewer dismissed.
-        if (!req.query.owner && !req.query.permlink) await excludeHiddenCreators(db, audioQuery, req.query.currentuser);
+        if (!ownerFilter && !permlinkFilter) await excludeHiddenCreators(db, audioQuery, req.query.currentuser);
 
         const total = await audioCollection.countDocuments(audioQuery);
         const totalPages = Math.ceil(total / limit);
