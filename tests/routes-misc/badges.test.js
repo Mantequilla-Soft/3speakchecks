@@ -271,7 +271,7 @@ describe('GET /badges/:account', () => {
   // stale() is documented as "what we serve when Hive is unreachable", but no route
   // calls it: once the 15-minute entry expires, an outage turns a badge page that was
   // fine a minute ago into a 500. (routes/badges.js:54-58, used nowhere; :300 answers 500)
-  test.skip('BUG: an expired badge is served from the last good copy while Hive is down', async () => {
+  test('an expired badge is served from the last good copy while Hive is down', async () => {
     await request(app).get('/badges/badge-1234').expect(200);
     pinClock(new Date(Date.now() + 16 * 60 * 1000));
     failing = true;

@@ -952,7 +952,9 @@ router.get('/:username.xml', async (req, res) => {
                 })
                 .sort({ createdAt: -1 }).limit(FEED_LIMIT).toArray(),
             db.collection('embed-audio')
-                .find({ owner: username, post_permlink: { $ne: null } })
+                // Published only, like the playlist feed and GET /audio: a deleted
+                // or failed upload is not an episode.
+                .find({ owner: username, status: 'published', post_permlink: { $ne: null } })
                 .sort({ createdAt: -1 }).limit(FEED_LIMIT).toArray(),
         ]);
 

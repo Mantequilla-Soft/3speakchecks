@@ -311,7 +311,7 @@ describe('GET /rss/:username.xml, the channel feed', () => {
   // routes/rss.js:955 reads embed-audio by owner and post_permlink only, with no
   // status filter (the playlist feed and GET /audio both require "published").
   // A deleted or failed upload therefore stays in the creator's public podcast feed.
-  test.skip('BUG: a deleted or failed audio upload is not an episode of the channel feed', async () => {
+  test('a deleted or failed audio upload is not an episode of the channel feed', async () => {
     await db().collection('embed-audio').insertMany([
       audio('alice', 'kept'),
       audio('alice', 'deleted-one', { status: 'deleted' }),

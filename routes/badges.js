@@ -299,6 +299,9 @@ router.get('/:account', async (req, res) => {
         res.json(badge);
     } catch (error) {
         console.error(`Error fetching badge ${account}:`, error.message);
+        // Hive unreachable: the last good copy beats an error page.
+        const last = stale(key);
+        if (last) return res.json({ ...last, cached: true, stale: true });
         res.status(500).json({ error: 'Internal server error' });
     }
 });

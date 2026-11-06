@@ -168,7 +168,7 @@ describe('POST /stream-stats/end', () => {
   // num() treats null as the number 0, so a caller that serialises "no duration" as
   // JSON null records a zero-length stream instead of the computed one.
   // (routes/streamStats.js:40 num(), used at :120)
-  test.skip('BUG: durationSec: null is treated as 0 instead of "compute it from the start"', async () => {
+  test('durationSec: null is treated as 0 instead of "compute it from the start"', async () => {
     const res = await post('end', { streamId: 'room-4', startedAt: NOW.toISOString(), endedAt: later(120).toISOString(), durationSec: null }).expect(201);
     expect(res.body.durationSec).toBe(120);
   });

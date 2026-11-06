@@ -117,7 +117,8 @@ router.post('/stream-stats/end', async (req, res) => {
       const s = new Date(b.startedAt);
       if (!isNaN(s.getTime())) set.startedAt = s;
     }
-    let durationSec = num(b.durationSec);
+    // null or "" means "not given" here (Number(null) is 0): compute it instead.
+    let durationSec = b.durationSec == null || b.durationSec === '' ? null : num(b.durationSec);
     if (durationSec == null) {
       // Compute from the given or stored startedAt.
       const existing = set.startedAt ? null
