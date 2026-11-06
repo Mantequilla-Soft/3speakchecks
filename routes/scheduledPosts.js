@@ -1,23 +1,36 @@
 /**
  * /scheduled-posts routes — user-facing API for the scheduled-posts feature.
  *
- * Write paths (POST create, POST cancel) require a Hive posting-key signature
- * from the owner, so a stranger can't queue or cancel posts on behalf of
- * another user. Read paths are public.
+ * Write paths (POST create, update, cancel) take a signature under the owner's
+ * posting authority, so a stranger can't queue, rewrite or cancel posts on behalf
+ * of another user: the app key alone is public (it ships in the frontend bundle),
+ * and the cron publishes a queued post AS its owner. Read paths are public.
  *
- * Signed message format:
- *   create: scheduled-post|create|<owner>|<permlink>|<scheduledOnIso>|<timestamp>
+ * Signed message format (body fields `signature` and `timestamp`, ms):
+ *   create: scheduled-post|create|<owner>|<permlink>|<scheduledOn as sent>|<timestamp>
+ *   update: scheduled-post|update|<owner>|<permlink>|<timestamp>
  *   cancel: scheduled-post|cancel|<owner>|<permlink>|<timestamp>
+ *
+ * Signed by the owner's own posting key (Keychain and the other wallets), or by
+ * @threespeak (AD_SIGNING_DELEGATES) under the posting authority the owner granted
+ * it: HiveSigner and Butter Auth sessions hold no key in the browser, so 3speak.tv's
+ * API signs for them once it has verified the session, as it does for the ad
+ * preferences. That grant is required anyway: without it the cron cannot publish.
+ *
+ * Enforced when SCHEDULED_POSTS_REQUIRE_SIGNATURE=true. Until the app sends the
+ * signature, an unsigned write is still taken (the old app-key model) and logged
+ * once per owner and action.
  */
 
 const express = require('express');
 const router = express.Router();
 const { ObjectId } = require('mongodb');
 const { getDb } = require('../utils/db');
-const { verifyHiveSignedMessage } = require('../utils/hiveAuth');
+const { verifyHiveAuthority } = require('../utils/hiveAuth');
 const { validateApiKey } = require('../utils/middleware');
+const { asText } = require('../utils/input');
 const { COLLECTION, hasThreespeakPostingAuthority } = require('../services/scheduledPosts');
-const { SIGNATURE_TIMESTAMP_TOLERANCE_MS, HIVE_AUTH_REQUIRED } = require('../utils/config');
+const { SIGNATURE_TIMESTAMP_TOLERANCE_MS, HIVE_AUTH_REQUIRED, AD_SIGNING_DELEGATES } = require('../utils/config');
 
 const VALID_PAYOUT = new Set(['default', 'powerup', 'decline']);
 // Backend floor is 5 minutes (slack for cron drift / clock skew); the frontend
@@ -35,16 +48,51 @@ function buildUpdateMessage({ owner, permlink, timestamp }) {
     return ['scheduled-post', 'update', owner, permlink, String(timestamp)].join('|');
 }
 
-async function verifySignedPayload({ message, signature, owner }) {
-    if (!HIVE_AUTH_REQUIRED) return true;
-    return verifyHiveSignedMessage({ message, signature, username: owner });
+const signatureRequired = () => String(process.env.SCHEDULED_POSTS_REQUIRE_SIGNATURE || '').trim().toLowerCase() === 'true';
+
+/**
+ * Does the body carry a signature for `buildMessage(timestamp)` under `owner`'s
+ * posting authority? 'ok', or why not: 'missing', 'expired', 'invalid'.
+ */
+async function ownerProof(body, owner, buildMessage) {
+    if (!HIVE_AUTH_REQUIRED) return 'ok';
+    const signature = asText(body.signature).trim().slice(0, 200);
+    const tsRaw = asText(body.timestamp).trim();
+    if (!signature || !tsRaw) return 'missing';
+    const timestamp = parseInt(tsRaw, 10);
+    if (!Number.isFinite(timestamp) || Math.abs(Date.now() - timestamp) > SIGNATURE_TIMESTAMP_TOLERANCE_MS) return 'expired';
+    try {
+        const { ok, signer } = await verifyHiveAuthority({
+            message: buildMessage(timestamp), signature, username: owner, allowedDelegates: AD_SIGNING_DELEGATES,
+        });
+        if (ok && signer !== owner) console.log(`[scheduledPosts] write for @${owner} signed by delegate @${signer}`);
+        return ok ? 'ok' : 'invalid';
+    } catch (_) {
+        return 'invalid'; // unknown account, or a signature that does not parse
+    }
 }
 
-function badTimestamp(ts) {
-    const n = parseInt(ts, 10);
-    if (!Number.isFinite(n)) return 'invalid';
-    if (Math.abs(Date.now() - n) > SIGNATURE_TIMESTAMP_TOLERANCE_MS) return 'out of tolerance';
-    return null;
+const PROOF_ERRORS = { missing: 'Signature required', expired: 'timestamp out of tolerance', invalid: 'Invalid signature' };
+const loggedUnsigned = new Set();
+
+/**
+ * The signature gate of one write. Returns true when the request may go on;
+ * otherwise it has answered 401 (enforced) and returns false.
+ */
+async function signedByOwner(req, res, action, owner, buildMessage) {
+    const why = await ownerProof(req.body || {}, owner, buildMessage);
+    if (why === 'ok') return true;
+    if (signatureRequired()) {
+        res.status(401).json({ error: PROOF_ERRORS[why], expected_message: buildMessage('<ms>') });
+        return false;
+    }
+    const key = `${action}:${owner}`;
+    if (!loggedUnsigned.has(key)) {
+        if (loggedUnsigned.size >= 5000) loggedUnsigned.clear();
+        loggedUnsigned.add(key);
+        console.warn(`[scheduledPosts] ${action} for @${owner} without a valid owner signature (${why}); SCHEDULED_POSTS_REQUIRE_SIGNATURE is off`);
+    }
+    return true;
 }
 
 /* ─── POST /scheduled-posts/create ────────────────────────────────────── */
@@ -87,13 +135,15 @@ router.post('/create', validateApiKey, express.json({ limit: '2mb' }), async (re
             return res.status(422).json({ error: 'payoutOptions must be default | powerup | decline' });
         }
 
-        // ─── authorize: app key (validateApiKey) + on-chain @threespeak grant ──
-        // We use the app-key trust model (same as PUT /video/thumbnail and the
-        // /api/broadcast app-key path) instead of a client Hive signature, because
-        // HiveSigner / ManteAuth can't sign arbitrary messages client-side. Safety
-        // comes from requiring that `owner` has granted @threespeak posting
-        // authority on-chain — without that grant the cron couldn't broadcast for
-        // them anyway, so the worst case is "act as a user who opted into @threespeak".
+        // ─── the owner's signature (see the file header) ───────────────
+        const signedOn = asText(scheduledOn);
+        if (!await signedByOwner(req, res, 'create', owner,
+            (timestamp) => buildCreateMessage({ owner, permlink, scheduledOn: signedOn, timestamp }))) return undefined;
+
+        // ─── authorize: the on-chain @threespeak grant ─────────────────
+        // Without that grant the cron couldn't broadcast for the owner anyway. On
+        // its own (with the public app key) it only meant "act as any user who
+        // opted into @threespeak", which is what the signature above closes.
         let granted;
         try {
             granted = await hasThreespeakPostingAuthority(owner);
@@ -217,8 +267,10 @@ router.post('/update', validateApiKey, express.json({ limit: '2mb' }), async (re
         if (!permlink || typeof permlink !== 'string') return res.status(422).json({ error: 'permlink required' });
         if (!updates || typeof updates !== 'object') return res.status(422).json({ error: 'updates object required' });
 
-        // Authorize via app key (validateApiKey) + on-chain @threespeak grant — same
-        // model as /create (see note there). No client Hive signature required.
+        if (!await signedByOwner(req, res, 'update', owner,
+            (timestamp) => buildUpdateMessage({ owner, permlink, timestamp }))) return undefined;
+
+        // And the on-chain @threespeak grant, as for /create (see the note there).
         let granted;
         try {
             granted = await hasThreespeakPostingAuthority(owner);
@@ -324,10 +376,14 @@ router.post('/update', validateApiKey, express.json({ limit: '2mb' }), async (re
 router.post('/cancel', validateApiKey, express.json(), async (req, res) => {
     try {
         const { owner, permlink } = req.body || {};
-        if (!owner || !permlink) return res.status(422).json({ error: 'owner and permlink required' });
+        if (!owner || !permlink || typeof owner !== 'string' || typeof permlink !== 'string') {
+            return res.status(422).json({ error: 'owner and permlink required' });
+        }
 
-        // Authorize via app key (validateApiKey) + on-chain @threespeak grant — same
-        // model as /create. No client Hive signature required.
+        if (!await signedByOwner(req, res, 'cancel', owner,
+            (timestamp) => buildCancelMessage({ owner, permlink, timestamp }))) return undefined;
+
+        // And the on-chain @threespeak grant, as for /create.
         let granted;
         try {
             granted = await hasThreespeakPostingAuthority(owner);

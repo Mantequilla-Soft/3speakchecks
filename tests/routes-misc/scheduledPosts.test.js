@@ -33,6 +33,9 @@ beforeEach(() => {
   }]);
 });
 afterEach(() => jest.useRealTimers());
+// Unsigned writes are still taken while SCHEDULED_POSTS_REQUIRE_SIGNATURE is off, and logged.
+beforeEach(() => jest.spyOn(console, 'warn').mockImplementation(() => {}));
+afterEach(() => { delete process.env.SCHEDULED_POSTS_REQUIRE_SIGNATURE; });
 
 const create = (body, headers = apiKeyHeader()) => request(app).post('/scheduled-posts/create').set(headers)
   .send({ owner: 'alice', permlink: 'my-post', scheduledOn: inFuture(DAY), title: 'Hello', description: 'desc', ...body });
@@ -94,9 +97,79 @@ describe('who may write', () => {
   // beneficiaries of their choosing) that the cron then publishes AS any user who
   // granted @threespeak, or rewrite or cancel that user's queued posts.
   // (routes/scheduledPosts.js:51, :212, :324; helpers at :28-41 are unused)
-  test.skip('BUG: create without a signature from the owner is refused', async () => {
-    await create({ beneficiaries: [{ account: 'mallory', weight: 10000 }] }).expect(401);
+  // Enforced once SCHEDULED_POSTS_REQUIRE_SIGNATURE=true (after the app signs).
+  test('create without a signature from the owner is refused', async () => {
+    process.env.SCHEDULED_POSTS_REQUIRE_SIGNATURE = 'true';
+    const res = await create({ beneficiaries: [{ account: 'mallory', weight: 10000 }] }).expect(401);
+    expect(res.body).toEqual({ error: 'Signature required', expected_message: `scheduled-post|create|alice|my-post|${inFuture(DAY)}|<ms>` });
     expect(await queue().countDocuments()).toBe(0);
+  });
+});
+
+describe('the owner signature (SCHEDULED_POSTS_REQUIRE_SIGNATURE=true)', () => {
+  const threespeak = hiveAccount('threespeak');
+  const mallory = hiveAccount('mallory');
+  const T = NOW.getTime();
+  const createMsg = (ts, scheduledOn = inFuture(DAY), owner = 'alice') => `scheduled-post|create|${owner}|my-post|${scheduledOn}|${ts}`;
+  const signed = (signer, message, ts = T) => ({ signature: signer.sign(message), timestamp: ts });
+
+  beforeEach(() => {
+    process.env.SCHEDULED_POSTS_REQUIRE_SIGNATURE = 'true';
+    chain.addAccount(threespeak);
+    chain.addAccount(mallory);
+  });
+
+  test.each([
+    ['the owner', alice],
+    ['@threespeak under the posting authority the owner granted', threespeak],
+  ])('create signed by %s is queued', async (_label, signer) => {
+    await create(signed(signer, createMsg(T))).expect(201);
+    expect(await queue().countDocuments({ owner: 'alice' })).toBe(1);
+  });
+
+  test.each([
+    ['somebody else', () => signed(mallory, createMsg(T)), 'Invalid signature'],
+    ['a signature for another time slot', () => signed(alice, createMsg(T, inFuture(2 * DAY))), 'Invalid signature'],
+    ['a signature that does not parse', () => ({ signature: 'garbage', timestamp: T }), 'Invalid signature'],
+    ['a signature older than the tolerance', () => signed(alice, createMsg(T - 6 * MIN), T - 6 * MIN), 'timestamp out of tolerance'],
+    ['an unreadable timestamp', () => ({ signature: alice.sign(createMsg('x')), timestamp: 'x' }), 'timestamp out of tolerance'],
+  ])('create with %s is a 401 and queues nothing', async (_label, proof, error) => {
+    const res = await create(proof()).expect(401);
+    expect(res.body.error).toBe(error);
+    expect(await queue().countDocuments()).toBe(0);
+  });
+
+  test('@threespeak cannot sign for an owner who never granted it', async () => {
+    await create({ owner: 'bob', ...signed(threespeak, createMsg(T, inFuture(DAY), 'bob')) }).expect(401);
+  });
+
+  test('update and cancel need the owner signature too, each for its own action', async () => {
+    await seed();
+    const updateMsg = `scheduled-post|update|alice|my-post|${T}`;
+    const cancelMsg = `scheduled-post|cancel|alice|my-post|${T}`;
+    await update({ updates: { title: 'x' } }).expect(401);
+    await update({ updates: { title: 'x' }, ...signed(alice, cancelMsg) }).expect(401);
+    await update({ updates: { title: 'x' }, ...signed(alice, updateMsg) }).expect(200);
+    const res = await cancel({}).expect(401);
+    expect(res.body.expected_message).toBe('scheduled-post|cancel|alice|my-post|<ms>');
+    await cancel(signed(alice, updateMsg)).expect(401);
+    await cancel(signed(threespeak, cancelMsg)).expect(200);
+    expect(await queue().findOne()).toMatchObject({ title: 'x', status: 'cancelled' });
+  });
+
+  test('while the switch is off an unsigned write still works, logged once per owner and action', async () => {
+    delete process.env.SCHEDULED_POSTS_REQUIRE_SIGNATURE;
+    // An owner no earlier test wrote for (the log is once per process).
+    chain.addAccount(hiveAccount('dora', { postingDelegates: ['threespeak'] }));
+    await create({ owner: 'dora' }).expect(201);
+    await create({ owner: 'dora', title: 'again' }).expect(201);
+    await create({ owner: 'dora', ...signed(mallory, createMsg(T, inFuture(DAY), 'dora')) }).expect(201);
+    await cancel({ owner: 'dora' }).expect(200);
+    const lines = console.warn.mock.calls.map(([line]) => line).filter((l) => l.includes('@dora'));
+    expect(lines).toEqual([
+      expect.stringMatching(/^\[scheduledPosts\] create for @dora without a valid owner signature \(missing\)/),
+      expect.stringMatching(/^\[scheduledPosts\] cancel for @dora without a valid owner signature \(missing\)/),
+    ]);
   });
 });
 
