@@ -45,6 +45,14 @@ const ONETIME_VALIDITY_MS = ONETIME_VALIDITY_HOURS * 60 * 60 * 1000;
 const SUBSCRIBER_PREFIX = 'hive:';
 const PREMIUM_USERS_COLLECTION = process.env.PREMIUM_USERS_COLLECTION || 'embed-users';
 const SOURCE_TAG = 'subs';
+// Sources this sync may take over on promote: its own rows, and a Pro trial whose
+// user went on to pay (left as 'testing', the trial sweep would switch them off).
+const TAKEOVER_SOURCES = [SOURCE_TAG, 'testing'];
+
+// Premium granted by hand (no source tag) or by another source. Promoting such a
+// row would tag it 'subs', and the demote pass would then switch it off once the
+// subscription lapses, so it is left exactly as it is.
+const isForeignGrant = (row) => !!row && row.premium === true && !TAKEOVER_SOURCES.includes(row.premium_source);
 
 function stripPrefix(address) {
     const id = address || '';
@@ -171,6 +179,8 @@ async function syncPremiumFromSubs() {
     for (const [username, info] of active) {
         try {
             if (ENABLE_MONGO_WRITES) {
+                const existing = await col.findOne({ username }, { projection: { premium: 1, premium_source: 1 } });
+                if (isForeignGrant(existing)) continue;
                 const $set = {
                     premium: true,
                     premium_source: SOURCE_TAG,

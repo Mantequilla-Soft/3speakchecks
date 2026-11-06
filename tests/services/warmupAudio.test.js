@@ -89,10 +89,9 @@ describe('the rebuild on the real aggregation', () => {
     expect((await mod.warmupAudio()).allowed).toEqual(['a2', 'c1', 'b1', 'd1']);
   });
 
-  // utils/warmupAudio.js:21: `parseInt(...) || 3` turns an explicit 0 into 3, so the
-  // `MAX_TOTAL > 0` branch at :64 can never be false and warm-up audio cannot be
-  // hidden from the lists by configuration. `?? 3` on a NaN check was meant.
-  test.skip('BUG: WARMUP_AUDIO_MAX_TOTAL=0 hides every warm-up track from the lists', async () => {
+  // Regression: `parseInt(...) || 3` used to turn an explicit 0 into 3, so warm-up
+  // audio could not be hidden from the lists by configuration.
+  test('WARMUP_AUDIO_MAX_TOTAL=0 hides every warm-up track from the lists', async () => {
     load({ WARMUP_AUDIO_MAX_TOTAL: '0' });
     expect(mod.MAX_TOTAL).toBe(0);
     expect((await mod.warmupAudio()).allowed).toEqual([]);

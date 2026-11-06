@@ -383,15 +383,13 @@ describe('answers and body limits', () => {
     await expect(codeOf(safeFetch('https://feeds.example/', { maxBytes: 1000 }))).resolves.toBe('too_large');
   });
 
-  // utils/safeFetch.js:145-146: for an uncompressed answer `stream` IS `res`, so
-  // res.destroy() runs first and the stream.destroy(FetchError) after it is a no-op
-  // on an already destroyed stream: no 'error' is ever emitted. What was already
-  // buffered still arrives and 'end' fires, so the caller gets status 200 and a
-  // body silently TRUNCATED at maxBytes (a cut-off XML feed parsed as if whole).
-  // When the socket is cut before 'end', the promise instead hangs until the
-  // deadline and reports 'timeout'. Compressed bodies are fine (stream is the
-  // decompressor there), see the gzip bomb test below.
-  test.skip('BUG: an uncompressed chunked body past the cap is refused, not returned truncated', async () => {
+  // Regression: for an uncompressed answer `stream` IS `res`, so res.destroy() ran
+  // first and the stream.destroy(FetchError) after it was a no-op on an already
+  // destroyed stream: no 'error' was ever emitted. What was already buffered still
+  // arrived and 'end' fired, so the caller got status 200 and a body silently
+  // TRUNCATED at maxBytes (a cut-off XML feed parsed as if whole), or, when the
+  // socket was cut before 'end', a 'timeout' at the deadline.
+  test('an uncompressed chunked body past the cap is refused, not returned truncated', async () => {
     stub.handle((_q, res) => {
       res.writeHead(200, { 'Content-Type': 'application/rss+xml' });
       for (let i = 0; i < 20; i += 1) res.write('y'.repeat(500));
@@ -439,12 +437,12 @@ describe('answers and body limits', () => {
     await expect(codeOf(safeFetch('https://feeds.example/'))).resolves.toBe('network');
   });
 
-  // The redirect and error branches call res.resume(), which reads and discards the
-  // rest of the body for as long as the server keeps sending. The fetch itself
-  // returns, but the socket stays open, draining, with no deadline (the timer was
-  // cleared). A hostile feed that answers every refresh with an endless 302 body
-  // ties up one socket per refresh, forever.
-  test.skip('BUG: a redirect hop is closed, not left draining an endless body after the fetch returned', async () => {
+  // Regression: the redirect and error branches called res.resume(), which reads
+  // and discards the rest of the body for as long as the server keeps sending. The
+  // fetch itself returned, but the socket stayed open, draining, with no deadline
+  // (the timer was cleared). A hostile feed answering every refresh with an endless
+  // 302 body tied up one socket per refresh, forever.
+  test('a redirect hop is closed, not left draining an endless body after the fetch returned', async () => {
     let hopSocket;
     let timer;
     stub.handle(routes({

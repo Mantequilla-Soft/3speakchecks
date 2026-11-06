@@ -214,20 +214,17 @@ describe('malformed and failing posts', () => {
     stubBroadcast(() => { throw new Error('RC exhausted'); });
     await posts().insertOne(post('flaky'));
 
-    await scheduled.runOnce();
-    await scheduled.runOnce();
+    for (let tick = 0; tick < 4; tick++) await scheduled.runOnce();
 
     expect(await byPermlink('flaky')).toMatchObject({ status: 'failed', attempts: 3, lastError: 'RC exhausted' });
     expect(broadcasts).toHaveLength(3);
   });
 
-  // BUG: after a failed broadcast the post is put back to `scheduled` "to retry on
-  // next tick" (services/scheduledPosts.js:476), but it is still due, so the very
-  // next iteration of the same tick's loop (line 417) claims it again. A single
-  // RPC blip therefore burns all three attempts within milliseconds and the post
-  // lands in `failed` instead of being retried INTERVAL_MIN later. If the first
-  // broadcast did reach the chain before the error, it is also re-signed at once.
-  test.skip('BUG: a failed broadcast is retried on the next tick, not three times in the same one', async () => {
+  // Regression: after a failed broadcast the post is put back to `scheduled`, but it
+  // is still due, so the next iteration of the same tick's loop used to claim it
+  // again. A single RPC blip burned all three attempts within milliseconds and the
+  // post landed in `failed` instead of being retried INTERVAL_MIN later.
+  test('a failed broadcast is retried on the next tick, not three times in the same one', async () => {
     stubBroadcast(() => { throw new Error('timeout'); });
     await posts().insertOne(post('flaky'));
 

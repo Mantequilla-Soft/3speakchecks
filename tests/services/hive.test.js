@@ -344,12 +344,12 @@ describe('getFollowingList', () => {
     expect(await hive.getFollowingList('me')).toBeNull();
   });
 
-  // utils/hive.js:428: a page that fails mid-walk ends the loop like a short page
-  // would, and the TRUNCATED list is cached for ten minutes as if it were the whole
-  // answer. Someone following 2500 accounts gets a follow feed (and new-video push
-  // fan-out) built from the first 1000 until the cache expires. A failed page should
-  // return the stale/no list (null) rather than cache a partial one.
-  test.skip('BUG: a page that fails mid-walk does not cache a truncated following list', async () => {
+  // Regression: a page that failed mid-walk used to end the loop like a short page,
+  // and the TRUNCATED list was cached for ten minutes as if it were the whole answer.
+  // Someone following 2500 accounts got a follow feed (and new-video push fan-out)
+  // built from the first 1000 until the cache expired. A failed page returns the
+  // stale/no list (null) rather than caching a partial one.
+  test('a page that fails mid-walk does not cache a truncated following list', async () => {
     follows(2500, { failPage: 2 });
     const list = await hive.getFollowingList('me');
     expect(list === null || list.length === 2500).toBe(true);

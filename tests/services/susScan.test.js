@@ -258,17 +258,30 @@ describe('a scan run', () => {
     expect(console.error).toHaveBeenCalledWith('[susScan] run failed:', 'webhook 500');
   });
 
-  test.skip('BUG: a finding whose webhook delivery failed is alerted again on the next run', async () => {
-    // services/susScan.js:297 records every finding in sus_alerts (onlyNew) BEFORE
-    // line 299 sends the webhook. When Discord is down or rate-limits (line 281
-    // throws), the finding is already marked "alerted today", so every later run
-    // that day filters it out and nobody is ever told.
+  test('a finding whose webhook delivery failed is alerted again on the next run', async () => {
+    // Regression: every finding is recorded in sus_alerts BEFORE the webhook is sent.
+    // When Discord was down or rate-limited, the finding stayed marked "alerted
+    // today", so every later run that day filtered it out and nobody was ever told.
     global.fetch = fakeFetch([['http://127.0.0.1:9/sus-hook', () => ({ status: 503, body: '' })]]);
     jest.spyOn(console, 'error').mockImplementation(() => {});
     await seedCrawler();
     await runOnce();
 
+    expect(await db().collection('sus_alerts').countDocuments()).toBe(0);
+
     global.fetch = fakeFetch([['http://127.0.0.1:9/sus-hook', () => ({ status: 204, body: '' })]]);
     expect(types(await runOnce())).toEqual(['crawler_sessions']);
+    expect(await db().collection('sus_alerts').countDocuments()).toBe(1);
+  });
+
+  test('when forgetting an undelivered alert fails too, the webhook error is still the one reported', async () => {
+    const { Collection } = require('mongodb');
+    global.fetch = fakeFetch([['http://127.0.0.1:9/sus-hook', () => ({ status: 503, body: '' })]]);
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    jest.spyOn(Collection.prototype, 'deleteMany').mockRejectedValue(new Error('primary stepped down'));
+    await seedCrawler();
+    await expect(runOnce()).resolves.toEqual([]);
+    expect(console.error).toHaveBeenCalledWith('[susScan] could not forget undelivered alerts:', 'primary stepped down');
+    expect(console.error).toHaveBeenCalledWith('[susScan] run failed:', 'webhook 503');
   });
 });
