@@ -154,7 +154,7 @@ describe('what search never returns', () => {
   // Every shorts feed hides an unlisted short (`listed_on_3speak: { $ne: false }`),
   // and search hides unlisted long-form videos. The shorts search has no listing
   // clause (routes/search.js:285-294), so an unlisted short is publicly searchable.
-  test.skip('BUG: an UNLISTED short is returned by search', async () => {
+  test('an UNLISTED short is not returned by search', async () => {
     await col('embed-video').insertOne(F.shortVideo({ permlink: 'secret', hive_title: 'Volcano secret', listed_on_3speak: false }));
     expect((await search({ q: 'volcano' }).expect(200)).body.total).toBe(0);
   });
@@ -163,7 +163,7 @@ describe('what search never returns', () => {
   // (routes/search.js:292), but shorts are addressed by `owner` and usually carry
   // no hive_author, and `$nin` matches a missing field. So a moderation-hidden
   // creator's shorts stay searchable; the feeds filter shorts by `owner`.
-  test.skip('BUG: a moderation-hidden creator\'s SHORT is returned by search', async () => {
+  test('a moderation-hidden creator\'s SHORT is not returned by search', async () => {
     await F.hideCreator(db(), 'hush');
     await col('embed-video').insertOne(F.shortVideo({ owner: 'hush', embed_url: '@hush/x', permlink: 'h', hive_title: 'Volcano short' }));
     expect((await search({ q: 'volcano' }).expect(200)).body.total).toBe(0);
@@ -256,7 +256,7 @@ describe('filters', () => {
   // and the community feeds match category OR a hive_tags entry), but the search
   // filter asks embed docs for a `community` field that nothing ever writes
   // (routes/search.js:205). Filtering by community therefore drops every embed video.
-  test.skip('BUG: community= drops every embed video of that community', async () => {
+  test('community= keeps the embed videos of that community', async () => {
     await col('embed-video').insertOne(F.embedVideo({ permlink: 'inside', hive_title: 'Jazz night', category: 'hive-123456' }));
     expect(keys((await search({ q: 'jazz', community: 'hive-123456' }).expect(200)).body.results)).toEqual(['video:hive-inside']);
   });
@@ -314,7 +314,7 @@ describe('GET /search/suggest', () => {
   // The hidden-creator doc (utils/hiddenCreators.js) removes their content from
   // search, and the embed-title and profile suggestions do drop them, but the legacy
   // title suggestion has no hidden-creator clause (routes/search.js:32-35).
-  test.skip('BUG: a moderation-hidden creator\'s LEGACY titles are still suggested', async () => {
+  test('a moderation-hidden creator\'s LEGACY titles are not suggested', async () => {
     await F.hideCreator(db(), 'hush');
     await col('videos').insertOne(F.legacyVideo({ owner: 'hush', permlink: 'h', title: 'Garden secrets' }));
     expect((await suggest('garden').expect(200)).body.suggestions).toEqual([]);
@@ -324,7 +324,7 @@ describe('GET /search/suggest', () => {
   // (utils/hiddenFromFeed.js), and full search drops it, but the embed-title
   // suggestion has no listing clause (routes/search.js:38-46): its title is offered
   // to anyone who types a few letters of it.
-  test.skip('BUG: an UNLISTED embed video\'s title is suggested', async () => {
+  test('an UNLISTED embed video\'s title is not suggested', async () => {
     await col('embed-video').insertOne(F.embedVideo({ permlink: 'u', hive_title: 'Garden private', listed_on_3speak: false }));
     expect((await suggest('garden').expect(200)).body.suggestions).toEqual([]);
   });

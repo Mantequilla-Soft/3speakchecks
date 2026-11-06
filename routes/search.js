@@ -30,7 +30,7 @@ router.get('/suggest', async (req, res) => {
 
         const [titles, embedTitles, usernames, tags, embedTags, communities, playlists] = await Promise.all([
             db.collection('videos').find(
-                { title: containsRegex, status: 'published', publishFailed: { $ne: true } },
+                { title: containsRegex, status: 'published', publishFailed: { $ne: true }, owner: { $nin: hiddenListSync() } },
                 { projection: { title: 1, author: 1, owner: 1, permlink: 1, _id: 0 } }
             ).limit(5).toArray(),
             // Embed videos that have already been broadcast to Hive should also surface
@@ -39,6 +39,7 @@ router.get('/suggest', async (req, res) => {
                 {
                     hive_title: containsRegex,
                     status: 'published',
+                    listed_on_3speak: { $ne: false },   // an unlisted title is never offered
                     hive_author: { $type: 'string', $nin: hiddenListSync() },
                     hive_permlink: { $type: 'string' },
                 },
@@ -202,7 +203,10 @@ router.get('/', async (req, res) => {
             const extra = {};
             if (tagFilter) extra.hive_tags = tagFilter;
             if (hasDateFilter) extra.createdAt = dateFilter;
-            if (communityFilter) extra.community = communityFilter;
+            // Embed docs carry their community as `category` (embedCategorySync) or a
+            // hive_tags entry, never as `community`: same rule as the community feeds.
+            // In $and so it never collides with a hive_tags tag/NSFW condition.
+            if (communityFilter) extra.$and = [{ $or: [{ category: communityFilter }, { hive_tags: communityFilter }] }];
             return extra;
         }
 
@@ -289,6 +293,10 @@ router.get('/', async (req, res) => {
                     short: true,
                     processed: true,
                     embed_url: { $exists: true, $ne: null },
+                    listed_on_3speak: { $ne: false },   // unlisted shorts stay off search, as on every shorts feed
+                    // Shorts are addressed by `owner` and often have no hive_author
+                    // (which `$nin` would match), so check both.
+                    owner: { $nin: hiddenListSync() },
                     hive_author: { $nin: hiddenListSync() },
                     ...nsfwFilterHiveTags(req),
                     ...embedExtraFilters()
