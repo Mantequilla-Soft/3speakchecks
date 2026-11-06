@@ -150,7 +150,7 @@ describe('POST /subtitles/edit', () => {
     // body first with express.json() at its default 100 kB limit, so the route's own
     // express.json({ limit: '2mb' }) never runs. Captions of a long video (here
     // 1500 cues, about 200 kB) are refused with 413 before the route sees them.
-    test.skip('BUG: captions between 100 kB and 1 MB can be saved through the server.js middleware stack', async () => {
+    test('captions between 100 kB and 1 MB can be saved through the server.js middleware stack', async () => {
       const long = Array.from({ length: 1500 }, (_, i) => ({ start: i, end: i + 1, text: `line ${i} `.padEnd(90, 'x') }));
       await send(editRequest({ cues: long })).expect(200);
     });
