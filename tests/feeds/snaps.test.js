@@ -164,7 +164,7 @@ describe('GET /snaps-feed', () => {
   // but the snaps feed only drops the VIEWER's own snap hides (routes/snaps.js:
   // 254-264); it never consults the hidden-creator set, so their posts stay on
   // everyone's home feed.
-  test.skip('BUG: a moderation-hidden creator\'s snaps are still on the home feed', async () => {
+  test('a moderation-hidden creator\'s snaps are not on the home feed', async () => {
     await F.hideCreator(db(), 'hush');
     await snaps().insertMany([snap('hush', 'h'), snap('fine', 'f')]);
     expect((await feed().expect(200)).body.snaps.map((s) => s.owner)).toEqual(['fine']);

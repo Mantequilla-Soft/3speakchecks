@@ -877,10 +877,12 @@ router.get('/trendingSorted', async (req, res) => {
         // Candidates, live Hive rewards and HIVE identities are the same for every
         // viewer, so they come from a shared pool (utils/feedPools.js). Copy before
         // scoring: the pool is shared. Hidden creators are re-checked here because the
-        // list changes live (the pool's legacy query used the list at load time).
+        // list changes live (the pool was built with the list at load time). Embed
+        // candidates too, on both the uploader (`owner`) and the Hive author.
         const hidden = new Set(hiddenListSync());
+        const isHiddenName = (u) => !!u && hidden.has(String(u).toLowerCase());
         const entries = (await getTrendingPool(db, isNsfwAllowed(req)))
-            .filter(({ video }) => video._source === 'embed' || !hidden.has(video.owner));
+            .filter(({ video }) => !isHiddenName(video.owner) && !(video._source === 'embed' && isHiddenName(video.author)));
         const candidateVideos = entries.map(({ video }) => ({ ...video }));
 
         // ALL THREE manual votes come from the one cached curation map (utils/curation.js).

@@ -96,7 +96,7 @@ async function loadTrendingPool(db, nsfwAllowed) {
             status: 'published',
             short: false,
             listed_on_3speak: true,
-            hive_author: { $ne: null },
+            hive_author: { $ne: null, $nin: hiddenListSync() },   // moderation-hidden creators
             hive_permlink: { $ne: null },
             createdAt: { $gte: sevenDaysAgo },
             ...nsfwFilterHiveTags(req)
