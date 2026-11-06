@@ -65,7 +65,7 @@ describe('which playlists are candidates', () => {
   // (utils/hiddenCreators.js), and the other home-feed rails all drop them. This
   // rail only drops the VIEWER's own dismissals (routes/playlistsFeed.js:117-124),
   // so a hidden creator's playlists keep appearing on everyone's home feed.
-  test.skip('BUG: a moderation-hidden creator\'s playlists are still on the home feed', async () => {
+  test('a moderation-hidden creator\'s playlists are not on the home feed', async () => {
     await F.hideCreator(db(), 'hush');
     await playlists().insertMany([playlist('hidden one', { owner: 'hush' }), playlist('fine')]);
     expect(names(await feed().expect(200))).toEqual(['fine']);

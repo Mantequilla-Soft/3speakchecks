@@ -116,7 +116,7 @@ describe('GET /api/my-videos', () => {
   // (routes/user.js:494), so ?limit=-1 becomes slice(offset, offset - 1): every
   // video but the last, sailing past the 100 cap. Every feed route clamps with
   // Math.max(..., 1).
-  test.skip('BUG: a negative limit returns (almost) the whole channel instead of clamping', async () => {
+  test('a negative limit is clamped to one card, not (almost) the whole channel', async () => {
     await videos().insertMany(Array.from({ length: 5 }, (_, i) => F.legacyVideo({ owner: 'cre', permlink: `p${i}` })));
     const res = await myVideos({ username: 'cre', limit: -1 }).expect(200);
     expect(res.body.data.videos.length).toBeLessThanOrEqual(1);
@@ -201,7 +201,7 @@ describe('profile counts', () => {
   // on is worse than no number at all", but its shorts tally is missing the live-story
   // clause (routes/user.js:228-231 vs :148-152). An expired 24h story is still
   // counted, so the follower list shows more shorts than the profile.
-  test.skip('BUG: the bulk counts still count EXPIRED stories as shorts', async () => {
+  test('the bulk counts leave EXPIRED stories out of shorts, like the profile', async () => {
     await seedChannel('bulky');
     const res = await request(app).post('/users/counts').send({ usernames: ['bulky'] }).expect(200);
     expect(res.body.counts.bulky).toEqual({ username: 'bulky', videos: 2, shorts: 2, views: 113 });

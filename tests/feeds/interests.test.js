@@ -77,7 +77,7 @@ describe('matching', () => {
   // This dedicated endpoint replaced that variant but matches the pick literally
   // (routes/feeds.js:101-103), so a viewer who picked "tech-science" gets nothing
   // tagged technology / science / education / programming.
-  test.skip('BUG: a CATEGORY pick does not keep the videos of its topics (literal match)', async () => {
+  test('a CATEGORY pick keeps the videos of its topics, not only the literal category tag', async () => {
     await seedTopics(['technology', 'science', 'music']);
     const res = await interests({ interests: 'tech-science' }).expect(200);
     expect(F.permlinks(res.body.videos).sort()).toEqual(['hive-v0', 'hive-v1']);

@@ -205,7 +205,7 @@ describe('per viewer', () => {
   // embed query has no hidden-creator clause at all (utils/feedPools.js:94-103),
   // and the route deliberately waves embed candidates through its live re-check
   // (routes/feeds.js:883), so a hidden creator's embed uploads stay on Trending.
-  test.skip('BUG: a moderation-hidden creator\'s EMBED videos are still on trending', async () => {
+  test('a moderation-hidden creator\'s EMBED videos are not on trending', async () => {
     await F.hideCreator(db(), 'bad');
     await embeds().insertMany([F.embedVideo({ owner: 'bad', permlink: 'b' }), F.embedVideo({ owner: 'good', permlink: 'g' })]);
     expect(F.permlinks((await trending().expect(200)).body.videos)).toEqual(['hive-g']);

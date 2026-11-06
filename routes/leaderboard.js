@@ -88,19 +88,18 @@ const TRACKED_SINCE_MS = Date.parse(`${WATCH_TRACKED_SINCE}T00:00:00.000Z`);
 // `from` is the window start the aggregator stored on the row; without one
 // (routes that answer before reading a row) it falls back to today minus the
 // window length. All-time always predates tracking.
+// A `from` that is missing or not a date reads as "today minus the window length".
+function watchPartial(window, from = null) {
+  if (window === 'all') return true;
+  const stored = from ? Date.parse(from) : NaN;
+  const startMs = Number.isFinite(stored) ? stored : Date.now() - (WINDOW_DAYS[window] || 0) * 86400000;
+  return Number.isFinite(startMs) ? startMs < TRACKED_SINCE_MS : true;
+}
+
 function metaFor(window, metric, from = null) {
-  let partial = false;
-  if (metric.endsWith('_watch_secs')) {
-    if (window === 'all') {
-      partial = true;
-    } else {
-      const startMs = from ? Date.parse(from) : Date.now() - (WINDOW_DAYS[window] || 0) * 86400000;
-      partial = Number.isFinite(startMs) ? startMs < TRACKED_SINCE_MS : true;
-    }
-  }
   return {
     watch_tracked_since: WATCH_TRACKED_SINCE,
-    partial_watch_data: partial,
+    partial_watch_data: metric.endsWith('_watch_secs') ? watchPartial(window, from) : false,
   };
 }
 
@@ -221,8 +220,10 @@ router.get('/leaderboard/summary', async (req, res) => {
     const db = getDb();
     const rows = await loadWindow(db, window);
 
+    let firstRow = null;   // a raw row: normalize() keeps only user + metrics
     const boards = METRICS.map((metric) => {
       const docs = rankedBoard(rows, metric).slice(0, limit);
+      if (!firstRow && docs[0]) firstRow = docs[0];
       return [metric, {
         metric,
         ...metaFor(window, metric, docs[0] ? docs[0].from : null),
@@ -230,13 +231,12 @@ router.get('/leaderboard/summary', async (req, res) => {
       }];
     });
 
-    const any = boards.map(([, b]) => b.entries[0]).find(Boolean);
     res.json({
       success: true,
       window,
       limit,
       watch_tracked_since: WATCH_TRACKED_SINCE,
-      updated_at: any ? any.updated_at : null,
+      updated_at: firstRow ? (firstRow.updated_at ?? null) : null,
       boards: Object.fromEntries(boards),
     });
   } catch (err) {
@@ -415,10 +415,11 @@ router.get('/leaderboard/topic', async (req, res) => {
       ]);
     }
 
-    // Same caveat as the main board: watch-time only exists from the tracking
-    // start date, so any watch metric is partial on a window longer than 7d.
-    const partial = metric.endsWith('watch_secs') && window !== '7d';
+    // Same caveat and rule as the main board: watch-time only exists from the
+    // tracking start date, so a watch board is partial only while its window
+    // still reaches back past that date.
     const first = docs[0] || null;
+    const partial = metric.endsWith('watch_secs') && watchPartial(window, first ? first.from : null);
     res.json({
       success: true,
       window,

@@ -26,6 +26,7 @@ const { getDb } = require('../utils/db');
 const { decodePlaylistMeta } = require('../utils/playlistMeta');
 const { getFollowingList } = require('../utils/hive');
 const { hiddenCreatorsOf } = require('../utils/userFilters');
+const { getHiddenSet } = require('../utils/hiddenCreators');
 const { getCached } = require('../utils/feedCache');
 const { PLAYLIST_FEED_CACHE_MS } = require('../utils/config');
 
@@ -119,8 +120,10 @@ router.get('/playlists-feed', async (req, res) => {
     }
 
     const all = await loadRecentPlaylists(db);
-    // Creators this viewer dismissed ("don't show this creator") are gone here too.
+    // Creators this viewer dismissed ("don't show this creator") are gone here too,
+    // and so are moderation-hidden creators (contentcreators.hidden, cached set).
     const hidden = new Set(await hiddenCreatorsOf(db, currentuser));
+    const modHidden = await getHiddenSet(db);
 
     // The cutoff is applied HERE, not in the query, so a cached set still honours an
     // exact per-request window (and `maxAgeHours`, which only ever narrows it).
@@ -128,7 +131,8 @@ router.get('/playlists-feed', async (req, res) => {
     const matching = all.filter((p) => (
       p.updatedMs > cutoff
       && p.owner !== currentuser              // your own playlists, same as own snaps
-      && !hidden.has(String(p.owner || '').toLowerCase())
+      && !hidden.has(p.owner)
+      && !modHidden.has(p.owner)
       && (!following || following.has(p.owner))
     ));
 

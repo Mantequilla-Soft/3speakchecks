@@ -59,7 +59,7 @@ test.each([
 // `if (!ENABLE_MONGO_WRITES) return res.status(503)`. PATCH .../reusable
 // (routes/videos.js:439-474) has no such check, so it writes the shared `videos`
 // collection even while writes are switched off.
-test.skip('BUG: PATCH /api/video/:owner/:permlink/reusable still writes while writes are disabled', async () => {
+test('PATCH /api/video/:owner/:permlink/reusable answers 503 and writes nothing while writes are disabled', async () => {
   const before = await snapshot();
   await request(app).patch('/api/video/meno/old/reusable')
     .set('Authorization', `Bearer ${process.env.UPLOAD_SECRET_TOKEN}`).send({ reusable: true }).expect(503);

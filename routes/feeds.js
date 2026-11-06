@@ -57,6 +57,7 @@ const { SUGGEST_MAX_LIMIT } = require('../utils/config');
 const { getPool, hydrate } = require('../utils/discoverPool');
 const { getInterestPool } = require('../utils/interestPool');
 const { getTranscriptionTags } = require('../utils/transcriptionTags');
+const { expandTag } = require('../utils/interestTags');
 const { pickWinner, fetchViewerWeights } = require('../utils/effectiveTags');
 
 /**
@@ -97,9 +98,13 @@ router.get('/interests', async (req, res) => {
             return res.json({ success: true, feed: 'interests', page, limit, total: 0, totalPages: 0, seed, videos: [] });
         }
 
+        // A CATEGORY pick ("tech-science") keeps the category tag itself plus every
+        // topic under it, same as /feeds/discover?interestsOnly=1. Topic picks stay
+        // literal (no sibling topics).
+        const matchSet = new Set([...interestSet].flatMap(expandTag));
         const allowNsfw = req.query.nsfw === 'true';
         const candidates = pool.filter((e) =>
-            (allowNsfw || !e.nsfw) && e.winnerTag && interestSet.has(e.winnerTag)
+            (allowNsfw || !e.nsfw) && e.winnerTag && matchSet.has(e.winnerTag)
         );
 
         // `base` already carries freshness × newBoost × curationBoost × retention.
@@ -877,10 +882,12 @@ router.get('/trendingSorted', async (req, res) => {
         // Candidates, live Hive rewards and HIVE identities are the same for every
         // viewer, so they come from a shared pool (utils/feedPools.js). Copy before
         // scoring: the pool is shared. Hidden creators are re-checked here because the
-        // list changes live (the pool's legacy query used the list at load time).
+        // list changes live (the pool was built with the list at load time). Embed
+        // candidates too, on both the uploader (`owner`) and the Hive author.
         const hidden = new Set(hiddenListSync());
+        const isHiddenName = (u) => !!u && hidden.has(String(u).toLowerCase());
         const entries = (await getTrendingPool(db, isNsfwAllowed(req)))
-            .filter(({ video }) => video._source === 'embed' || !hidden.has(video.owner));
+            .filter(({ video }) => !isHiddenName(video.owner) && !(video._source === 'embed' && isHiddenName(video.author)));
         const candidateVideos = entries.map(({ video }) => ({ ...video }));
 
         // ALL THREE manual votes come from the one cached curation map (utils/curation.js).

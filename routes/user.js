@@ -118,6 +118,18 @@ router.put('/user/trailer', validateApiKey, async (req, res) => {
 const countsCache = new Map();          // username -> { at, value }
 const COUNTS_TTL_MS = 5 * 60 * 1000;    // profiles are hot; these numbers move slowly
 
+// Shorts as /shorts/:username counts them (embed_url, NOT hive_permlink), so a 24h
+// story counts only while it is live (routes/stories.js). One definition for the
+// single and the bulk route, so a follower row never disagrees with the profile.
+// `owner` is a username or an `$in` of them.
+function shortsCountMatch(owner) {
+  return {
+    owner, status: 'published', short: true, processed: true,
+    embed_url: { $exists: true, $ne: null }, listed_on_3speak: { $ne: false },
+    $or: [{ story: { $ne: true } }, { story_expires_at: { $gt: new Date() } }],
+  };
+}
+
 router.get('/user/:username/counts', async (req, res) => {
   try {
     const username = String(req.params.username || '').trim().toLowerCase();
@@ -145,11 +157,7 @@ router.get('/user/:username/counts', async (req, res) => {
       }),
       // shorts — as /shorts/:username counts them (embed_url, NOT hive_permlink),
       // so a 24h story counts only while it is live (routes/stories.js)
-      tally(embedVideoCollection, {
-        owner: username, status: 'published', short: true, processed: true,
-        embed_url: { $exists: true, $ne: null }, listed_on_3speak: { $ne: false },
-        $or: [{ story: { $ne: true } }, { story_expires_at: { $gt: new Date() } }],
-      }),
+      tally(embedVideoCollection, shortsCountMatch(username)),
       // legacy — /api/my-videos also excludes failed publishes
       tally(db.collection('videos'), {
         owner: username, status: 'published', publishFailed: { $ne: true }, ...BANNED_FILTER,
@@ -225,10 +233,7 @@ router.post('/users/counts', async (req, res) => {
           owner: inMiss, status: 'published', short: false, listed_on_3speak: true,
           hive_author: { $ne: null }, hive_permlink: { $ne: null }, ...BANNED_FILTER,
         }),
-        tally(embedVideoCollection, {
-          owner: inMiss, status: 'published', short: true, processed: true,
-          embed_url: { $exists: true, $ne: null }, listed_on_3speak: { $ne: false },
-        }),
+        tally(embedVideoCollection, shortsCountMatch(inMiss)),
         tally(db.collection('videos'), {
           owner: inMiss, status: 'published', publishFailed: { $ne: true }, ...BANNED_FILTER,
         }),
@@ -491,8 +496,8 @@ router.get('/api/my-videos', async (req, res) => {
     try {
         const db = getDb();
         // Extract query parameters
-        const limit = Math.min(parseInt(req.query.limit) || 20, 100);
-        const offset = parseInt(req.query.offset) || 0;
+        const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
+        const offset = Math.max(parseInt(req.query.offset) || 0, 0);
         const statusFilter = req.query.status || 'all';
         const username = req.query.username;
         // When the owner views their OWN profile the frontend sets this so

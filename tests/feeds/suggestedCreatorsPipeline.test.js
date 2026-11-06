@@ -51,7 +51,7 @@ describe('getRecentCreatorEngagement', () => {
   // a Map (utils/suggestedCreators.js:64 and :69), so `Alice/x` and `alice/x` become two
   // groups and the second silently overwrites the first. utils/curation.js documents
   // this exact trap and groups on $toLower for that reason.
-  test.skip('BUG: reshares whose author differs only in case overwrite each other instead of adding up', async () => {
+  test('reshares whose author differs only in case add up instead of overwriting each other', async () => {
     await db().collection('embed-video').insertOne(F.embedVideo({ owner: 'alice', permlink: 'a2', views: 1 }));
     await db().collection('reshares').insertMany([{ author: 'Alice', permlink: 'hive-a2' }, { author: 'alice', permlink: 'hive-a2' }]);
     expect((await getRecentCreatorEngagement(db())).get('alice').reshares).toBe(2);

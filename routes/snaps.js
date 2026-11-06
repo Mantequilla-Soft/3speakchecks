@@ -25,6 +25,7 @@ const SNAP_APP = '3speak/snap'; // json_metadata.app our composer stamps on a sn
 const SNAP_FEED_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 const { getCached, invalidate: dropCache } = require('../utils/feedCache');
+const { getHiddenSet } = require('../utils/hiddenCreators');
 const { SNAP_FEED_CACHE_MS, SNAP_FEED_MIN_FOLLOWERS, SNAP_FEED_ALWAYS_SHOW_FOLLOWED } = require('../utils/config');
 
 // ── Caches ────────────────────────────────────────────────────────────────────
@@ -270,8 +271,11 @@ router.get('/snaps-feed', async (req, res) => {
     const cutoff = Date.now() - maxAgeMsFrom(req, SNAP_FEED_MAX_AGE_MS);
     const allowNsfw = req.query.nsfw === 'true';
     const all = await loadSnaps(db);
+    // Moderation-hidden creators (contentcreators.hidden) are off every feed.
+    const modHidden = await getHiddenSet(db);
     const candidates = all.filter((sn) => (
       new Date(sn.created).getTime() > cutoff
+      && !modHidden.has(String(sn.owner || '').toLowerCase())
       && (allowNsfw || sn.nsfw !== true)
       && (!following || following.has(sn.owner))
       && (!hiddenCreators || !hiddenCreators.has(sn.owner))
