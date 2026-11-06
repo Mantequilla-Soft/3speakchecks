@@ -215,11 +215,13 @@ async function detect(db, now) {
 }
 
 /** Keep only findings not yet alerted today; remember the new ones. */
+const alertId = (f, now) => `${f.type}|${f.subject}|${dayKey(now)}`;
+
 async function onlyNew(db, findings, now) {
   const col = db.collection(ALERTS);
   const fresh = [];
   for (const f of findings) {
-    const _id = `${f.type}|${f.subject}|${dayKey(now)}`;
+    const _id = alertId(f, now);
     try {
       await col.insertOne({ _id, ...f, at: now });
       fresh.push(f);
@@ -296,7 +298,17 @@ async function runOnce({ dryRun = false } = {}) {
     if (dryRun) return all;
     const fresh = await onlyNew(db, all, now);
     console.log(`[susScan] ${all.length} finding(s), ${fresh.length} new${fresh.length && !WEBHOOK ? ' (no SUS_ALERT_WEBHOOK_URL, not sent)' : ''}`);
-    if (fresh.length && WEBHOOK) await sendWebhook(fresh, await linksFor(db, fresh), now);
+    if (fresh.length && WEBHOOK) {
+      try {
+        await sendWebhook(fresh, await linksFor(db, fresh), now);
+      } catch (e) {
+        // Not delivered: forget them again, or every later run today would read
+        // them as "alerted already" and nobody would ever be told.
+        await db.collection(ALERTS).deleteMany({ _id: { $in: fresh.map((f) => alertId(f, now)) } })
+          .catch((err) => console.error('[susScan] could not forget undelivered alerts:', err && err.message));
+        throw e;
+      }
+    }
     return fresh;
   } catch (e) {
     console.error('[susScan] run failed:', e && e.message);
