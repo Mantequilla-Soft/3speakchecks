@@ -986,6 +986,12 @@ router.get('/creators', async (req, res) => {
 // Playlists their owner marked `video` are left out. Each entry carries the
 // playlist `kind` (podcast | music | voice | sounds: the owner's pick, else what
 // most tracks are); ?kind= keeps one kind only.
+// ?category= (the Audio page's type tabs) matches a playlist by its saved kind
+// where the tab has one (song = music, podcast, voice_message = voice): such a
+// playlist shows under that tab with all its tracks, and under no other.
+// Playlists without a saved kind, and the other tabs, still go by the
+// categories of the tracks inside.
+const PLAYLIST_KIND_FOR_CATEGORY = { song: 'music', podcast: 'podcast', voice_message: 'voice' };
 router.get('/playlists', async (req, res) => {
     try {
         const db = getDb();
@@ -1012,7 +1018,13 @@ router.get('/playlists', async (req, res) => {
         // e.g. category "Music" keeps albums whose tracks match.
         const permlinks = [...new Set(candidates.flatMap(p => (p.items || []).map(i => i.permlink)))];
         const audioQuery = { post_permlink: { $in: permlinks }, status: 'published' };
-        applyCategoryFilter(audioQuery, req.query.category);
+        const category = typeof req.query.category === 'string' ? req.query.category : '';
+        const tabKind = PLAYLIST_KIND_FOR_CATEGORY[category] || null;
+        // With a kind tab the category is checked per playlist below, since a
+        // playlist with a saved kind keeps tracks of any category.
+        if (!tabKind) applyCategoryFilter(audioQuery, category);
+        const trackInTab = (a) => !tabKind
+            || (category === 'voice_message' ? (!a.category || a.category === 'voice_message') : a.category === category);
         if (req.query.genre) {
             const g = String(req.query.genre).trim();
             if (g) {
@@ -1042,10 +1054,14 @@ router.get('/playlists', async (req, res) => {
 
         for (const p of candidates) {
             const items = p.items || [];
-            const audioItems = items.filter(it => audioByKey.has(`${it.author}|${it.permlink}`));
-            if (audioItems.length === 0) continue; // not a music playlist
             const stored = storedPlaylistType(p);
             if (stored.type === 'video') continue;
+            if (tabKind && stored.kind && stored.kind !== tabKind) continue;
+            const audioItems = items.filter(it => {
+                const a = audioByKey.get(`${it.author}|${it.permlink}`);
+                return a && (stored.kind || trackInTab(a));
+            });
+            if (audioItems.length === 0) continue; // not a music playlist
             const kind = stored.kind
                 || kindFromCategories(audioItems.map(it => audioByKey.get(`${it.author}|${it.permlink}`).category))
                 || 'podcast';
