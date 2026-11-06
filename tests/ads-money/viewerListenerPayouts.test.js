@@ -267,7 +267,7 @@ describe('one row per account per period, holding every reason it was paid', () 
    * the order of the names depends on the order the rows arrived. Not reachable from
    * settlePeriod today (each kind reaches an account once per period), only through
    * writePayoutRows called with such rows. The amounts and `parts` are correct. */
-  test.skip('BUG: a merged kind label names each reason once, whatever order the rows arrive in', async () => {
+  test('BUG: a merged kind label names each reason once, whatever order the rows arrive in', async () => {
     const written = await P.writePayoutRows(db(), period.key, [
       { account: 'tib', hbd: 1, amounts: [], kind: 'creator' },
       { account: 'tib', hbd: 1, amounts: [], kind: 'viewer' },

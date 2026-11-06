@@ -703,7 +703,9 @@ async function writePayoutRows(db, periodKey, rows) {
     cur.hbd = Math.round((cur.hbd + r.hbd) * 1000) / 1000;
     cur.amounts = mergeLegs(cur.amounts, r.amounts);
     // One account, two reasons. Named so a payout report can say which.
-    cur.kind = cur.kind === r.kind ? cur.kind : [...new Set([cur.kind, r.kind])].sort().join('+');
+    // The label so far may already be merged ("creator+viewer"): split it before
+    // adding, so each reason is named once and the order never depends on arrival.
+    cur.kind = [...new Set([...String(cur.kind).split('+'), r.kind])].sort().join('+');
     // ...and how much for each, so a merged row can still be split again (listener
     // money from 3Speak audio vs outside podcasts, viewer vs creator).
     cur.parts[r.kind] = Math.round(((cur.parts[r.kind] || 0) + r.hbd) * 1000) / 1000;
