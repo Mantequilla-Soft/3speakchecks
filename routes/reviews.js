@@ -7,6 +7,7 @@
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
+const { clientIp } = require('../utils/clientIp');
 
 const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 
@@ -36,7 +37,7 @@ function ensureIndex() {
 
 router.post('/reviews', async (req, res) => {
   try {
-    const ip = (req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+    const ip = clientIp(req);
     if (throttled(ip)) return res.status(429).json({ error: 'Too many reviews, please try again later' });
 
     const b = req.body || {};
