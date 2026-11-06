@@ -32,6 +32,10 @@ async function ensureSocialLinkIndexes(database) {
 }
 
 let db;
+let mongoClient;
+// The background index builds started by connectToMongo, so closeMongo can let
+// them finish instead of cutting them off mid-build.
+let indexBuilds = Promise.resolve();
 
 async function ensureTextIndex(collectionName, config) {
     const col = db.collection(collectionName);
@@ -76,18 +80,19 @@ async function connectToMongo() {
             waitQueueTimeoutMS: 20000,
         });
         await client.connect();
+        mongoClient = client;
         db = client.db(DATABASE_NAME);
         console.log('Connected to MongoDB successfully');
 
         // Create text indexes for search (non-blocking — may take a while on large collections)
-        Promise.all(
+        const textIndexes = Promise.all(
             Object.values(searchWeights).map(config =>
                 ensureTextIndex(config.collection, config)
             )
         ).then(() => console.log('Text search indexes ensured'))
           .catch(err => console.error('Text index creation failed:', err.message));
 
-        ensureSocialLinkIndexes(db)
+        const socialIndexes = ensureSocialLinkIndexes(db)
             .then(() => console.log('Social-link indexes ensured'))
             .catch(err => console.error('Social-link index creation failed:', err.message));
 
@@ -95,7 +100,7 @@ async function connectToMongo() {
         // Without these the interest-boost (subtitles-tags $or), retention
         // aggregation and heatmap reads were COLLECTION SCANS on every feed request
         // — heavy on the shared Mongo. Idempotent + background builds.
-        (async () => {
+        const rankingIndexes = (async () => {
             const wanted = [
                 ['subtitles-tags', { author: 1, permlink: 1 }],
                 ['view-durations', { owner: 1, permlink: 1 }],
@@ -130,6 +135,7 @@ async function connectToMongo() {
             }
             console.log('Ranking/feed indexes ensured');
         })().catch(() => {});
+        indexBuilds = Promise.allSettled([textIndexes, socialIndexes, rankingIndexes]);
     } catch (error) {
         console.error('Failed to connect to MongoDB:', error);
         process.exit(1);
@@ -144,4 +150,13 @@ function getLinksCollection() {
     return getDb().collection(SOCIAL_LINKS_COLLECTION);
 }
 
-module.exports = { connectToMongo, getDb, getLinksCollection };
+// Close the connection opened by connectToMongo, after the background index builds
+// it started have settled. For a graceful shutdown and for the tests.
+async function closeMongo() {
+    await indexBuilds;
+    if (mongoClient) await mongoClient.close();
+    mongoClient = undefined;
+    db = undefined;
+}
+
+module.exports = { connectToMongo, closeMongo, getDb, getLinksCollection };

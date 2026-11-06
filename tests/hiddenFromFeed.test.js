@@ -4,18 +4,32 @@
  */
 const { hiddenFromFeedMatch, isHiddenFromFeed } = require('../utils/hiddenFromFeed');
 const { hydrate } = require('../utils/discoverPool');
+const testDb = require('./helpers/db');
 
 describe('hiddenFromFeedMatch', () => {
-  test('excludes only hiddenFromFeed:true; the field-less majority still match', () => {
-    expect(hiddenFromFeedMatch()).toEqual({ hiddenFromFeed: { $ne: true } });
-    // A $ne:true condition matches docs where the field is absent OR false — i.e.
-    // every ordinary video — and rejects only the explicitly-hidden ones.
-    const cond = hiddenFromFeedMatch().hiddenFromFeed;
-    const matches = (v) => v !== true;              // Mongo $ne:true semantics
-    expect(matches(undefined)).toBe(true);          // no field → shown
-    expect(matches(false)).toBe(true);              // explicit false → shown
-    expect(matches(true)).toBe(false);              // hidden → excluded
-    expect(cond).toEqual({ $ne: true });
+  test('excludes hiddenFromFeed:true and expired stories, nothing else', () => {
+    const m = hiddenFromFeedMatch();
+    expect(m.hiddenFromFeed).toEqual({ $ne: true });
+    expect(Object.keys(m.story_expires_at)).toEqual(['$not']);
+    expect(m.story_expires_at.$not.$lte).toBeInstanceOf(Date);
+  });
+
+  describe('against a real MongoDB', () => {
+    const db = testDb.use();
+    const HOUR = 3600 * 1000;
+
+    test('the field-less majority, explicit false and live stories match; hidden and expired do not', async () => {
+      const col = db().collection('embed-video');
+      await col.insertMany([
+        { permlink: 'plain' },
+        { permlink: 'explicit-false', hiddenFromFeed: false },
+        { permlink: 'hidden', hiddenFromFeed: true },
+        { permlink: 'live-story', story: true, story_expires_at: new Date(Date.now() + HOUR) },
+        { permlink: 'expired-story', story: true, story_expires_at: new Date(Date.now() - HOUR) },
+      ]);
+      const shown = (await col.find(hiddenFromFeedMatch()).toArray()).map((d) => d.permlink).sort();
+      expect(shown).toEqual(['explicit-false', 'live-story', 'plain']);
+    });
   });
 });
 
