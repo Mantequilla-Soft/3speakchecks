@@ -202,7 +202,7 @@ describe('crediting a payment', () => {
    * as already counted, so the advertiser's HIVE is recorded in paidAssets but never
    * valued, and the flight is never scheduled without a manual fix. A missing price
    * should refuse to credit (release the reservation) so a retry can value it. */
-  test.skip('BUG: a HIVE payment made while the price feed is down is credited once the feed is back', async () => {
+  test('BUG: a HIVE payment made while the price feed is down is credited once the feed is back', async () => {
     const c = await booking();
     chainHas(pay(c, '400.000 HIVE'));
     hiveRpcBatch.mockResolvedValue([]); // every node down
@@ -210,6 +210,31 @@ describe('crediting a payment', () => {
     medianFeed('0.250 HBD', '1.000 HIVE');
     await claimCampaignPayment(db(), c._id);
     expect(await campaignOf(c)).toMatchObject({ status: 'scheduled', paidHbd: 100 });
+  });
+
+  test('an HBD payment alongside a HIVE one the feed cannot value: the HBD is credited, the HIVE waits and is credited once', async () => {
+    const c = await booking();
+    chainHas(pay(c, '50.000 HBD'), pay(c, '200.000 HIVE'));
+    hiveRpcBatch.mockRejectedValue(new Error('all nodes down'));
+    const first = await claimCampaignPayment(db(), c._id);
+    expect(first).toMatchObject({ status: 200, retryLater: true, body: { message: 'Partial payment received', creditedHbd: 50, pendingNote: expect.stringContaining('HIVE price') } });
+    expect(await campaignOf(c)).toMatchObject({ status: 'awaiting_payment', paidHbd: 50, paidAssets: { HBD: 50 } });
+
+    medianFeed('0.250 HBD', '1.000 HIVE');
+    const second = await claimCampaignPayment(db(), c._id);
+    expect(second.body).toMatchObject({ message: 'Payment received, flight scheduled', creditedHbd: 50 });
+    expect(second.retryLater).toBeUndefined();
+    expect(await campaignOf(c)).toMatchObject({ status: 'scheduled', paidHbd: 100, paidAssets: { HBD: 50, HIVE: 200 } });
+    expect((await claimCampaignPayment(db(), c._id)).body.message).toBe('Already credited');
+    expect(await F.cols(db()).payments.countDocuments({ status: 'credited' })).toBe(2);
+  });
+
+  test('a HIVE-only payment while the feed is down answers 503 and reserves nothing', async () => {
+    const c = await booking();
+    chainHas(pay(c, '400.000 HIVE'));
+    hiveRpcBatch.mockResolvedValue([]);
+    expect(await claimCampaignPayment(db(), c._id)).toMatchObject({ status: 503, retryLater: true, body: { success: false, retryable: true } });
+    expect(await F.cols(db()).payments.countDocuments({})).toBe(0);
   });
 });
 
@@ -268,7 +293,15 @@ describe('who may pay', () => {
    * refused transfer is already reserved, so `refused` is empty the second time and
    * the advertiser is told `success: true, 'Already credited'` for a flight that is
    * still unpaid. */
-  test.skip('BUG: retrying the claim of a refused payment still says it was refused', async () => {
+  test('a retry after a credited payment and a refused stray one says Already credited and still names the stray one', async () => {
+    const c = await booking();
+    chainHas(pay(c, '60.000 HBD'), pay(c, '40.000 HBD', { from: 'stranger' }));
+    await claimCampaignPayment(db(), c._id);
+    const retry = await claimCampaignPayment(db(), c._id);
+    expect(retry.body).toMatchObject({ success: true, message: 'Already credited', refused: [{ from: 'stranger', willBeReturnedTo: 'stranger' }] });
+  });
+
+  test('BUG: retrying the claim of a refused payment still says it was refused', async () => {
     const c = await booking();
     chainHas(pay(c, '100.000 HBD', { from: 'stranger' }));
     await claimCampaignPayment(db(), c._id);

@@ -176,6 +176,23 @@ describe('failures', () => {
     expect(hive.transfersSince).toHaveBeenLastCalledWith(ACCOUNT, expect.any(Number), { pageSize: 1000 });
   });
 
+  test('a HIVE payment the price feed could not value holds the window, and is credited once the feed is back', async () => {
+    const { watcher, hive } = loadWatcher();
+    const c = await booking();
+    hive.transfersSince.mockResolvedValue([pay(c.memo, '400.000 HIVE')]);
+    hive.hiveRpcBatch.mockResolvedValue([]); // every node down
+    await watcher.runOnce();
+    expect(await F.cols(db()).payments.countDocuments({})).toBe(0);
+    expect((await F.cols(db()).campaigns.findOne({ _id: c._id })).paidHbd).toBe(0);
+
+    hive.hiveRpcBatch.mockResolvedValue([{ id: 1, result: { base: '0.250 HBD', quote: '1.000 HIVE' } }]);
+    await watcher.runOnce();
+    // Still the first-run reach: the window did not move past the uncounted transfer.
+    expect(hive.transfersSince).toHaveBeenLastCalledWith(ACCOUNT, expect.any(Number), { pageSize: 1000 });
+    expect(await F.cols(db()).campaigns.findOne({ _id: c._id })).toMatchObject({ status: 'scheduled', paidHbd: 100, paidAssets: { HIVE: 400 } });
+    expect(await F.cols(db()).payments.countDocuments({ status: 'credited' })).toBe(1);
+  });
+
   test('a chain read that fails is logged, and the next run tries again from the same place', async () => {
     const { watcher, hive } = loadWatcher({ claim: recordingClaim() });
     await booking();

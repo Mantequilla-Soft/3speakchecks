@@ -156,10 +156,39 @@ async function claimLocked(db, id, { ops: prefetchedOps } = {}) {
   // transfers are reserved too — the unique index is what stops the same stray
   // payment being queued for refund over and over on every claim retry.
   const payments = db.collection(AD_PAYMENTS_COLLECTION);
+
+  /* ─── the HIVE price, BEFORE anything is reserved ──────────────────────
+   * 🚨 A HIVE payment cannot be valued without the median feed. It used to be
+   * reserved as `credited` first and valued at whatever the feed gave, so with
+   * every node down it was credited at 0 HBD and its txid was spent: no later claim
+   * would ever count it again. Now a HIVE payment that still needs counting is only
+   * reserved once there is a price to value it at; until then it is left alone
+   * (not reserved, not credited) and the claim says to try again.
+   */
+  const rows = await payments.find({ trx_id: { $in: matches.map((m) => m.trxId) } })
+    .project({ trx_id: 1, status: 1, from: 1, amount: 1 }).toArray();
+  const known = new Map(rows.map((r) => [r.trx_id, r]));
+  const isHive = (m) => parseAsset(m.amount).symbol === 'HIVE';
+  let hbdPerHive = 0;
+  if (matches.some((m) => !known.has(m.trxId) && sameAccount(m.from) && isHive(m))) {
+    try {
+      hbdPerHive = await getHbdPerHive();
+    } catch (e) {
+      console.warn(`[ad-campaigns] ${id} could not read the HIVE price feed: ${e && e.message}`);
+      hbdPerHive = 0;
+    }
+  }
+  const priceMissing = !(hbdPerHive > 0);
+  const waitingForPrice = [];
+
   const reserved = [];
   const refused = [];
   for (const m of matches) {
     const ok = sameAccount(m.from);
+    if (ok && priceMissing && isHive(m)) {
+      if (!known.has(m.trxId)) waitingForPrice.push(m);
+      continue;
+    }
     const base = {
       trx_id: m.trxId, campaignId: id, from: m.from, amount: m.amount, processedAt: new Date(),
     };
@@ -183,14 +212,34 @@ async function claimLocked(db, id, { ops: prefetchedOps } = {}) {
     }
   }
 
+  const priceNote = waitingForPrice.length
+    ? `We could not read the HIVE price just now, so ${waitingForPrice.length === 1 ? 'a HIVE transfer has' : `${waitingForPrice.length} HIVE transfers have`} not been counted yet. Nothing is lost: it is counted on the next check.`
+    : null;
+  if (waitingForPrice.length) {
+    console.warn(`[ad-campaigns] ${id} price feed unavailable: ${waitingForPrice.length} HIVE transfer(s) left for a later claim`);
+  }
+
   if (!reserved.length) {
+    if (waitingForPrice.length) {
+      // `retryLater` tells the payment watcher not to move its scan window past
+      // this transfer, so it is picked up again once the feed answers.
+      return {
+        status: 503,
+        retryLater: true,
+        body: { success: false, error: priceNote, retryable: true },
+      };
+    }
     const current = await db.collection(AD_CAMPAIGNS_COLLECTION).findOne({ _id: id });
     const creative = current?.creativeEmbedId
       ? await db.collection(AD_CREATIVES_COLLECTION).findOne({ embedId: current.creativeEmbedId })
       : null;
-    // Nothing creditable. Say WHICH of the two it is — "already credited" in
-    // front of somebody whose payment was just refused would be actively
-    // misleading about where their money went.
+    // Nothing creditable. Say WHICH of the two it is: "already credited" in
+    // front of somebody whose payment was refused would be actively misleading
+    // about where their money went. That holds on a RETRY too, when the refused
+    // transfer was reserved by an earlier claim and is not in `refused` any more.
+    const earlierRefused = matches.filter((m) => known.get(m.trxId)?.status === 'refused');
+    const anyCredited = matches.some((m) => known.get(m.trxId)?.status === 'credited');
+    if (!refused.length && earlierRefused.length && !anyCredited) refused.push(...earlierRefused);
     if (refused.length) {
       console.warn(`[ad-campaigns] ${id} refused ${refused.length} transfer(s) from the wrong account (expected @${expectedPayer}): ${refused.map((m) => `@${m.from} ${m.amount}`).join(', ')}`);
       return {
@@ -203,13 +252,26 @@ async function claimLocked(db, id, { ops: prefetchedOps } = {}) {
         },
       };
     }
-    return { status: 200, body: { success: true, message: 'Already credited' }, campaign: current, creative };
+    return {
+      status: 200,
+      body: {
+        success: true,
+        message: 'Already credited',
+        // Something was credited earlier, and a stray transfer from another account
+        // was refused alongside it: still say so, as the first answer did.
+        ...(earlierRefused.length ? {
+          refused: earlierRefused.map((m) => ({ from: m.from, amount: m.amount, willBeReturnedTo: m.from })),
+          refusedNote: `We could not count ${earlierRefused.length === 1 ? 'a transfer' : `${earlierRefused.length} transfers`} sent from another account. Pay from @${campaign.hiveAccount}; the rest will be sent back.`,
+        } : {}),
+      },
+      campaign: current,
+      creative,
+    };
   }
   if (refused.length) {
     console.warn(`[ad-campaigns] ${id} refused ${refused.length} transfer(s) from the wrong account (expected @${expectedPayer})`);
   }
 
-  const hbdPerHive = await getHbdPerHive();
   let credited = 0;
   /* What actually ARRIVED, in native units, alongside the HBD valuation.
    *
@@ -295,10 +357,12 @@ async function claimLocked(db, id, { ops: prefetchedOps } = {}) {
   console.log(`[ad-campaigns] ${id} credited ${credited.toFixed(3)} HBD (total ${paidHbd}/${priceHbd})`);
   return {
     status: 200,
+    ...(waitingForPrice.length ? { retryLater: true } : {}),
     body: {
       success: true,
       message: fullyPaid ? 'Payment received, flight scheduled' : 'Partial payment received',
       creditedHbd: credited,
+      ...(priceNote ? { pendingNote: priceNote } : {}),
       // Say so when a balance covered part of it, or the numbers do not add up from
       // the advertiser's side and it looks like they were charged the wrong amount.
       ...(creditApplied > 0 ? {

@@ -95,6 +95,9 @@ async function runOnce() {
       try {
         const result = await claimCampaignPayment(db, c._id, { ops });
         console.log(`[ad-payment-watch] ${c._id} (@${c.hiveAccount}): ${result.body.message || result.body.error}`);
+        // A HIVE payment the price feed could not value yet: keep the window here
+        // so the next run sees that transfer again.
+        if (result.retryLater) failed = true;
       } catch (e) {
         // One campaign failing must not stop the others, but the window must not
         // move past it either, so the next run tries this one again.
