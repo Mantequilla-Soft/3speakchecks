@@ -228,7 +228,7 @@ async function linkEmbedVideoToHivePost(doc) {
  * return the original doc. Returns null if nothing to claim. The atomic
  * findOneAndUpdate prevents two ticks (or two replicas) from racing.
  */
-async function claimNextDuePost(coll) {
+async function claimNextDuePost(coll, skipIds = []) {
     const now = new Date();
     // Strict claim filter: only ever claim docs that are explicitly status:scheduled,
     // are due (scheduledOn elapsed), still under the attempt cap, AND have non-empty
@@ -241,6 +241,8 @@ async function claimNextDuePost(coll) {
             attempts: { $lt: MAX_ATTEMPTS },
             owner: { $type: 'string', $ne: '' },
             permlink: { $type: 'string', $ne: '' },
+            // Posts that already failed a broadcast in this tick wait for the next one.
+            ...(skipIds.length ? { _id: { $nin: skipIds } } : {}),
         },
         {
             $set: { status: 'processing', processingStartedAt: now, updatedAt: now },
@@ -414,8 +416,12 @@ async function runTick() {
 
     // Process up to N posts per tick so a flood doesn't stall the loop.
     const PER_TICK = 10;
+    // A post put back to `scheduled` after a failed broadcast is still due, so
+    // without this the same tick would claim it again at once and one RPC blip
+    // would burn every attempt within milliseconds.
+    const failedThisTick = [];
     for (let i = 0; i < PER_TICK; i++) {
-        const doc = await claimNextDuePost(coll);
+        const doc = await claimNextDuePost(coll, failedThisTick);
         if (!doc) return;
 
         // After the atomic claim doc.status is "scheduled" in the snapshot we
@@ -467,6 +473,7 @@ async function runTick() {
                 console.error(`[scheduledPosts] video ad flag failed for ${doc.owner}/${doc.permlink}:`, flagErr && flagErr.message);
             }
         } catch (err) {
+            failedThisTick.push(doc._id);
             const attempts = (doc.attempts || 0) + 1; // we already incremented above
             const final = attempts >= MAX_ATTEMPTS;
             await coll.updateOne(
