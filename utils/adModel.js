@@ -174,7 +174,11 @@ function windowFrom(startAt, days) {
  * seconds they were sold as, for as long as any of them are still running.
  */
 function slotSecondsFor(slot, totalSeconds) {
-  const pct = Number(slot && slot.slotPercent);
+  // 🚨 A null slotPercent is ABSENT, not 0%. Sessions store `slotPercent ?? null`,
+  // and Number(null) is 0, so a legacy flight booked "30 seconds in" was spliced in
+  // as a pre-roll on every playback. Only a real value counts as a percentage.
+  const raw = slot ? slot.slotPercent : undefined;
+  const pct = raw === null || raw === undefined ? NaN : Number(raw);
   if (Number.isFinite(pct) && pct >= 0) {
     const total = Number(totalSeconds);
     if (!Number.isFinite(total) || total <= 0) return 0;
