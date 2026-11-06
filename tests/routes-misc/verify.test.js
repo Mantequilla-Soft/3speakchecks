@@ -204,7 +204,7 @@ describe('GET /verify/unlink: signed unlink', () => {
 // try/catch. Express 4's query parser turns ?hive_username[toString]=x into an
 // object whose toString is a string; String() throws, the rejection is unhandled
 // and on Node 22 the checker process exits. Correct behaviour is a 400.
-test.skip.each([['/verify/check'], ['/verify/unlink']])('BUG: %s with a query value that cannot become a string is a 400, not a process crash', async (path) => {
+test.each([['/verify/check'], ['/verify/unlink']])('%s with a query value that cannot become a string is a 400, not a process crash', async (path) => {
   await request(app).get(`${path}?hive_username[toString]=x&platform=youtube&platform_username=y`).timeout(2000).expect(400);
 });
 

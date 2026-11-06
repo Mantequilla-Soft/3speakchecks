@@ -29,6 +29,7 @@ const express = require('express');
 const crypto = require('crypto');
 const { getDb } = require('../utils/db');
 const { verifyHiveAuthority } = require('../utils/hiveAuth');
+const { asText } = require('../utils/input');
 const { SIGNATURE_TIMESTAMP_TOLERANCE_MS, AD_SIGNING_DELEGATES } = require('../utils/config');
 
 const router = express.Router();
@@ -78,11 +79,12 @@ function validCues(raw) {
   if (!Array.isArray(raw) || !raw.length || raw.length > MAX_CUES) return null;
   const out = [];
   for (const c of raw) {
-    const start = Number(c && c.start);
-    const end = Number(c && c.end);
+    if (!c || typeof c !== 'object') return null;
+    const start = Number(c.start);
+    const end = Number(c.end);
     if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
     if (start < 0 || end < start || end > MAX_SECONDS) return null;
-    const text = cleanText(c.text ?? '');
+    const text = cleanText(asText(c.text));
     if (!text) continue; // an emptied line is a deleted line
     out.push({ start, end, text });
   }
@@ -121,9 +123,9 @@ function tooMany(author) {
 // POST /subtitles/edit — { author, permlink, lang, cues: [{start,end,text}], signature, timestamp }
 router.post('/subtitles/edit', express.json({ limit: '2mb' }), async (req, res) => {
   const b = req.body || {};
-  const author = String(b.author || '').toLowerCase();
-  const permlink = String(b.permlink || '');
-  const lang = String(b.lang || '').toLowerCase();
+  const author = asText(b.author).toLowerCase();
+  const permlink = asText(b.permlink);
+  const lang = asText(b.lang).toLowerCase();
   if (!ACCOUNT_RE.test(author) || !PERMLINK_RE.test(permlink) || !LANG_RE.test(lang)) {
     return res.status(400).json({ success: false, error: 'invalid author, permlink or language' });
   }

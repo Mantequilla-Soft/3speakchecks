@@ -62,7 +62,7 @@ describe('input', () => {
   // is not a function makes String() throw; Express 4 leaves the rejection
   // unhandled and server.js has no unhandledRejection handler, so on Node 22 one
   // unauthenticated request stops the whole checker. Correct behaviour is a 400.
-  test.skip.each([['author'], ['permlink'], ['comment']])('BUG: a %s that cannot become a string is a 400, not a process crash', async (field) => {
+  test.each([['author'], ['permlink'], ['comment']])('a %s that cannot become a string is a 400, not a process crash', async (field) => {
     await send({ ...pinRequest(), [field]: { toString: 1 } }).timeout(2000).expect(400);
   });
 });

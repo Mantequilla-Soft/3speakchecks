@@ -10,6 +10,8 @@
  */
 const express = require('express');
 const cors = require('cors');
+// As in server.js: async handlers' rejections reach the error middleware.
+require('../../utils/asyncErrors');
 
 function buildApp(...mounts) {
   const app = express();

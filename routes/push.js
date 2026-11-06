@@ -15,7 +15,9 @@ const push = require('../utils/webPush');
 const HIVE_RE = /^[a-z][a-z0-9.-]{2,15}$/;
 const ADMIN_KEY = process.env.PUSH_ADMIN_KEY || '';
 
-const cleanUser = (u) => String(u || '').trim().toLowerCase().replace(/^@/, '');
+const { asText } = require('../utils/input');
+
+const cleanUser = (u) => asText(u).trim().toLowerCase().replace(/^@/, '');
 
 function validSubscription(sub) {
   return !!(sub

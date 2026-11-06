@@ -207,7 +207,7 @@ describe('/push/prefs', () => {
   // Express 4's query parser turns ?username[toString]=x into an object whose
   // toString is a string, String() throws, the rejection is unhandled and on
   // Node 22 the checker process exits. Correct behaviour is a 400.
-  test.skip('BUG: a username query that cannot become a string is a 400, not a process crash', async () => {
+  test('a username query that cannot become a string is a 400, not a process crash', async () => {
     await request(app).get('/push/prefs?username[toString]=x').timeout(2000).expect(400);
   });
 });
