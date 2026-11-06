@@ -33,9 +33,25 @@ jobs:
           key: mongodb-binaries-${{ runner.os }}-7.0.24
       - run: npm ci --no-audit --no-fund
       # tests/routes-misc/podcastArtCover.test.js renders real covers with ffmpeg,
-      # which the runner image does not ship.
+      # which the runner image does not ship. A static build from GitHub, kept between
+      # runs: apt-get from the Ubuntu mirror sometimes stalled until the job timed out.
+      - uses: actions/cache@v4
+        id: ffmpeg-cache
+        with:
+          path: ~/.cache/ffmpeg-static
+          key: ffmpeg-static-${{ runner.os }}-n8.1
       - name: Install ffmpeg
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 3
+        run: |
+          mkdir -p ~/.cache/ffmpeg-static
+          curl -fsSL --retry 3 --max-time 120 \
+            https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz \
+            | tar -xJ --strip-components=2 -C ~/.cache/ffmpeg-static --wildcards '*/bin/ffmpeg' '*/bin/ffprobe'
+      - name: Put ffmpeg on PATH
+        run: |
+          echo "$HOME/.cache/ffmpeg-static" >> "$GITHUB_PATH"
+          "$HOME/.cache/ffmpeg-static/ffmpeg" -hide_banner -version | head -1
       - name: Test with coverage
         run: npx jest --ci --coverage
       - name: Coverage summary
