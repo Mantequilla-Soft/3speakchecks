@@ -6,6 +6,7 @@ const router = express.Router();
 const { getDb } = require('../utils/db');
 const { warmupAudio, capWarmup } = require('../utils/warmupAudio');
 const { decodePlaylistMeta } = require('../utils/playlistMeta');
+const { storedPlaylistType, kindFromCategories, AUDIO_KINDS } = require('../utils/playlistType');
 const { nsfwFilter } = require('../utils/filters');
 const { excludeHiddenCreators, hiddenCreatorsOf } = require('../utils/userFilters');
 const { asText } = require('../utils/input');
@@ -982,10 +983,14 @@ router.get('/creators', async (req, res) => {
 // GET /audio/playlists — public playlists that contain music, split into:
 //   by_artist    → every track is by the playlist creator
 //   by_listeners → contains at least one track by someone else
+// Playlists their owner marked `video` are left out. Each entry carries the
+// playlist `kind` (podcast | music | voice | sounds: the owner's pick, else what
+// most tracks are); ?kind= keeps one kind only.
 router.get('/playlists', async (req, res) => {
     try {
         const db = getDb();
         const perGroup = Math.min(Math.max(parseInt(req.query.limit) || 24, 1), 60);
+        const wantKind = AUDIO_KINDS.includes(req.query.kind) ? req.query.kind : null;
         // ?owner=<user>: one creator's albums/playlists only (profile pages).
         const owner = String(req.query.owner || '').trim().toLowerCase();
         if (owner && !/^[a-z][a-z0-9.-]{2,15}$/.test(owner)) {
@@ -1039,6 +1044,12 @@ router.get('/playlists', async (req, res) => {
             const items = p.items || [];
             const audioItems = items.filter(it => audioByKey.has(`${it.author}|${it.permlink}`));
             if (audioItems.length === 0) continue; // not a music playlist
+            const stored = storedPlaylistType(p);
+            if (stored.type === 'video') continue;
+            const kind = stored.kind
+                || kindFromCategories(audioItems.map(it => audioByKey.get(`${it.author}|${it.permlink}`).category))
+                || 'podcast';
+            if (wantKind && kind !== wantKind) continue;
 
             // User's rule: only the creator's tracks → by artist; any track
             // from someone else → by listeners.
@@ -1082,6 +1093,7 @@ router.get('/playlists', async (req, res) => {
                 totalItems: items.length,
                 artists: [...new Set(items.map(it => it.author))].slice(0, 6),
                 album: meta?.album || null,
+                kind,
                 tracks,
                 updatedAt: p.updated_at || p.created_at || null,
             };
