@@ -119,7 +119,7 @@ describe('GET /leaderboard/summary', () => {
   // but entries are built by normalize(), which keeps only the user and the metrics.
   // So a non-empty summary never says when the rollup last ran: the field is
   // undefined and drops out of the JSON.
-  test.skip('BUG: a non-empty summary never reports updated_at', async () => {
+  test('a non-empty summary reports when the rollup last ran (updated_at)', async () => {
     await board().insertOne(row('a1', '7d', { video_uploads: 3 }));
     const res = await get('/leaderboard/summary').expect(200);
     expect(res.body.updated_at).toBe('2026-11-01T06:00:00.000Z');
@@ -197,7 +197,7 @@ describe('topic boards', () => {
   // board was short of data long after it wasn't" (routes/leaderboard.js:80-90).
   // The topic boards still use exactly that rule (:420), so in November 2026 a 30d
   // topic watch board, which starts in October, still claims partial data.
-  test.skip('BUG: a 30d topic watch board is flagged partial forever', async () => {
+  test('a 30d topic watch board is not flagged partial once its window starts after tracking began', async () => {
     const res = await get('/leaderboard/topic', { topic: 'music', metric: 'watch_secs', window: '30d' }).expect(200);
     expect(res.body.partial_watch_data).toBe(false);
   });
