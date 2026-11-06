@@ -270,23 +270,32 @@ function validateClaimedDoc(doc) {
 }
 
 /**
- * Is this post already on chain? Returns true / false, or **null when we could
- * not tell** (every RPC endpoint down, or a malformed reply).
+ * Read a post off the chain. Returns `{ state, post }` where state is
+ *   'present' -> the node returned this exact author/permlink (post = the reply),
+ *   'absent'  -> the node said it does not exist (a zeroed stub, null, or the
+ *                "does not exist" assertion),
+ *   'unknown' -> we could not tell (every RPC endpoint down, a malformed reply,
+ *                or the call threw).
  *
- * Callers MUST treat null as "leave it alone". Requeueing a post that is in fact
- * live re-broadcasts `comment_options`, which the chain rejects once the post has
- * votes — so a perfectly recoverable doc would burn its attempts and land in
+ * Callers MUST treat 'unknown' as "leave it alone". Requeueing a post that is in
+ * fact live re-broadcasts `comment_options`, which the chain rejects once the post
+ * has votes, so a perfectly recoverable doc would burn its attempts and land in
  * `failed` while the post sits published. Failing closed costs one more sweep.
  */
-async function isPostOnChain(author, permlink) {
-    const [res] = await hiveRpcBatch([{
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'condenser_api.get_content',
-        params: [author, permlink],
-    }]);
+async function readChainPost(author, permlink) {
+    let res;
+    try {
+        [res] = await hiveRpcBatch([{
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'condenser_api.get_content',
+            params: [author, permlink],
+        }]);
+    } catch {
+        return { state: 'unknown' };
+    }
     // hiveRpcBatch returns [] once every endpoint has failed -> genuinely unknown.
-    if (!res) return null;
+    if (!res) return { state: 'unknown' };
 
     if (res.error) {
         // A post that was never broadcast comes back as an Assert Exception, NOT
@@ -295,18 +304,102 @@ async function isPostOnChain(author, permlink) {
         // permlink to appear in the error keeps a generic node complaint (which is
         // NOT evidence of absence) from being read as "safe to rebroadcast".
         const raw = JSON.stringify(res.error);
-        if (raw.includes(permlink) && /does not exist/i.test(raw)) return false;
-        return null;
+        if (raw.includes(permlink) && /does not exist/i.test(raw)) return { state: 'absent' };
+        return { state: 'unknown' };
     }
 
-    if (!('result' in res)) return null;
+    if (!('result' in res)) return { state: 'unknown' };
     const c = res.result;
-    if (c === null) return false;          // some nodes answer a missing post this way
-    if (typeof c !== 'object') return null;
-    if (typeof c.author !== 'string' || typeof c.permlink !== 'string') return null;
+    if (c === null) return { state: 'absent' };          // some nodes answer a missing post this way
+    if (typeof c !== 'object') return { state: 'unknown' };
+    if (typeof c.author !== 'string' || typeof c.permlink !== 'string') return { state: 'unknown' };
     // Older nodes answer with a zeroed stub (author: ""), so compare identity
     // rather than truthiness.
-    return c.author === author && c.permlink === permlink;
+    return c.author === author && c.permlink === permlink
+        ? { state: 'present', post: c }
+        : { state: 'absent' };
+}
+
+/**
+ * Is this post already on chain? true / false, or **null when we could not tell**.
+ * Same contract as readChainPost's 'present' / 'absent' / 'unknown'.
+ */
+async function isPostOnChain(author, permlink) {
+    const { state } = await readChainPost(author, permlink);
+    return state === 'unknown' ? null : state === 'present';
+}
+
+// JSON with object keys sorted, so two encodings of the same metadata compare equal.
+function canonicalJson(value) {
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+    if (value && typeof value === 'object') {
+        return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
+    }
+    return JSON.stringify(value);
+}
+
+function sameJsonMetadata(a, b) {
+    try {
+        return canonicalJson(JSON.parse(a || '{}')) === canonicalJson(JSON.parse(b || '{}'));
+    } catch {
+        return String(a || '') === String(b || '');
+    }
+}
+
+/**
+ * Has THIS scheduled post's broadcast landed, given the chain's copy of the post?
+ *
+ * Existence alone is not enough. A doc can target a permlink that was already on
+ * chain before the user scheduled it (re-scheduling an already posted entry
+ * through /create upserts it back to `scheduled`), and then the broadcast is an
+ * EDIT of that post: finding it on chain says nothing about whether the edit went
+ * out. So:
+ *   - the post was created after the doc was scheduled (`created` >= the doc's
+ *     createdAt): nothing else creates that permlink, so it is our broadcast.
+ *   - otherwise (it predates the schedule, or the doc has no createdAt): landed only
+ *     if the chain already carries exactly what we would broadcast (title, body,
+ *     json_metadata); a pending edit still has to go out.
+ */
+function broadcastLanded(doc, chainPost) {
+    if (!chainPost) return false;
+    const createdMs = typeof chainPost.created === 'string' ? Date.parse(`${chainPost.created}Z`) : NaN;
+    const scheduledAtMs = doc.createdAt ? new Date(doc.createdAt).getTime() : NaN;
+    if (Number.isFinite(createdMs) && Number.isFinite(scheduledAtMs) && createdMs >= scheduledAtMs) return true;
+
+    const [, comment] = buildOperations(doc)[0];
+    return chainPost.title === comment.title
+        && chainPost.body === comment.body
+        && sameJsonMetadata(chainPost.json_metadata, comment.json_metadata);
+}
+
+/**
+ * Before a RETRY (the doc already had a broadcast attempt): did the earlier
+ * attempt reach Hive after all? A broadcast that timed out on our side can still
+ * have been included in a block, and broadcasting again would publish it a second
+ * time. Returns 'landed', 'not-landed' or 'unknown'.
+ */
+async function earlierAttemptLanded(doc) {
+    const { state, post } = await readChainPost(doc.owner, doc.permlink);
+    if (state === 'unknown') return 'unknown';
+    if (state === 'absent') return 'not-landed';
+    return broadcastLanded(doc, post) ? 'landed' : 'not-landed';
+}
+
+/**
+ * The follow-up steps once a post is out (or found out). None of them can undo
+ * the post, and each logs its own failure.
+ */
+async function afterPosted(doc) {
+    await linkEmbedVideoToHivePost(doc);
+    await reblogToBlog(doc);
+    // Per-video ad opt-out. The uploader cannot sync this one itself, the post
+    // did not exist yet. Taken from the metadata just broadcast rather than
+    // read back, which a fresh post would not be yet. Never fails the post.
+    try {
+        await applyVideoAdFlag(doc.owner, doc.permlink, doc.jsonMetadata);
+    } catch (flagErr) {
+        console.error(`[scheduledPosts] video ad flag failed for ${doc.owner}/${doc.permlink}:`, flagErr && flagErr.message);
+    }
 }
 
 /**
@@ -335,16 +428,16 @@ async function requeueStuckPosts(coll) {
         const startedAt = doc.processingStartedAt || doc.updatedAt;
         if (startedAt && new Date(startedAt).getTime() > cutoff) continue;
 
-        const onChain = await isPostOnChain(doc.owner, doc.permlink);
+        const landed = await earlierAttemptLanded(doc);
 
-        if (onChain === null) {
+        if (landed === 'unknown') {
             console.warn(`[scheduledPosts] stuck ${doc.owner}/${doc.permlink} — could not reach Hive to confirm, leaving it in processing`);
             continue;
         }
 
         // Every write is guarded on status still being 'processing', so a sweep can
         // never clobber a tick that finished the doc while we were on the network.
-        if (onChain) {
+        if (landed === 'landed') {
             const upd = await coll.updateOne(
                 { _id: doc._id, status: 'processing' },
                 {
@@ -365,7 +458,7 @@ async function requeueStuckPosts(coll) {
             continue;
         }
 
-        // Not on chain, so retrying cannot double-post. `attempts` here is the
+        // Not landed (absent, or a pending edit), so retrying cannot double-post. `attempts` here is the
         // CURRENT value — this doc came from a plain find(), not from the claim's
         // `before` snapshot, so unlike the broadcast error path it needs no +1.
         const attempts = doc.attempts || 0;
@@ -447,6 +540,49 @@ async function runTick() {
             continue;
         }
 
+        // A retry: the earlier attempt may have reached Hive even though it failed
+        // on our side (a timeout after the node accepted it). Look before signing.
+        // `doc` is the claim's `before` snapshot, so attempts > 0 means an earlier
+        // claim of this schedule. The first attempt goes straight to the broadcast.
+        if ((doc.attempts || 0) > 0) {
+            const landed = await earlierAttemptLanded(doc);
+            if (landed === 'unknown') {
+                // Cannot tell, so do not broadcast: back to scheduled for the next
+                // tick, and this look does not count as an attempt.
+                failedThisTick.push(doc._id);
+                await coll.updateOne(
+                    { _id: doc._id, status: 'processing' },
+                    {
+                        $set: {
+                            status: 'scheduled',
+                            lastError: 'could not reach Hive to check the earlier attempt, retrying next tick',
+                            updatedAt: new Date(),
+                        },
+                        $inc: { attempts: -1 },
+                    },
+                );
+                console.warn(`[scheduledPosts] ${doc.owner}/${doc.permlink}: could not reach Hive to check the earlier attempt, retrying next tick`);
+                continue;
+            }
+            if (landed === 'landed') {
+                await coll.updateOne(
+                    { _id: doc._id },
+                    {
+                        $set: {
+                            status: 'posted',
+                            postedAt: new Date(),
+                            recoveredAt: new Date(),
+                            lastError: null,
+                            updatedAt: new Date(),
+                        },
+                    },
+                );
+                console.log(`[scheduledPosts] ${doc.owner}/${doc.permlink} was already on chain from an earlier attempt, marked posted without a new broadcast`);
+                await afterPosted(doc);
+                continue;
+            }
+        }
+
         try {
             const tx = await broadcastPost(doc);
             await coll.updateOne(
@@ -462,16 +598,7 @@ async function runTick() {
                 },
             );
             console.log(`[scheduledPosts] posted ${doc.owner}/${doc.permlink} (tx=${tx && tx.id})`);
-            await linkEmbedVideoToHivePost(doc);
-            await reblogToBlog(doc);
-            // Per-video ad opt-out. The uploader cannot sync this one itself, the post
-            // did not exist yet. Taken from the metadata just broadcast rather than
-            // read back, which a fresh post would not be yet. Never fails the post.
-            try {
-                await applyVideoAdFlag(doc.owner, doc.permlink, doc.jsonMetadata);
-            } catch (flagErr) {
-                console.error(`[scheduledPosts] video ad flag failed for ${doc.owner}/${doc.permlink}:`, flagErr && flagErr.message);
-            }
+            await afterPosted(doc);
         } catch (err) {
             failedThisTick.push(doc._id);
             const attempts = (doc.attempts || 0) + 1; // we already incremented above

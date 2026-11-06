@@ -212,6 +212,7 @@ describe('malformed and failing posts', () => {
 
   test('a post that keeps failing is failed for good after three attempts and never signed again', async () => {
     stubBroadcast(() => { throw new Error('RC exhausted'); });
+    hiveRpcBatch.mockResolvedValue([{ result: null }]);   // each retry first finds it absent
     await posts().insertOne(post('flaky'));
 
     for (let tick = 0; tick < 4; tick++) await scheduled.runOnce();
@@ -335,6 +336,181 @@ describe('isPostOnChain', () => {
   });
 });
 
+// Hive stamps times in UTC without a zone: "2026-11-01T11:59:00".
+const hiveTime = (d) => new Date(d).toISOString().slice(0, 19);
+
+describe('a retry first checks whether the earlier attempt reached Hive', () => {
+  // What get_content answers for a post that is on chain.
+  const onChain = (doc, over = {}) => ({
+    result: {
+      author: doc.owner,
+      permlink: doc.permlink,
+      parent_author: doc.parentAuthor || '',
+      title: doc.title,
+      body: doc.body,
+      json_metadata: typeof doc.jsonMetadata === 'string' ? doc.jsonMetadata : JSON.stringify(doc.jsonMetadata),
+      created: hiveTime(ago(5 * MINUTE)),
+      ...over,
+    },
+  });
+  // A post whose first broadcast timed out on our side, put back to scheduled.
+  const retried = (permlink, extra = {}) => post(permlink, { attempts: 1, lastError: 'timeout', ...extra });
+
+  test('the first attempt broadcasts straight away, without reading the chain', async () => {
+    await posts().insertOne(post('first'));
+    await scheduled.runOnce();
+    expect(hiveRpcBatch).not.toHaveBeenCalled();
+    expect(broadcasts).toHaveLength(1);
+  });
+
+  test('a timed-out broadcast that did land is marked posted, never signed again', async () => {
+    const doc = retried('landed', { embedPermlink: 'e1', reblog: true, jsonMetadata: { '3speak': { ads: false } } });
+    await posts().insertOne(doc);
+    hiveRpcBatch.mockResolvedValue([onChain(doc)]);
+
+    await scheduled.runOnce();
+
+    expect(hiveRpcBatch.mock.calls[0][0][0]).toMatchObject({ method: 'condenser_api.get_content', params: ['alice', 'landed'] });
+    // Only the reblog (its own op) is signed; the post itself is not broadcast again.
+    expect(broadcasts.map((b) => b.ops[0][0])).toEqual(['custom_json']);
+    expect(await byPermlink('landed')).toMatchObject({ status: 'posted', lastError: null, recoveredAt: NOW, postedAt: NOW, attempts: 2 });
+    expect(embedFetch.calls.map((c) => c.url)).toEqual(['http://embed.test/video/e1/hive']);
+    expect(await db().collection('ad_video_optouts').findOne({ _id: 'alice/landed' })).toMatchObject({ mode: 'off' });
+  });
+
+  test('a landed comment (parentAuthor set) is found the same way', async () => {
+    const doc = retried('reply', { parentAuthor: 'bob', parentPermlink: 'bobs-post', title: '' });
+    await posts().insertOne(doc);
+    hiveRpcBatch.mockResolvedValue([onChain(doc)]);
+
+    await scheduled.runOnce();
+
+    expect(broadcasts).toHaveLength(0);
+    expect((await byPermlink('reply')).status).toBe('posted');
+  });
+
+  test.each([
+    ['a zeroed stub', { result: { author: '', permlink: '', body: '' } }],
+    ['a null result', { result: null }],
+    ['the "does not exist" assertion', { error: { data: { extension: { assertion_expression: 'Post alice/absent does not exist' } } } }],
+  ])('not on chain (%s): broadcast as before', async (_label, reply) => {
+    await posts().insertOne(retried('absent', { beneficiaries: [{ account: 'spk.beneficiary', weight: 900 }] }));
+    hiveRpcBatch.mockResolvedValue([reply]);
+
+    await scheduled.runOnce();
+
+    expect(broadcasts).toHaveLength(1);
+    expect(broadcasts[0].ops[1][1].extensions).toEqual([[0, { beneficiaries: [{ account: 'spk.beneficiary', weight: 900 }] }]]);
+    expect(await byPermlink('absent')).toMatchObject({ status: 'posted', broadcastTxId: 'tx1', attempts: 2 });
+  });
+
+  test.each([
+    ['every node is down', () => []],
+    ['a generic node error', () => [{ error: { message: 'Internal Error' } }]],
+    ['the call throws', () => { throw new Error('socket hang up'); }],
+  ])('Hive cannot be read (%s): no broadcast this tick, the attempt is not spent', async (_label, impl) => {
+    await posts().insertOne(retried('unknown'));
+    hiveRpcBatch.mockImplementation(async () => impl());
+
+    await scheduled.runOnce();
+
+    expect(broadcasts).toHaveLength(0);
+    expect(hiveRpcBatch).toHaveBeenCalledTimes(1);   // not re-claimed within the same tick
+    expect(await byPermlink('unknown')).toMatchObject({ status: 'scheduled', attempts: 1, lastError: expect.stringMatching(/could not reach Hive/) });
+
+    // Next tick the chain answers: the post is not there, so it goes out.
+    hiveRpcBatch.mockReset();
+    hiveRpcBatch.mockResolvedValue([{ result: null }]);
+    await scheduled.runOnce();
+    expect(broadcasts).toHaveLength(1);
+    expect(await byPermlink('unknown')).toMatchObject({ status: 'posted', attempts: 2 });
+  });
+
+  test('a Hive outage on the last attempt never fails the post', async () => {
+    await posts().insertOne(retried('last', { attempts: 2 }));
+    hiveRpcBatch.mockResolvedValue([]);
+
+    for (let tick = 0; tick < 3; tick++) await scheduled.runOnce();
+
+    expect(broadcasts).toHaveLength(0);
+    expect(await byPermlink('last')).toMatchObject({ status: 'scheduled', attempts: 2 });
+  });
+
+  test('a broadcast that fails again after the check still counts toward the cap', async () => {
+    stubBroadcast(() => { throw new Error('RC exhausted'); });
+    await posts().insertOne(retried('flaky', { attempts: 2 }));
+    hiveRpcBatch.mockResolvedValue([{ result: null }]);
+
+    await scheduled.runOnce();
+
+    expect(await byPermlink('flaky')).toMatchObject({ status: 'failed', attempts: 3, lastError: 'RC exhausted' });
+  });
+
+  describe('an EDIT of a post that predates the schedule', () => {
+    // Re-scheduling an already posted permlink upserts it back to `scheduled`
+    // (routes/scheduledPosts.js /create), so the broadcast is an edit of a post that
+    // already exists. Its existence must not be read as "the edit went out".
+    const before = { created: hiveTime(ago(3 * HOUR)) };   // the doc was scheduled ago(HOUR)
+
+    test('the old version on chain: the edit is broadcast', async () => {
+      const doc = retried('edit');
+      await posts().insertOne(doc);
+      hiveRpcBatch.mockResolvedValue([onChain(doc, { ...before, body: 'the old body' })]);
+
+      await scheduled.runOnce();
+
+      expect(broadcasts).toHaveLength(1);
+      expect(broadcasts[0].ops[0][1]).toMatchObject({ permlink: 'edit', body: 'Body of edit' });
+      expect((await byPermlink('edit')).status).toBe('posted');
+    });
+
+    test.each([
+      ['title', { title: 'Old title' }],
+      ['json_metadata', { json_metadata: '{"app":"3speak/0.3","tags":["old"]}' }],
+    ])('only the %s differs: still an edit to broadcast', async (_label, over) => {
+      const doc = retried('edit2');
+      await posts().insertOne(doc);
+      hiveRpcBatch.mockResolvedValue([onChain(doc, { ...before, ...over })]);
+
+      await scheduled.runOnce();
+
+      expect(broadcasts).toHaveLength(1);
+    });
+
+    test('the chain already carries the edit (same metadata, keys in another order): marked posted', async () => {
+      const doc = retried('edited');
+      await posts().insertOne(doc);
+      hiveRpcBatch.mockResolvedValue([onChain(doc, { ...before, json_metadata: '{"tags":["threespeak"],"app":"3speak/0.3"}' })]);
+
+      await scheduled.runOnce();
+
+      expect(broadcasts).toHaveLength(0);
+      expect((await byPermlink('edited')).status).toBe('posted');
+    });
+
+    test('a stranded edit is requeued by the sweep, not marked posted', async () => {
+      const doc = post('stuck-edit', { status: 'processing', attempts: 1, processingStartedAt: ago(20 * MINUTE) });
+      await posts().insertOne(doc);
+      hiveRpcBatch.mockResolvedValue([onChain(doc, { ...before, body: 'the old body' })]);
+
+      await scheduled.requeueStuckPosts(posts());
+
+      expect((await byPermlink('stuck-edit')).status).toBe('scheduled');
+    });
+  });
+
+  test('a post created after it was scheduled counts as ours even if a node returns a different body', async () => {
+    const doc = retried('ours');
+    await posts().insertOne(doc);
+    hiveRpcBatch.mockResolvedValue([onChain(doc, { body: 'normalised by the node' })]);   // created ago(5min), after createdAt
+
+    await scheduled.runOnce();
+
+    expect(broadcasts).toHaveLength(0);
+    expect((await byPermlink('ours')).status).toBe('posted');
+  });
+});
+
 describe('reconciling posts stranded in processing', () => {
   const stranded = (permlink, extra = {}) => post(permlink, {
     status: 'processing', attempts: 1, processingStartedAt: ago(20 * MINUTE), ...extra,
@@ -342,7 +518,7 @@ describe('reconciling posts stranded in processing', () => {
   const chainSays = (fn) => hiveRpcBatch.mockImplementation(async ([r]) => fn(r.params[1]));
 
   test('already on chain: marked posted and the embed link is redone, without a new broadcast', async () => {
-    chainSays((permlink) => [{ result: { author: 'alice', permlink } }]);
+    chainSays((permlink) => [{ result: { author: 'alice', permlink, created: hiveTime(ago(19 * MINUTE)) } }]);
     await posts().insertOne(stranded('landed', { embedPermlink: 'e1' }));
 
     await scheduled.requeueStuckPosts(posts());
