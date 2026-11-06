@@ -219,7 +219,7 @@ describe('known problems with self-promo bookings', () => {
   // (services/adPaymentClaim.js sets the real window then). utils/adSlots.js reads a
   // dated campaign as PAID, so an abandoned, unpaid self-promo booking holds one of the
   // position's shares for its whole flight instead of for the AD_SLOT_HOLD_HOURS hold.
-  test.skip('BUG: an unpaid self-promo booking stops holding its position once the hold lapses', async () => {
+  test('BUG: an unpaid self-promo booking stops holding its position once the hold lapses', async () => {
     const { slotHolders } = require('../../utils/adSlots');
     const res = await book({ days: 7 }).expect(200);
     fx.advance((config.AD_SLOT_HOLD_HOURS + 1) * fx.HOUR);
@@ -231,7 +231,7 @@ describe('known problems with self-promo bookings', () => {
   // publicCampaign reads `priceHbd`): the advertiser's campaign list shows an unpaid
   // self-promo flight with nothing outstanding and no amount due, next to
   // blockedBy 'unpaid'. services/adPaymentClaim.js priceOf already reads both fields.
-  test.skip('BUG: the campaign list shows what an unpaid self-promo flight still owes', async () => {
+  test('BUG: the campaign list shows what an unpaid self-promo flight still owes', async () => {
     jest.doMock('../../services/adPaymentClaim', () => ({ claimCampaignPayment: jest.fn(), getHbdPerHive: jest.fn() }));
     const both = buildApp(['/advertise', require('../../routes/adSelfPromo')], ['/advertise', require('../../routes/adCampaigns')]);
     const booked = await request(both).post('/advertise/selfpromo/book')

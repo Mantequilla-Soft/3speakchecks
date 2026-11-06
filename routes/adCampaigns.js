@@ -339,6 +339,10 @@ async function watchStatsByCampaign(db, camps, byCampaign) {
 
 /** What the advertiser is allowed to see about their own campaign. */
 function publicCampaign(c, creative, watch = null) {
+  // What the flight costs. A self-promotion booking (routes/adSelfPromo.js) stores
+  // `totalHbd` and no `priceHbd`; same rule as priceOf() in services/adPaymentClaim.js,
+  // so the list cannot show an unpaid self-promo flight as owing nothing.
+  const priceHbd = c.priceHbd ?? c.totalHbd;
   return {
     id: String(c._id),
     name: c.name,
@@ -362,8 +366,8 @@ function publicCampaign(c, creative, watch = null) {
     slotPercent: c.slotPercent ?? null,
     slotPosition: c.slotPosition ?? null,
     days: c.days,
-    priceHbd: c.priceHbd,
-    flightHbd: c.flightHbd ?? c.priceHbd,
+    priceHbd,
+    flightHbd: c.flightHbd ?? priceHbd,
     // What this flight was actually priced at, not what the advertiser is on today.
     pricePerSecondDayHbd: c.pricePerSecondDayHbd ?? c.pricePerDayHbd ?? null,
     spotSeconds: c.spotSeconds ?? null,
@@ -402,8 +406,8 @@ function publicCampaign(c, creative, watch = null) {
     // What is still owed in a transfer, as distinct from what the flight cost. They
     // differ whenever credit was spent, and a client showing the wrong one either
     // asks for too much money or reports a paid flight as unpaid.
-    amountDueHbd: c.amountDueHbd ?? c.priceHbd ?? null,
-    outstandingHbd: Math.max(0, Math.round(((c.priceHbd || 0) - (c.paidHbd || 0)) * 1000) / 1000),
+    amountDueHbd: c.amountDueHbd ?? priceHbd ?? null,
+    outstandingHbd: Math.max(0, Math.round(((Number(priceHbd) || 0) - (c.paidHbd || 0)) * 1000) / 1000),
     // Followed through the advertiser's link, counted once per playback by /m/:sid/c,
     // /bc and /tc. Plays without clicks is half the answer to "is this working".
     clicks: c.clicks || 0,
