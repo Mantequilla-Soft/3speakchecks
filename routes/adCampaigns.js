@@ -48,6 +48,7 @@ const {
 const { findSlotConflict, slotAvailability, slotHolders } = require('../utils/adSlots');
 const { balanceOf, ledgerOf } = require('../utils/adBalance');
 const { claimCampaignPayment, getHbdPerHive } = require('../services/adPaymentClaim');
+const { ISO_COUNTRIES } = require('../utils/isoCountries');
 
 /**
  * When ADS_STAGE is 'off' the whole booking surface answers 404 — not 403, not an
@@ -719,9 +720,23 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
         });
       }
     }
-    const markets = Array.isArray(b.markets)
-      ? b.markets.map((m) => str(m, 2).toUpperCase()).filter((m) => /^[A-Z]{2}$/.test(m)).slice(0, 20)
+    /* Read whole, never cut to two letters first: "AUT" (Austria) cut to "AU" was
+     * booked as Australia, and "SWE" as "SW", which is no country at all. Anything
+     * shaped like a country code (two or three letters) must be an ISO alpha-2 code
+     * we know, or the booking is refused, as /apply does: a flight silently aimed
+     * somewhere else, or everywhere, is worse than an error. Anything not even
+     * shaped like one is ignored, as before. */
+    const marketsRaw = Array.isArray(b.markets)
+      ? b.markets.map((m) => str(m, 8).toUpperCase()).filter((m) => /^[A-Z]{2,3}$/.test(m))
       : [];
+    const badMarkets = [...new Set(marketsRaw.filter((m) => !ISO_COUNTRIES.has(m)))];
+    if (badMarkets.length) {
+      return res.status(400).json({
+        success: false,
+        error: `Not a country code: ${badMarkets.join(', ')}. Use ISO two-letter codes, e.g. BD, US, VE.`,
+      });
+    }
+    const markets = marketsRaw.slice(0, 20);
 
     // "Make the spot for us" — a one-time fee on top of the flight, folded into the
     // same total so the advertiser sends ONE transfer. The brief is required when

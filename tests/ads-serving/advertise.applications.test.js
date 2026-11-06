@@ -137,6 +137,7 @@ describe('POST /advertise/apply', () => {
     ['a pitch under 20 characters', { creativeConcept: 'Buy tokens' }, /at least 20 characters/],
     ['a website that is not a url', { website: 'meno.example' }, /must start with http/],
     ['a market that is not a country', { markets: ['DE', 'ZZ'] }, /Not a country code: ZZ/],
+    ['a three-letter code, never cut to another country', { markets: ['AUT'] }, /Not a country code: AUT/],
     ['a production request with no brief', { production: { requested: true, brief: 'make it' } }, /what the spot should say/],
   ])('refuses %s with a 400', async (_label, over, error) => {
     const res = await apply(form(over)).expect(400);

@@ -49,6 +49,7 @@ const adSettings = require('../utils/adSettings');
 const { syncVideoAdFlagFromChain } = require('../utils/videoAdOptOut');
 const { syncAudioAdChoiceFromChain } = require('../utils/audioAdChoice');
 const { audioEnabledOf } = require('../utils/adEligibility');
+const { ISO_COUNTRIES } = require('../utils/isoCountries');
 const {
   ADVERTISERS_COLLECTION,
   AD_CREATOR_PREFS_COLLECTION,
@@ -134,17 +135,6 @@ const BETA_REFUSAL = {
 
 const HIVE_ACCOUNT_RE = /^[a-z][a-z0-9.-]{2,15}$/;
 
-// ISO 3166-1 alpha-2. A two-letter shape check is not enough: "ZZ" passes it and
-// then sits in the record as a market nobody can deliver, which the reviewer only
-// discovers when quoting. The country codes on watch sessions come from the same
-// standard (GeoLite2), so this is the set the two sides can actually agree on.
-const ISO_COUNTRIES = new Set(('AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN '
-  + 'BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG '
-  + 'EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE '
-  + 'IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD '
-  + 'ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG '
-  + 'PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ '
-  + 'TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW').split(' '));
 const VALID_STATUS = new Set(['pending', 'approved', 'rejected']);
 const CATEGORY_SET = new Set(AD_CATEGORIES);
 
@@ -499,7 +489,9 @@ router.post('/apply', featureVisible, express.json({ limit: '64kb' }), async (re
     const website = str(b.website, 300);
     const budgetHbd = Number.isFinite(Number(b.budgetHbd)) ? Math.max(0, Number(b.budgetHbd)) : null;
     const marketsRaw = Array.isArray(b.markets)
-      ? b.markets.map((m) => str(m, 2).toUpperCase()).filter(Boolean).slice(0, 20)
+      // Read whole, never cut to two letters first: "AUT" (Austria) cut to "AU" was
+      // Australia. A code that is not ISO alpha-2 is refused below with the others.
+      ? b.markets.map((m) => str(m, 8).toUpperCase()).filter(Boolean).slice(0, 20)
       : [];
     const markets = marketsRaw.filter((m) => ISO_COUNTRIES.has(m));
     const badMarkets = marketsRaw.filter((m) => !ISO_COUNTRIES.has(m));
