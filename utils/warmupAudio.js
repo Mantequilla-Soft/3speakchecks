@@ -18,7 +18,9 @@ const { getDb } = require('./db');
 const { call } = require('./incubationHosted');
 
 const MAX_PER_ACCOUNT = 1;
-const MAX_TOTAL = Math.max(0, parseInt(process.env.WARMUP_AUDIO_MAX_TOTAL, 10) || 3);
+// An explicit 0 is honoured (no warm-up audio in the lists); unset or junk means 3.
+const parsedMaxTotal = parseInt(process.env.WARMUP_AUDIO_MAX_TOTAL, 10);
+const MAX_TOTAL = Number.isNaN(parsedMaxTotal) ? 3 : Math.max(0, parsedMaxTotal);
 const REFRESH_MS = 5 * 60 * 1000;
 // A Hive account never turns into a warm-up handle, so a "no" is kept longer.
 const OWNER_NO_TTL_MS = 6 * 60 * 60 * 1000;
