@@ -141,6 +141,18 @@ describe('pickLivePost', () => {
     expect((await pickLivePost([p1, p2], 'a1')).permlink).toBe('snap-2');
   });
 
+  test('a candidate no node answered for is an error, never "no live post" or an older twin', async () => {
+    const chain = fakeChain();
+    const p1 = chain.publish({ author: 'al', permlink: 'snap-1', body: playBody('al', 'a1') });
+    const p2 = chain.publish({ author: 'al', permlink: 'snap-2', body: playBody('al', 'a1') });
+    const inner = hiveRpcBatch.getMockImplementation();
+    // The node drops the newest candidate's entry and errors on nothing else.
+    hiveRpcBatch.mockImplementation(async (batch) => (await inner(batch)).filter((r) => r.id !== 0));
+    await expect(pickLivePost([p1, p2], 'a1')).rejects.toThrow(/al\/snap-2/);
+    hiveRpcBatch.mockResolvedValue([]);
+    await expect(pickLivePost([p1], 'a1')).rejects.toThrow(/no node answered/);
+  });
+
   test('skips the excluded permlink and asks the chain nothing when no post references the asset', async () => {
     const chain = fakeChain();
     const p1 = chain.publish({ author: 'al', permlink: 'dead', body: playBody('al', 'a1') });
@@ -293,6 +305,17 @@ describe('path 2: no embed_url, the owner\'s recent comments are searched', () =
 
     expect(res).toMatchObject({ linked: 1, errors: 1 });
     expect((await get('broken', 'a-b')).hive_link_checked_at).toBeUndefined(); // retried next run
+  });
+
+  test('a history walk no node answered is an error, not a miss', async () => {
+    fakeChain();
+    hiveRpcBatch.mockResolvedValue([]); // what hiveRpcBatch answers once every node failed
+    await ev().insertOne(doc('bob', 'asset2'));
+
+    const res = await syncVideoHiveLinks();
+
+    expect(res).toMatchObject({ linked: 0, missed: 0, errors: 1 });
+    expect((await get('bob', 'asset2')).hive_link_checked_at).toBeUndefined();
   });
 });
 
@@ -486,14 +509,12 @@ describe('verifying links that already exist', () => {
     expect((await get('alice', 'a1')).hive_link_dead_at).toBeUndefined();
   });
 
-  // BUG: the repair path documents "unstamped on purpose: retry next run rather
-  // than call it dead" (services/videoHiveSync.js:350), but getRecentComments()
-  // goes through hiveRpcBatch, which never throws: when every node fails it
-  // resolves []. An outage between the verify read and the history walk therefore
-  // yields "no posts", and the doc is stamped hive_link_dead_at plus a fresh
-  // hive_link_verified_at, so it is not looked at again for 14 days even though
-  // the live twin is on chain.
-  test.skip('BUG: a Hive outage during the repair walk marks a repairable link dead', async () => {
+  // Regression: getRecentComments() goes through hiveRpcBatch, which never throws:
+  // when every node fails it resolves []. An outage between the verify read and the
+  // history walk used to read as "no posts", and the doc was stamped
+  // hive_link_dead_at plus a fresh hive_link_verified_at, so it was not looked at
+  // again for 14 days even though the live twin was on chain.
+  test('a Hive outage during the repair walk never marks a repairable link dead', async () => {
     const chain = fakeChain();
     chain.publish({ author: 'rach', permlink: 'snap-592', body: playBody('rach', 'mlh6') }, { live: false });
     chain.publish({ author: 'rach', permlink: 'snap-397', body: playBody('rach', 'mlh6') });

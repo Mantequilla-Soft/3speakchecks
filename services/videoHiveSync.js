@@ -225,7 +225,14 @@ async function getRecentComments(account, depth = HISTORY_OPS) {
         method: 'condenser_api.get_account_history',
         params: [account, -1, depth, COMMENT_OP_FILTER_LOW, 0],
     }]);
-    const ops = Array.isArray(res?.result) ? res.result : [];
+    // hiveRpcBatch never throws: once every node failed it resolves []. That is
+    // "we don't know", not "this account has no posts", so it throws here and the
+    // callers' catch leaves the docs unstamped for the next run (a dead stamp or a
+    // miss stamp would park a repairable doc for days).
+    if (!Array.isArray(res?.result)) {
+        throw new Error(res?.error?.message || 'account history unavailable (no node answered)');
+    }
+    const ops = res.result;
     const posts = [];
     const seen = new Set();
     for (const entry of ops) {
@@ -266,11 +273,17 @@ async function pickLivePost(posts, assetPermlink, excludePermlink = null) {
         params: [c.author, c.permlink],
     })));
     const live = new Map();
+    const answered = new Set();   // a zeroed stub is an answer ("gone"); an error or a dropped entry is not
     for (const r of results) {
-        if (r?.result?.author) live.set(r.id, r.result);
+        if (!r || r.error || !r.result) continue;
+        answered.add(r.id);
+        if (r.result.author) live.set(r.id, r.result);
     }
     for (let idx = 0; idx < slice.length; idx += 1) {
         if (live.has(idx)) return live.get(idx);
+        // A newer candidate we could not read may be the live one: don't settle for
+        // an older twin, and don't report "no live post" during an outage.
+        if (!answered.has(idx)) throw new Error(`could not read @${slice[idx].author}/${slice[idx].permlink} (no node answered)`);
     }
     return null;
 }
