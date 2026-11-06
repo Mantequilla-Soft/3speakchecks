@@ -114,11 +114,11 @@ describe('what is stored', () => {
 });
 
 describe('Hive failures never corrupt the counts', () => {
-  test.skip('BUG: a post whose Hive fetch failed this run is pruned along with aged-out videos', async () => {
-    // services/commentCounts.js:107-110 deletes every row with updatedAt < runAt.
-    // A still-in-window video whose batch failed (line 76 "leave as-is") was not
-    // refreshed, so its row is deleted too: its comment boost vanishes until the
-    // next successful run, despite the "keep the old stored value" comment.
+  test('a post whose Hive fetch failed this run is not pruned along with aged-out videos', async () => {
+    // Regression: the prune used to delete every row with updatedAt < runAt. A
+    // still-in-window video whose batch failed ("leave as-is") was not refreshed, so
+    // its row was deleted too and its comment boost vanished until the next
+    // successful run.
     await counts().insertOne({ _id: 'alice/missed', author: 'alice', permlink: 'missed', comments: 7, native3Speak: 1, effective: 7.5, updatedAt: ago(DAY) });
     await db().collection('videos').insertMany([legacy('alice', 'missed'), legacy('alice', 'ok')]);
     hiveReturns({ 'alice/ok': { comments: 1, native3Speak: 0 } });

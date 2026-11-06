@@ -62,6 +62,7 @@ async function syncCommentCounts() {
       const author = lc(e.hive_author);
       if (author && e.hive_permlink) keyMap.set(`${author}/${e.hive_permlink}`, { author, permlink: e.hive_permlink });
     }
+    const inWindow = [...keyMap.keys()];
     let authorPerms = [...keyMap.values()];
     let capped = 0;
     if (authorPerms.length > COMMENT_SYNC_MAX_VIDEOS) {
@@ -75,10 +76,12 @@ async function syncCommentCounts() {
     const counts = await fetchCommentReplyCounts(authorPerms);
 
     const ops = [];
+    const refreshed = new Set();
     let withComments = 0;
     for (const ap of authorPerms) {
       const c = counts.get(`${ap.author}/${ap.permlink}`);
       if (!c) continue;                                    // transient fetch miss → leave as-is
+      refreshed.add(`${ap.author}/${ap.permlink}`);
       if (c.comments > 0) withComments += 1;
       const effective = c.comments + (COMMENT_NATIVE_MULT - 1) * c.native3Speak;
       ops.push({
@@ -102,9 +105,14 @@ async function syncCommentCounts() {
       }
       // Drop rows not refreshed this run (video aged out of the window, or deleted).
       // Only prune if we actually wrote something — a total Hive outage (ops empty)
-      // must not wipe the whole collection.
+      // must not wipe the whole collection. A video still in the window whose
+      // fetch failed (or that the cap left out) keeps its old row.
       if (ops.length) {
-        const del = await db.collection(COLLECTION).deleteMany({ updatedAt: { $lt: runAt } });
+        const keep = inWindow.filter((k) => !refreshed.has(k));
+        const del = await db.collection(COLLECTION).deleteMany({
+          updatedAt: { $lt: runAt },
+          ...(keep.length ? { _id: { $nin: keep } } : {}),
+        });
         removed = del.deletedCount || 0;
       }
     }
