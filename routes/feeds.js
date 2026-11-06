@@ -57,6 +57,7 @@ const { SUGGEST_MAX_LIMIT } = require('../utils/config');
 const { getPool, hydrate } = require('../utils/discoverPool');
 const { getInterestPool } = require('../utils/interestPool');
 const { getTranscriptionTags } = require('../utils/transcriptionTags');
+const { expandTag } = require('../utils/interestTags');
 const { pickWinner, fetchViewerWeights } = require('../utils/effectiveTags');
 
 /**
@@ -97,9 +98,13 @@ router.get('/interests', async (req, res) => {
             return res.json({ success: true, feed: 'interests', page, limit, total: 0, totalPages: 0, seed, videos: [] });
         }
 
+        // A CATEGORY pick ("tech-science") keeps the category tag itself plus every
+        // topic under it, same as /feeds/discover?interestsOnly=1. Topic picks stay
+        // literal (no sibling topics).
+        const matchSet = new Set([...interestSet].flatMap(expandTag));
         const allowNsfw = req.query.nsfw === 'true';
         const candidates = pool.filter((e) =>
-            (allowNsfw || !e.nsfw) && e.winnerTag && interestSet.has(e.winnerTag)
+            (allowNsfw || !e.nsfw) && e.winnerTag && matchSet.has(e.winnerTag)
         );
 
         // `base` already carries freshness × newBoost × curationBoost × retention.
