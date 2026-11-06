@@ -143,6 +143,25 @@ describe('demoting', () => {
     expect(await users().countDocuments({ premium: true })).toBe(2);
   });
 
+  test('other-source grants are left untouched by a subscription; a trial user who pays is taken over', async () => {
+    await users().insertMany([
+      { username: 'partner', premium: true, premium_source: 'partner-deal', premium_expires_at: ahead(DAY) },
+      { username: 'trial', premium: true, premium_source: 'testing', premium_expires_at: ago(1000), testing_started: ago(DAY) },
+      { username: 'former', premium: false },
+    ]);
+    subs = [sub('partner'), sub('trial'), sub('former')];
+
+    const run = await syncPremiumFromSubs();
+
+    expect(run).toMatchObject({ promoted: 2, expiredTrials: 0 });
+    expect(await users().findOne({ username: 'partner' }, { projection: { _id: 0 } }))
+      .toEqual({ username: 'partner', premium: true, premium_source: 'partner-deal', premium_expires_at: ahead(DAY) });
+    const trial = await users().findOne({ username: 'trial' });
+    expect(trial).toMatchObject({ premium: true, premium_source: 'subs', testing_started: ago(DAY) });
+    expect(trial).not.toHaveProperty('premium_expires_at');
+    expect(await users().findOne({ username: 'former' })).toMatchObject({ premium: true, premium_source: 'subs' });
+  });
+
   test('an expired Pro trial is switched off but keeps testing_started; a running one stays', async () => {
     await users().insertMany([
       { username: 'trial-done', premium: true, premium_source: 'testing', premium_expires_at: ago(1000), testing_started: ago(DAY) },
@@ -158,15 +177,15 @@ describe('demoting', () => {
     expect((await users().findOne({ username: 'trial-on' })).premium).toBe(true);
   });
 
-  test.skip('BUG: a manually granted premium survives a subscription that later lapses', async () => {
-    // services/premiumSubsSync.js:176 sets premium_source: 'subs' on EVERY active
+  test('a manually granted premium survives a subscription that later lapses', async () => {
+    // Regression: the promote pass used to set premium_source: 'subs' on EVERY active
     // subscriber, including one whose premium was granted by hand (no source tag).
-    // The header promises manual upgrades are "left alone forever", but once that
-    // user's subscription ends the demote pass (lines 211-221) sees the 'subs' tag and
-    // switches their manual premium off.
+    // Once that user's subscription ended, the demote pass saw the 'subs' tag and
+    // switched their manual premium off.
     await users().insertOne({ username: 'vip', premium: true });
     subs = [sub('vip')];
     await syncPremiumFromSubs();
+    expect(await users().findOne({ username: 'vip' })).not.toHaveProperty('premium_source');
 
     subs = [];
     await syncPremiumFromSubs();
