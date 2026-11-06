@@ -425,7 +425,17 @@ async function getFollowingList(username) {
                 params: [username, startFollowing, 'blog', batchSize]
             }]);
 
-            if (!result || result.length === 0 || !result[0].result) break;
+            if (!result || result.length === 0 || !Array.isArray(result[0].result)) {
+                // A failed first page reads as "no list" below. A page failing MID-walk
+                // must not end the loop like a short page: the first 1000 would be
+                // cached for ten minutes as the whole answer. Keep the last full list
+                // if there is one, else no list, and cache nothing.
+                if (startFollowing) {
+                    console.log(`Following list for ${username} failed mid-walk, not caching a partial list`);
+                    return cached ? cached.following : null;
+                }
+                break;
+            }
 
             const batch = result[0].result;
             if (batch.length === 0) break;
