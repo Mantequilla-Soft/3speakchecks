@@ -13,7 +13,14 @@ const webpush = require('web-push');
 const testDb = require('../helpers/db');
 const { buildApp } = require('../helpers/app');
 const { pinClock, NOW } = require('./_fixtures');
+const { hiveAccount, fakeHiveChain } = require('../helpers/hive');
 const push = require('../../utils/webPush');
+
+// The session vouch our API signs with @threespeak's own key (see routes/push.js).
+const threespeak = hiveAccount('threespeak');
+const mallory = hiveAccount('mallory');
+const vouchMessage = (user, ts) => `3speak-podcasts|push-vouch|${user}|session|${ts}`;
+const vouch = (user, { ts = NOW.getTime(), signer = threespeak } = {}) => ({ signature: signer.sign(vouchMessage(user, ts)), timestamp: ts });
 
 const app = buildApp(['/push', require('../../routes/push')]);
 const db = testDb.use();
@@ -39,6 +46,7 @@ function unconfigured() {
 beforeEach(() => {
   pinClock(NOW);
   webpush.sendNotification.mockReset().mockResolvedValue({ statusCode: 201 });
+  fakeHiveChain([threespeak, mallory]);
 });
 afterEach(() => jest.useRealTimers());
 
@@ -131,14 +139,25 @@ describe('POST /push/unsubscribe', () => {
     expect((await subs().find({}).toArray()).map((r) => r.endpoint).sort()).toEqual([sub(2).endpoint, sub(3).endpoint]);
   });
 
-  test('without an endpoint removes every browser of that person, nobody else', async () => {
-    const res = await request(app).post('/push/unsubscribe').send({ username: 'alice', endpoint: '' }).expect(200);
+  test('without an endpoint, and with a session vouch for that person, removes every browser of theirs, nobody else', async () => {
+    const res = await request(app).post('/push/unsubscribe').send({ username: 'alice', endpoint: '', ...vouch('alice') }).expect(200);
     expect(res.body.removed).toBe(2);
     expect(await subs().countDocuments({ username: 'bob' })).toBe(1);
   });
 
+  test.each([
+    ['a vouch for another account', () => vouch('bob')],
+    ['a vouch signed by someone who is not 3Speak', () => vouch('alice', { signer: mallory })],
+    ['a vouch older than a day', () => vouch('alice', { ts: NOW.getTime() - 25 * 60 * 60 * 1000 })],
+    ['a signature that does not parse', () => ({ signature: 'not-a-signature', timestamp: NOW.getTime() })],
+  ])('without an endpoint, %s is a 401 and nothing is removed', async (_label, proof) => {
+    await request(app).post('/push/unsubscribe').send({ username: 'alice', ...proof() }).expect(401);
+    expect(await subs().countDocuments({ username: 'alice' })).toBe(2);
+  });
+
   test('an endpoint that is not a string is ignored rather than used as a query', async () => {
-    const res = await request(app).post('/push/unsubscribe').send({ username: 'carol', endpoint: { $ne: null } }).expect(200);
+    // (Read as "no endpoint", so carol's own vouch is needed to get that far.)
+    const res = await request(app).post('/push/unsubscribe').send({ username: 'carol', endpoint: { $ne: null }, ...vouch('carol') }).expect(200);
     expect(res.body.removed).toBe(0);
     expect(await subs().countDocuments()).toBe(3);
   });
@@ -151,13 +170,18 @@ describe('POST /push/unsubscribe', () => {
   // in the body. Anyone can silently switch off every notification of any account
   // with one unauthenticated POST. The "endpoint is unguessable" argument in the
   // code covers only the by-endpoint branch.
-  test.skip('BUG: removing all of an account push subscriptions requires proof that it is that account', async () => {
-    await request(app).post('/push/unsubscribe').send({ username: 'alice' }).expect(401);
+  test('removing all of an account push subscriptions requires proof that it is that account', async () => {
+    const res = await request(app).post('/push/unsubscribe').send({ username: 'alice' }).expect(401);
+    expect(res.body).toEqual({ success: false, error: 'Signature required' });
     expect(await subs().countDocuments({ username: 'alice' })).toBe(2);
   });
 });
 
 describe('/push/prefs', () => {
+  // Unproven saves are still taken (PUSH_REQUIRE_PROOF off) and logged.
+  beforeEach(() => jest.spyOn(console, 'warn').mockImplementation(() => {}));
+  afterEach(() => { delete process.env.PUSH_REQUIRE_PROOF; });
+
   test('a person with no saved choice gets the defaults: everything on except votes and reblogs', async () => {
     const res = await request(app).get('/push/prefs?username=alice').expect(200);
     expect(res.body.kinds).toEqual(push.KINDS);
@@ -198,8 +222,29 @@ describe('/push/prefs', () => {
   // SECURITY (routes/push.js:80-91): writing preferences is unauthenticated, so
   // anyone can turn off another account's notifications. The code comment only
   // argues for unauthenticated READS.
-  test.skip('BUG: changing an account notification preferences requires proof that it is that account', async () => {
+  // Enforced once PUSH_REQUIRE_PROOF=true (after the app sends the vouch).
+  test('changing an account notification preferences requires proof that it is that account', async () => {
+    process.env.PUSH_REQUIRE_PROOF = 'true';
     await request(app).post('/push/prefs').send({ username: 'alice', prefs: { replies: false } }).expect(401);
+    await request(app).post('/push/prefs').send({ username: 'alice', prefs: { replies: false }, ...vouch('bob') }).expect(401, { success: false, error: 'Invalid signature' });
+    await request(app).post('/push/prefs').send({ username: 'alice', prefs: { replies: false }, ...vouch('alice', { ts: NOW.getTime() - 25 * 60 * 60 * 1000 }) })
+      .expect(401, { success: false, error: 'timestamp out of tolerance' });
+    expect(await db().collection('push-prefs').countDocuments()).toBe(0);
+
+    const res = await request(app).post('/push/prefs').send({ username: 'alice', prefs: { replies: false }, ...vouch('alice') }).expect(200);
+    expect(res.body.prefs.replies).toBe(false);
+  });
+
+  test('while PUSH_REQUIRE_PROOF is off an unproven save still works, logged once per account', async () => {
+    await request(app).post('/push/prefs').send({ username: 'dora', prefs: { replies: false } }).expect(200);
+    await request(app).post('/push/prefs').send({ username: 'dora', prefs: { replies: true } }).expect(200);
+    await request(app).post('/push/prefs').send({ username: 'erik', prefs: {}, ...vouch('bob') }).expect(200);
+    await request(app).post('/push/prefs').send({ username: 'fred', prefs: {}, ...vouch('fred') }).expect(200);
+    const lines = console.warn.mock.calls.map(([line]) => line);
+    expect(lines.filter((l) => l.includes('@dora'))).toHaveLength(1);
+    expect(lines.find((l) => l.includes('@dora'))).toMatch(/\(missing\)/);
+    expect(lines.find((l) => l.includes('@erik'))).toMatch(/\(invalid\)/);
+    expect(lines.some((l) => l.includes('@fred'))).toBe(false);
   });
 
   // SECURITY, denial of service (routes/push.js:75): GET /push/prefs runs
@@ -217,7 +262,7 @@ describe('when the database fails', () => {
 
   test.each([
     ['subscribe', 'updateOne', () => request(app).post('/push/subscribe').send({ username: 'alice', subscription: sub() }), 'could not save subscription'],
-    ['unsubscribe', 'deleteMany', () => request(app).post('/push/unsubscribe').send({ username: 'alice' }), 'could not remove subscription'],
+    ['unsubscribe', 'deleteMany', () => request(app).post('/push/unsubscribe').send({ username: 'alice', endpoint: sub().endpoint }), 'could not remove subscription'],
     ['saving prefs', 'updateOne', () => request(app).post('/push/prefs').send({ username: 'alice', prefs: {} }), 'could not save preferences'],
   ])('%s answers 500 without details', async (_label, method, call, error) => {
     const { Collection } = require('mongodb');
