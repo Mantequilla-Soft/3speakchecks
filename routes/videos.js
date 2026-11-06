@@ -448,6 +448,9 @@ router.patch('/api/video/:owner/:permlink/reusable', async (req, res) => {
         if (!UPLOAD_SECRET_TOKEN || token !== UPLOAD_SECRET_TOKEN) {
             return res.status(401).json({ success: false, error: 'Unauthorized' });
         }
+        if (!ENABLE_MONGO_WRITES) {
+            return res.status(503).json({ success: false, error: 'Writes disabled', message: 'MongoDB writes are currently disabled' });
+        }
 
         const { owner, permlink } = req.params;
         const { reusable } = req.body;
