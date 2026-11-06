@@ -233,7 +233,7 @@ describe('with a key: the real payout', () => {
    * sent: here 5.555 + 4.444 HIVE went out and the period row records 9.998. The
    * transfers are right; the record of them is not, which is what a person checks
    * against the chain. Summing the sent amounts and rounding once would fix it. */
-  test.skip('BUG: the recorded totals equal what was actually sent', async () => {
+  test('BUG: the recorded totals equal what was actually sent', async () => {
     chain();
     await seedListens(listen(), listen({ owner: 'artist-b' }), listen({ username: null, payable: false }));
     await loadPpl(LIVE).runPayout(NOW);

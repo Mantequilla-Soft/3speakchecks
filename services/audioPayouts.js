@@ -290,8 +290,11 @@ async function runPayout(now = new Date()) {
     const key = PrivateKey.fromString(ACTIVE_KEY);
     const memo = `3Speak pay-per-listen ${periodStart.toISOString().slice(0, 10)}..${tag}`;
     const results = [];
-    let paidHbd = 0;
-    let paidHive = 0;
+    // Running totals of what was actually sent, in thousandths: integer sums do
+    // not drift the way a float sum floored at every step does.
+    let paidHbdMilli = 0;
+    let paidHiveMilli = 0;
+    const milli = (n) => Math.round(Number(fmt3(n)) * 1000);
 
     for (const p of plan) {
         const ops = [];
@@ -301,8 +304,8 @@ async function runPayout(now = new Date()) {
         try {
             // eslint-disable-next-line no-await-in-loop
             const tx = await getClient().broadcast.sendOperations(ops, key);
-            paidHbd = floor3(paidHbd + p.hbd);
-            paidHive = floor3(paidHive + p.hive);
+            if (p.hbd >= MIN_AMOUNT) paidHbdMilli += milli(p.hbd);
+            if (p.hive >= MIN_AMOUNT) paidHiveMilli += milli(p.hive);
             results.push({ account: p.account, hbd: fmt3(p.hbd), hive: fmt3(p.hive), status: 'ok', txId: tx.id });
         } catch (err) {
             const msg = err && err.message ? err.message : String(err);
@@ -314,6 +317,8 @@ async function runPayout(now = new Date()) {
     }
 
     const failures = results.filter((r) => r.status === 'error').length;
+    const paidHbdStr = (paidHbdMilli / 1000).toFixed(3);
+    const paidHiveStr = (paidHiveMilli / 1000).toFixed(3);
     await col.updateOne(
         { periodEnd },
         { $set: {
@@ -321,7 +326,7 @@ async function runPayout(now = new Date()) {
             finishedAt: new Date(),
             recipients: results.filter((r) => r.status === 'ok').length,
             failures,
-            totals: { hbd: fmt3(paidHbd), hive: fmt3(paidHive) },
+            totals: { hbd: paidHbdStr, hive: paidHiveStr },
             skipped,
             details: results,
         } },
@@ -349,7 +354,7 @@ async function runPayout(now = new Date()) {
 
     console.log(
         `[pplPayout] ${tag}: ${failures ? 'COMPLETED WITH ERRORS' : 'completed'} — ` +
-        `paid ${fmt3(paidHbd)} HBD + ${fmt3(paidHive)} HIVE to ` +
+        `paid ${paidHbdStr} HBD + ${paidHiveStr} HIVE to ` +
         `${results.filter((r) => r.status === 'ok').length} accounts` +
         (failures ? `, ${failures} failed (status='error', will NOT auto-retry)` : ''),
     );
