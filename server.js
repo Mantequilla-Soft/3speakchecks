@@ -13,7 +13,7 @@ const { syncHiveProfiles } = require('./services/profileSync');
 const badgeSync = require('./services/badgeSync');
 const { denormalizeCommunityTitles } = require('./services/communityDenorm');
 const { startTagSyncWatcher } = require('./services/tagSync');
-const { syncAudioHiveLinks } = require('./services/audioHiveSync');
+const { syncAudioHiveLinks, syncAudioPostTitles } = require('./services/audioHiveSync');
 const { syncEmbedCategories } = require('./services/embedCategorySync');
 const { syncThumbnails } = require('./services/thumbnailSync');
 const { syncVideoHiveLinks } = require('./services/videoHiveSync');
@@ -275,14 +275,19 @@ async function startServer() {
     console.log(`Badge index scheduled every ${BADGE_SYNC_INTERVAL_H}h (first run in 1m)`);
 
     // Sync audio → Hive post links (delayed 2min, then every 30min)
+    // Then give the linked rows their post's title.
+    const runAudioHiveSync = () => syncAudioHiveLinks()
+        .catch(err => console.error('Audio Hive sync error:', err))
+        .then(() => syncAudioPostTitles())
+        .catch(err => console.error('Audio title sync error:', err));
     setTimeout(() => {
-        syncAudioHiveLinks().catch(err => console.error('Audio Hive sync error:', err));
+        runAudioHiveSync();
         setInterval(() => {
             if (syncRunning) return;
-            syncAudioHiveLinks().catch(err => console.error('Audio Hive sync error:', err));
+            runAudioHiveSync();
         }, 30 * 60 * 1000);
     }, 2 * 60 * 1000);
-    console.log('Audio-Hive link sync scheduled every 30min (first run in 2min)');
+    console.log('Audio-Hive link + title sync scheduled every 30min (first run in 2min)');
 
     // Resolve & persist the Hive community (category) on embed-video docs so
     // /feeds/community/* can filter reliably (first run in 1min, then every 15min).

@@ -237,4 +237,58 @@ async function syncAudioHiveLinks() {
     return { checked: unlinked.length, linked, errors };
 }
 
-module.exports = { syncAudioHiveLinks };
+// Audio cards, the audio page, the player, RSS and search all read the row's
+// `title`, but on many rows that is only the upload's default (the file name,
+// "recording 4702") while the linked Hive post carries the real one. So the
+// post title wins: it lands in `title` (and `hive_title`), and the first
+// title the row had is kept once in `upload_title`. Rows are read once, then
+// re-read hourly for their first week, as a post can still be edited then.
+// Posts without a title (snaps) leave the row alone.
+const TITLE_BATCH_SIZE = 200;
+const TITLE_RECHECK_MS = 60 * 60 * 1000;
+const TITLE_RECENT_MS = 7 * 24 * 60 * 60 * 1000;
+
+async function syncAudioPostTitles(now = new Date()) {
+    const audioCol = getDb().collection('embed-audio');
+    const rows = await audioCol.find({
+        status: 'published',
+        post_permlink: { $nin: [null, ''] },
+        $or: [
+            { hive_title_checked_at: { $exists: false } },
+            {
+                createdAt: { $gte: new Date(now.getTime() - TITLE_RECENT_MS) },
+                hive_title_checked_at: { $lt: new Date(now.getTime() - TITLE_RECHECK_MS) },
+            },
+        ],
+    }, { projection: { owner: 1, post_author: 1, post_permlink: 1, title: 1, upload_title: 1 } })
+        .sort({ createdAt: -1 })
+        .limit(TITLE_BATCH_SIZE)
+        .toArray();
+
+    let retitled = 0;
+    let errors = 0;
+    for (const row of rows) {
+        let post;
+        try {
+            post = await hiveRpc('condenser_api.get_content', [row.post_author || row.owner, row.post_permlink]);
+        } catch {
+            errors++; // a failed read is retried next run, never stamped as checked
+            continue;
+        }
+        const $set = { hive_title_checked_at: now };
+        const title = post && post.author ? String(post.title || '').trim() : '';
+        if (title) {
+            $set.hive_title = title;
+            if (title !== row.title) {
+                $set.title = title;
+                if (row.upload_title === undefined) $set.upload_title = row.title ?? null;
+                retitled++;
+            }
+        }
+        if (ENABLE_MONGO_WRITES) await audioCol.updateOne({ _id: row._id }, { $set });
+    }
+    if (rows.length) console.log(`[audioHiveSync] Titles: ${rows.length} checked, ${retitled} retitled, ${errors} errors`);
+    return { checked: rows.length, retitled, errors };
+}
+
+module.exports = { syncAudioHiveLinks, syncAudioPostTitles };
