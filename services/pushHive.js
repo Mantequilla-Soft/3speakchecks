@@ -110,7 +110,9 @@ async function runOnce() {
         sent += res.sent;
       }
 
-      await state.updateOne({ _id: username }, { $set: { lastId: maxId, at: new Date() } }, { upsert: true });
+      // $max: a lagging node can answer an older list; the cursor only moves forward,
+      // or the next pass on a healthy node would push everything in between again.
+      await state.updateOne({ _id: username }, { $max: { lastId: maxId }, $set: { at: new Date() } }, { upsert: true });
     } catch (err) {
       // One person's bad pass must not stop everyone else's.
       console.warn(`[push] hive pass failed for ${username}: ${err.message}`);

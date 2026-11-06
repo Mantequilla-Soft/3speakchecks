@@ -173,11 +173,11 @@ test('handles at most 200 subscribers per pass', async () => {
   expect(hiveRpcBatch).toHaveBeenCalledTimes(200);
 });
 
-// BUG: the cursor is overwritten with the max id of WHATEVER list came back
-// (services/pushHive.js:225 and :253), so a lagging node that answers an older
-// list moves it backwards, and the next pass on a healthy node pushes every
-// notification in between a second time. The cursor should only ever move forward.
-test.skip('BUG: an older list from a lagging node never moves the cursor backwards', async () => {
+// Regression: the cursor used to be overwritten with the max id of WHATEVER list
+// came back, so a lagging node that answered an older list moved it backwards, and
+// the next pass on a healthy node pushed every notification in between a second
+// time. The cursor only ever moves forward.
+test('an older list from a lagging node never moves the cursor backwards', async () => {
   await seen('alice', 20);
   inbox.set('alice', [n(15, 'reply', '@old replied', '@old/r')]);
   await runOnce();
