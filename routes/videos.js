@@ -117,9 +117,8 @@ router.get('/videos/tag/:tag', async (req, res) => {
             const fetchLegacy = type !== 'shorts'
                 ? videosCollection.find(legacyQuery).sort({ created: -1 }).toArray()
                 : Promise.resolve([]);
-            const fetchEmbed = type !== 'videos'
-                ? db.collection('embed-video').find(embedQuery).sort({ createdAt: -1 }).toArray()
-                : Promise.resolve([]);
+            // Embed always runs: `embedQuery.short` above already narrows it to the tab.
+            const fetchEmbed = db.collection('embed-video').find(embedQuery).sort({ createdAt: -1 }).toArray();
 
             const [legacyVideos, embedVideosRaw] = await Promise.all([fetchLegacy, fetchEmbed]);
             const normalized = embedVideosRaw.map(ev => ({
@@ -216,9 +215,10 @@ router.get('/videos/tag/:tag', async (req, res) => {
             } else if (type === 'shorts') {
                 // Shorts only: DB-level pagination on embed-video
                 const shortsNsfw = nsfwFilterHiveTags(req);
+                // An unlisted short stays off the tag feed, as on every other shorts surface.
                 const query = isSnapsTag
-                    ? { short: true, status: 'published', hive_author: { $nin: hiddenListSync() }, ...unavailableMatch(), ...hiddenFromFeedMatch(), ...shortsNsfw }
-                    : { short: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...unavailableMatch(), ...hiddenFromFeedMatch() };
+                    ? { short: true, status: 'published', listed_on_3speak: { $ne: false }, hive_author: { $nin: hiddenListSync() }, ...unavailableMatch(), ...hiddenFromFeedMatch(), ...shortsNsfw }
+                    : { short: true, status: 'published', listed_on_3speak: { $ne: false }, ...buildEmbedFilter(req, tagLower, useLower), ...unavailableMatch(), ...hiddenFromFeedMatch() };
                 if (sinceDate) query.createdAt = { $gte: sinceDate };
 
                 total = await embedCollection.countDocuments(query);
@@ -309,9 +309,10 @@ router.get('/videos/tag/:tag/counts', async (req, res) => {
 
         const legacyQuery = { tags_v2: tagLower, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch() };
         const embedVideoQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...unavailableMatch(), ...hiddenFromFeedMatch() };
+        // Same filters as the shorts tab itself, so the count matches the list.
         const shortsQuery = isSnapsTag
-            ? { short: true, status: 'published', ...unavailableMatch(), ...hiddenFromFeedMatch(), ...nsfwFilterHiveTags(req) }
-            : { short: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...unavailableMatch(), ...hiddenFromFeedMatch() };
+            ? { short: true, status: 'published', listed_on_3speak: { $ne: false }, hive_author: { $nin: hiddenListSync() }, ...unavailableMatch(), ...hiddenFromFeedMatch(), ...nsfwFilterHiveTags(req) }
+            : { short: true, status: 'published', listed_on_3speak: { $ne: false }, ...buildEmbedFilter(req, tagLower, useLower), ...unavailableMatch(), ...hiddenFromFeedMatch() };
         if (sinceDate) {
             legacyQuery.created = { $gte: sinceDate };
             embedVideoQuery.createdAt = { $gte: sinceDate };

@@ -107,12 +107,13 @@ function defineTagFeedSuite({ db, app, prepare }) {
     // /shorts, /shortssorted, /shorts/stories, /shorts/:username). The tag feed's
     // shorts query has no listing clause at all (routes/videos.js:219-221), so an
     // unlisted short shows up under its tags, and is counted by /counts (:312-314).
-    test.skip('BUG: an UNLISTED short is listed in the tag feed\'s shorts tab', async () => {
+    test('an UNLISTED short is not listed in the tag feed\'s shorts tab, nor counted', async () => {
       await addEmbeds(
         F.shortVideo({ permlink: 'listed', hive_tags: ['pets'] }),
         F.shortVideo({ permlink: 'unlisted', hive_tags: ['pets'], listed_on_3speak: false }),
       );
       expect(F.permlinks((await get('pets', { type: 'shorts' }).expect(200)).body.videos)).toEqual(['listed']);
+      expect((await counts('pets').expect(200)).body.shorts).toBe(1);
     });
   });
 
@@ -190,7 +191,7 @@ function defineTagFeedSuite({ db, app, prepare }) {
     // never runs the embed query: `fetchEmbed = type !== 'videos' ? ... : []`
     // (:120-122). So the Videos tab of the curated pick drops every curated embed
     // video and shows legacy uploads only.
-    test.skip('BUG: type=videos leaves out every curated EMBED video', async () => {
+    test('type=videos keeps the curated EMBED videos', async () => {
       const res = await get('mantecurated', { type: 'videos' }).expect(200);
       expect(F.permlinks(res.body.videos)).toEqual(['hive-e-curated', 'l-curated']);
     });
