@@ -154,7 +154,7 @@ describe('GET /m/:sid.m3u8?p=..., the spliced media playlist', () => {
   // and utils/adModel.js slotSecondsFor reads Number(null) as 0%): a legacy flight booked
   // "30 seconds in" (slotPosition only) is spliced in as a PRE-ROLL on every playback,
   // because its session carries slotPercent null rather than no slotPercent at all.
-  test.skip('BUG: a legacy flight booked in seconds keeps its position once it is on a session', async () => {
+  test('BUG: a legacy flight booked in seconds keeps its position once it is on a session', async () => {
     cdn();
     const s = await session({ slotPercent: null, slotPosition: 13 });
     await get(variantPath(s.sid, CONTENT_480)).expect(200);

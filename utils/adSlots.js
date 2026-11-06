@@ -110,7 +110,8 @@ async function slotHolders(db, {
   // this a stranger could reserve the entire rate card by booking five slots they
   // will never pay for. A hold is earned by approval, not by submitting a form.
   const provisionalRefs = [...new Set(candidates
-    .filter((c) => effectiveWindow(c, now).provisional)
+    // effectiveWindow() is null for a booking whose hold has lapsed: it holds nothing.
+    .filter((c) => effectiveWindow(c, now)?.provisional)
     .map((c) => c.advertiserRef)
     .filter(Boolean))];
   const approvedRefs = provisionalRefs.length
@@ -129,6 +130,9 @@ async function slotHolders(db, {
     // half the rate card for no reason.
     if (format && formatOf(c).key !== format) continue;
     const win = effectiveWindow(c, now);
+    // No window at all (an unpaid booking whose hold lapsed, a draft with no days):
+    // it holds nothing, and must not take the whole query down with it.
+    if (!win) continue;
     if (win.provisional && !approvedRefs.has(c.advertiserRef)) continue;
     if (!overlaps(win, want)) continue;
     holders += 1;

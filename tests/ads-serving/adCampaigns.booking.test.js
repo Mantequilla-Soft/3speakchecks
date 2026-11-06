@@ -160,9 +160,14 @@ describe('POST /advertise/campaigns', () => {
   // checked, so a three-letter ISO code silently becomes another country: "AUT"
   // (Austria) is booked as "AU" (Australia). Booking also never checks the code against
   // the ISO list, so "SWE" (Sweden) is stored as "SW", which is no country at all.
-  test.skip('BUG: a three-letter country code is never booked as a different country', async () => {
+  test('BUG: a three-letter country code is never booked as a different country', async () => {
     const res = await book({ markets: ['AUT'] });
     expect((res.body.campaign && res.body.campaign.markets) || []).not.toContain('AU');
+  });
+
+  test.each([['AUT'], ['SWE'], ['ZZ']])('a market %s that is not an ISO two-letter code is refused and books nothing', async (code) => {
+    expect((await book({ markets: ['DE', code] }).expect(400)).body.error).toMatch(new RegExp(`Not a country code: ${code}`));
+    expect(await campaigns().countDocuments()).toBe(0);
   });
 
   test('a banner may run longer than a roll: each format has its own cap', async () => {

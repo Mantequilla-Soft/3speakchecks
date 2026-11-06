@@ -184,7 +184,7 @@ describe('runOnce and getSnapshot', () => {
   // BUG (services/adInventory.js runOnce): the summary line looks for a slot with
   // `position > 0`, but slot rows carry `percent`, so it always logs "no mid-roll
   // slot" however much mid-roll inventory there is. Cosmetic: only the log is wrong.
-  test.skip('BUG: the run log never reports the mid-roll figure', async () => {
+  test('BUG: the run log never reports the mid-roll figure', async () => {
     await seedWorld();
     const log = jest.spyOn(console, 'log').mockImplementation(() => {});
     await inventory.runOnce();

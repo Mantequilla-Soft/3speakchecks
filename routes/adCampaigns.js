@@ -48,6 +48,7 @@ const {
 const { findSlotConflict, slotAvailability, slotHolders } = require('../utils/adSlots');
 const { balanceOf, ledgerOf } = require('../utils/adBalance');
 const { claimCampaignPayment, getHbdPerHive } = require('../services/adPaymentClaim');
+const { ISO_COUNTRIES } = require('../utils/isoCountries');
 
 /**
  * When ADS_STAGE is 'off' the whole booking surface answers 404 — not 403, not an
@@ -339,6 +340,10 @@ async function watchStatsByCampaign(db, camps, byCampaign) {
 
 /** What the advertiser is allowed to see about their own campaign. */
 function publicCampaign(c, creative, watch = null) {
+  // What the flight costs. A self-promotion booking (routes/adSelfPromo.js) stores
+  // `totalHbd` and no `priceHbd`; same rule as priceOf() in services/adPaymentClaim.js,
+  // so the list cannot show an unpaid self-promo flight as owing nothing.
+  const priceHbd = c.priceHbd ?? c.totalHbd;
   return {
     id: String(c._id),
     name: c.name,
@@ -362,8 +367,8 @@ function publicCampaign(c, creative, watch = null) {
     slotPercent: c.slotPercent ?? null,
     slotPosition: c.slotPosition ?? null,
     days: c.days,
-    priceHbd: c.priceHbd,
-    flightHbd: c.flightHbd ?? c.priceHbd,
+    priceHbd,
+    flightHbd: c.flightHbd ?? priceHbd,
     // What this flight was actually priced at, not what the advertiser is on today.
     pricePerSecondDayHbd: c.pricePerSecondDayHbd ?? c.pricePerDayHbd ?? null,
     spotSeconds: c.spotSeconds ?? null,
@@ -402,8 +407,8 @@ function publicCampaign(c, creative, watch = null) {
     // What is still owed in a transfer, as distinct from what the flight cost. They
     // differ whenever credit was spent, and a client showing the wrong one either
     // asks for too much money or reports a paid flight as unpaid.
-    amountDueHbd: c.amountDueHbd ?? c.priceHbd ?? null,
-    outstandingHbd: Math.max(0, Math.round(((c.priceHbd || 0) - (c.paidHbd || 0)) * 1000) / 1000),
+    amountDueHbd: c.amountDueHbd ?? priceHbd ?? null,
+    outstandingHbd: Math.max(0, Math.round(((Number(priceHbd) || 0) - (c.paidHbd || 0)) * 1000) / 1000),
     // Followed through the advertiser's link, counted once per playback by /m/:sid/c,
     // /bc and /tc. Plays without clicks is half the answer to "is this working".
     clicks: c.clicks || 0,
@@ -715,9 +720,23 @@ router.post('/campaigns', featureVisible, express.json({ limit: '32kb' }), async
         });
       }
     }
-    const markets = Array.isArray(b.markets)
-      ? b.markets.map((m) => str(m, 2).toUpperCase()).filter((m) => /^[A-Z]{2}$/.test(m)).slice(0, 20)
+    /* Read whole, never cut to two letters first: "AUT" (Austria) cut to "AU" was
+     * booked as Australia, and "SWE" as "SW", which is no country at all. Anything
+     * shaped like a country code (two or three letters) must be an ISO alpha-2 code
+     * we know, or the booking is refused, as /apply does: a flight silently aimed
+     * somewhere else, or everywhere, is worse than an error. Anything not even
+     * shaped like one is ignored, as before. */
+    const marketsRaw = Array.isArray(b.markets)
+      ? b.markets.map((m) => str(m, 8).toUpperCase()).filter((m) => /^[A-Z]{2,3}$/.test(m))
       : [];
+    const badMarkets = [...new Set(marketsRaw.filter((m) => !ISO_COUNTRIES.has(m)))];
+    if (badMarkets.length) {
+      return res.status(400).json({
+        success: false,
+        error: `Not a country code: ${badMarkets.join(', ')}. Use ISO two-letter codes, e.g. BD, US, VE.`,
+      });
+    }
+    const markets = marketsRaw.slice(0, 20);
 
     // "Make the spot for us" — a one-time fee on top of the flight, folded into the
     // same total so the advertiser sends ONE transfer. The brief is required when

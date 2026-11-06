@@ -232,7 +232,7 @@ describe('dust below the sendable minimum', () => {
    * The comment above it says this dust is carried "rather than dropping it", and
    * payViewers does carry it correctly (pool minus what was paid). Here the 0.001
    * pool goes to nobody and is recorded as carrying nothing. */
-  test.skip('BUG: creator shares that round to zero are dropped instead of carried', async () => {
+  test('BUG: creator shares that round to zero are dropped instead of carried', async () => {
     const c = await F.seedCampaign(db(), period, { paidHbd: 0.002, priceHbd: 0.002, paidAssets: { HBD: 0.002 } });
     for (const owner of ['a', 'b', 'c', 'd']) await F.seedImpressions(db(), c, 1, { owner: `creator-${owner}`, period });
     await P.settlePeriod(db(), period);
