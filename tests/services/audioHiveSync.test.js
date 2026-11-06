@@ -10,7 +10,7 @@
 process.env.HIVE_RPC_ENDPOINTS = 'http://node-a.test,http://node-b.test';
 
 const testDb = require('../helpers/db');
-const { syncAudioHiveLinks } = require('../../services/audioHiveSync');
+const { syncAudioHiveLinks, syncAudioPostTitles } = require('../../services/audioHiveSync');
 
 const db = testDb.use();
 const audio = () => db().collection('embed-audio');
@@ -258,6 +258,63 @@ describe('failures', () => {
 
   test('an empty backlog makes no Hive call', async () => {
     expect(await syncAudioHiveLinks()).toEqual({ checked: 0, linked: 0, errors: 0 });
+    expect(rpc).toHaveLength(0);
+  });
+});
+
+describe('giving a linked track its post title', () => {
+  const NOW = new Date('2026-11-06T12:00:00Z');
+  const linked = (permlink, title, extra = {}) => track('dj', permlink, {
+    post_permlink: `post-${permlink}`, title, createdAt: new Date('2026-11-05T00:00:00Z'), ...extra,
+  });
+
+  test('replaces a file-name title with the post title and keeps the original once', async () => {
+    publish({ author: 'dj', permlink: 'post-t1', title: 'NaPodPoMo 2026 - Introduction' });
+    await audio().insertOne(linked('t1', 'recording f879'));
+
+    expect(await syncAudioPostTitles(NOW)).toEqual({ checked: 1, retitled: 1, errors: 0 });
+    const row = await get('t1');
+    expect(row.title).toBe('NaPodPoMo 2026 - Introduction');
+    expect(row.hive_title).toBe('NaPodPoMo 2026 - Introduction');
+    expect(row.upload_title).toBe('recording f879');
+
+    // An edited post title follows on a later recheck; upload_title stays the first one.
+    live.get('dj/post-t1').title = 'Introduction (edited)';
+    await syncAudioPostTitles(new Date(NOW.getTime() + 2 * 60 * 60 * 1000));
+    const again = await get('t1');
+    expect(again.title).toBe('Introduction (edited)');
+    expect(again.upload_title).toBe('recording f879');
+  });
+
+  test('leaves the title of a titleless snap and of a missing post alone, but marks both read', async () => {
+    publish({ author: 'dj', permlink: 'post-snap', title: '', parent_author: 'peak.snaps' });
+    await audio().insertMany([linked('snap', 'Audio Snap by dj'), linked('gone', 'my track')]);
+
+    expect(await syncAudioPostTitles(NOW)).toEqual({ checked: 2, retitled: 0, errors: 0 });
+    for (const p of ['snap', 'gone']) {
+      const row = await get(p);
+      expect(row.title).toBe(p === 'snap' ? 'Audio Snap by dj' : 'my track');
+      expect(row.upload_title).toBeUndefined();
+      expect(row.hive_title_checked_at).toEqual(NOW);
+    }
+    // Read rows are not read again within the hour.
+    expect(await syncAudioPostTitles(new Date(NOW.getTime() + 60 * 1000))).toEqual({ checked: 0, retitled: 0, errors: 0 });
+  });
+
+  test('a failed Hive read is retried next run instead of being marked read', async () => {
+    fail.add('condenser_api.get_content');
+    await audio().insertOne(linked('t2', 'recording 4702'));
+
+    expect(await syncAudioPostTitles(NOW)).toEqual({ checked: 1, retitled: 0, errors: 1 });
+    expect((await get('t2')).hive_title_checked_at).toBeUndefined();
+  });
+
+  test('skips unlinked rows and old rows already read', async () => {
+    await audio().insertMany([
+      track('dj', 'unlinked', { title: 'x' }),
+      linked('old', 'x', { createdAt: new Date('2026-09-01T00:00:00Z'), hive_title_checked_at: new Date('2026-09-02T00:00:00Z') }),
+    ]);
+    expect(await syncAudioPostTitles(NOW)).toEqual({ checked: 0, retitled: 0, errors: 0 });
     expect(rpc).toHaveLength(0);
   });
 });
