@@ -389,3 +389,47 @@ describe('GET /search/suggest', () => {
     expect(tags).toEqual(['gardening', 'gardenparty']);
   });
 });
+
+// A common word makes $text score every matching doc (~2.5s for "music" on prod),
+// so the merged list is cached briefly (utils/searchCache.js).
+describe('the result cache', () => {
+  const add = (permlink, title) => col('videos').insertOne(F.legacyVideo({ permlink, title }));
+
+  test('a repeated search inside the TTL is served from the cache; after it, from the database', async () => {
+    await add('a', 'Ocean waves');
+    expect((await search({ q: 'ocean' }).expect(200)).body.total).toBe(1);
+
+    await add('b', 'Ocean storm');
+    expect((await search({ q: 'OCEAN' }).expect(200)).body.total).toBe(1);   // case does not change the key
+
+    F.advanceClock(61 * 1000);
+    expect((await search({ q: 'ocean' }).expect(200)).body.total).toBe(2);
+  });
+
+  test('every page of one search reads the same list; highlighting never leaks into the cache', async () => {
+    await col('videos').insertMany([1, 2, 3].map((i) => F.legacyVideo({ permlink: `p${i}`, title: `Ocean ${i}`, views: i })));
+
+    const p1 = await search({ q: 'ocean', limit: 2 }).expect(200);
+    const p2 = await search({ q: 'ocean', limit: 2, page: 2, highlight: 'false' }).expect(200);
+    const again = await search({ q: 'ocean', limit: 2, highlight: 'false' }).expect(200);
+
+    expect(p1.body.results[0].title_highlighted).toBe('<mark>Ocean</mark> 3');
+    expect(keys([...p1.body.results, ...p2.body.results])).toEqual(['video:p3', 'video:p2', 'video:p1']);
+    expect(again.body.results[0]).not.toHaveProperty('title_highlighted');
+    expect(again.body.results[0].score).toBe(p1.body.results[0].score);   // the view boost is applied once
+  });
+
+  test.each([
+    ['type', { type: 'video' }],
+    ['tag', { tag: 'sea' }],
+    ['nsfw', { nsfw: 'true' }],
+    ['sort', { sort: 'date' }],
+    ['from', { from: '2020-01-01' }],
+    ['community', { community: 'hive-1' }],
+  ])('a different %s is a different search', async (_label, extra) => {
+    await add('a', 'Ocean waves');
+    await search({ q: 'ocean' }).expect(200);
+    await col('videos').insertOne(F.legacyVideo({ permlink: 'b', title: 'Ocean storm', tags_v2: ['sea'], community: 'hive-1' }));
+    expect((await search({ q: 'ocean', ...extra }).expect(200)).body.results.map((r) => r.permlink)).toContain('b');
+  });
+});

@@ -205,6 +205,7 @@ async function resetFeedCaches(db) {
   require('../../utils/suggestedCreators').invalidate();
   require('../../utils/commentBoost').invalidate();
   require('../../utils/cache').sortedShortsCache.clear();
+  require('../../utils/searchCache').invalidate();
   if (db) await require('../../utils/hiddenCreators').refresh(db);
 }
 
