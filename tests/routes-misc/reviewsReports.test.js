@@ -113,7 +113,7 @@ describe('POST /reports', () => {
   // is not "unknown": the report is stored with reason {} or a function (dropped
   // by BSON, so no reason at all) instead of 'other', and the moderation tools get
   // a row outside their vocabulary.
-  test.skip.each([['__proto__'], ['constructor']])('BUG: reason %p is filed as "other"', async (reason) => {
+  test.each([['__proto__'], ['constructor']])('reason %p is filed as "other"', async (reason) => {
     await post('/reports', { reason, reported: 'h' }).expect(201);
     expect((await db().collection('reporteddatas').findOne({})).reason).toBe('other');
   });
@@ -172,7 +172,7 @@ describe.each([
   // uses $proxy_add_x_forwarded_for, which keeps whatever the client sent and
   // appends the real address, so a client picks its own throttle key and can post
   // without limit (and grow the in-memory map without bound).
-  test.skip('BUG: a client cannot dodge the throttle by sending its own X-Forwarded-For', async () => {
+  test('a client cannot dodge the throttle by sending its own X-Forwarded-For', async () => {
     const realClient = '203.0.113.7';
     for (let i = 0; i < 5; i += 1) await post(path, body, `198.51.100.${i}, ${realClient}`).expect(201);
     await post(path, body, `198.51.100.99, ${realClient}`).expect(429);

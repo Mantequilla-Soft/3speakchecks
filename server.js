@@ -83,7 +83,8 @@ const app = express();
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+// express.json(), except for the few routes that parse a larger body themselves.
+app.use(require('./utils/jsonBody').jsonBody);
 
 // Serve static files (XSL stylesheet for RSS feed viewer, etc.)
 app.use(express.static('public'));

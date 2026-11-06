@@ -1,6 +1,6 @@
 /**
- * An express app with the same global middleware as server.js (CORS, JSON bodies)
- * and only the routers a test mounts, for supertest:
+ * An express app with the same global middleware as server.js (CORS, JSON bodies
+ * via utils/jsonBody) and only the routers a test mounts, for supertest:
  *
  *   const request = require('supertest');
  *   const app = buildApp(['/advertise', require('../routes/advertise')]);
@@ -12,11 +12,12 @@ const express = require('express');
 const cors = require('cors');
 // As in server.js: async handlers' rejections reach the error middleware.
 require('../../utils/asyncErrors');
+const { jsonBody } = require('../../utils/jsonBody');
 
 function buildApp(...mounts) {
   const app = express();
   app.use(cors());
-  app.use(express.json());
+  app.use(jsonBody);
   for (const [path, ...handlers] of mounts) app.use(path, ...handlers);
   // Same shape as an unhandled error in production, so a crash shows as a 500
   // in the assertion instead of an HTML stack page.

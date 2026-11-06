@@ -8,9 +8,11 @@
  *
  * Auth model matches the platform's other per-user state (watch-history,
  * hide-creator): the caller supplies its own username, no token — this only
- * records a personal, low-stakes label and can't affect anyone else's experience.
- * The on-chain custom_json is the authoritative, signed record; this endpoint is
- * a convenience index, so the trust bar is intentionally low.
+ * records a personal, low-stakes label. The on-chain custom_json is the
+ * authoritative, signed record; this endpoint is a convenience index, so the trust
+ * bar is intentionally low. The weights DO pick a video's winning topic for
+ * everybody (services/discoverWorker.js, utils/effectiveTags.js), so one row never
+ * counts for more than a full vote (MAX_VOTE_WEIGHT).
  *
  * One tag per (voter, video): re-voting with a new tag overwrites the old one.
  */
@@ -27,6 +29,14 @@ const TAG_FIELD = 'viewer-tag';
 // against viewer votes — vote weights are on the 0–10000 scale, 10000 = 100%.
 const AUTO_TAG_WEIGHT = 10000;
 
+// A Hive vote weight is -10000..10000 (100% down to 100% up). The endpoint takes
+// no signature, so anything beyond that is clamped on the way in, and the tallies
+// below cap each stored row at MAX_VOTE_WEIGHT too (rows written before the clamp).
+const MAX_VOTE_WEIGHT = 10000;
+const clampWeight = (w) => Math.max(-MAX_VOTE_WEIGHT, Math.min(MAX_VOTE_WEIGHT, w));
+// One row's contribution to a tally: |weight|, at least 1, at most MAX_VOTE_WEIGHT.
+const rowWeightExpr = { $min: [{ $max: [{ $abs: { $ifNull: ['$weight', 1] } }, 1] }, MAX_VOTE_WEIGHT] };
+
 const norm = (s) => String(s || '').trim().toLowerCase().replace(/^@/, '');
 
 // POST /viewer-tag — record (or update) this viewer's tag for a video.
@@ -36,7 +46,7 @@ router.post('/viewer-tag', async (req, res) => {
     const author = norm(req.body.author || req.body.owner);
     const permlink = String(req.body.permlink || '').trim();
     const tag = normalizeInterestTag(req.body.tag);
-    const weight = Number.isFinite(+req.body.weight) ? +req.body.weight : null;
+    const weight = Number.isFinite(+req.body.weight) ? clampWeight(+req.body.weight) : null;
 
     if (!voter || !author || !permlink) {
       return res.status(400).json({ success: false, error: 'username, author and permlink are required' });
@@ -110,10 +120,10 @@ router.get('/viewer-tags/:author/:permlink', async (req, res) => {
           $group: {
             _id: `$${TAG_FIELD}`,
             // A missing/blank weight shouldn't zero out a genuine vote.
-            weight: { $sum: { $max: [{ $abs: { $ifNull: ['$weight', 1] } }, 1] } },
+            weight: { $sum: rowWeightExpr },
             count: { $sum: 1 },
             // Who tagged it (for the hover/pinned voters list).
-            voters: { $push: { voter: '$voter', weight: { $max: [{ $abs: { $ifNull: ['$weight', 1] } }, 1] } } },
+            voters: { $push: { voter: '$voter', weight: rowWeightExpr } },
           },
         },
       ]).toArray(),

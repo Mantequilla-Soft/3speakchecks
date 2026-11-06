@@ -336,7 +336,7 @@ describe('GET /audio: which tracks are listed', () => {
 
   // routes/audio.js:543 passes ?q= straight into $regex. An unbalanced "(" is a
   // MongoDB regex error (500), and a crafted pattern can make the search slow.
-  test.skip('BUG: q is used as a raw regex, so "(" is a 500 instead of a literal search', async () => {
+  test('q is used as a raw regex, so "(" is a 500 instead of a literal search', async () => {
     await addTracks(track('paren', { title: 'Live (acoustic)' }), track('plain'));
     const res = await request(app).get('/audio?q=(acoustic').expect(200);
     expect(permlinksOf(res)).toEqual(['paren']);
@@ -467,7 +467,7 @@ describe('GET /audio: the warm-up cap', () => {
 
   // routes/audio.js:500 and :567: express 4 parses ?permlink[$exists]=true into an
   // operator object, which both lands in the query and switches the cap off.
-  test.skip('BUG: an operator object in ?permlink= lists every warm-up track (cap bypass)', async () => {
+  test('an operator object in ?permlink= lists every warm-up track (cap bypass)', async () => {
     const res = await request(app).get('/audio?permlink[$exists]=true').expect(200);
     expect(permlinksOf(res)).not.toContain('w2');
   });

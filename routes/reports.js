@@ -11,6 +11,7 @@
 const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
+const { clientIp } = require('../utils/clientIp');
 
 const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
 
@@ -41,14 +42,16 @@ function throttled(ip) {
 
 router.post('/reports', async (req, res) => {
   try {
-    const ip = (req.headers['x-forwarded-for'] || req.ip || '').split(',')[0].trim();
+    const ip = clientIp(req);
     if (throttled(ip)) return res.status(429).json({ error: 'Too many reports, please try again later' });
 
     const b = req.body || {};
 
     const reasonRaw = str(b.reason, 32).toLowerCase();
     if (!reasonRaw) return res.status(400).json({ error: 'reason is required' });
-    const reason = REASON_MAP[reasonRaw] || 'other';
+    // Own keys only: "__proto__" or "constructor" is an unknown reason, not an
+    // Object.prototype member.
+    const reason = Object.prototype.hasOwnProperty.call(REASON_MAP, reasonRaw) ? REASON_MAP[reasonRaw] : 'other';
 
     const host = str(b.reported, 32);
     const room = str(b.roomName, 128);
