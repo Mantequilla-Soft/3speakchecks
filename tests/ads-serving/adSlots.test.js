@@ -106,7 +106,7 @@ describe('slotHolders', () => {
   // booking before AD_BOOKING_EXPIRY_DAYS, so from 24 hours after one is made the
   // query throws a TypeError for that position: GET /advertise/slots and every booking
   // at that position (POST /campaigns, /selfpromo/book) answer 500 until it is removed.
-  test.skip('BUG: an abandoned booking whose hold has lapsed frees its position instead of breaking the query', async () => {
+  test('BUG: an abandoned booking whose hold has lapsed frees its position instead of breaking the query', async () => {
     await fx.seed(db(), { campaigns: [fx.campaign({
       slotPercent: 10, status: 'awaiting_payment', startAt: null, endAt: null, days: 3, createdAt: fx.ago(AD_SLOT_HOLD_HOURS * HOUR + 1),
     })] });

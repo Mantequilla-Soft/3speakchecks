@@ -108,7 +108,7 @@ describe('GET /advertise/slots', () => {
 
   // BUG: see the lapsed-hold test in adSlots.test.js. One abandoned booking older than
   // AD_SLOT_HOLD_HOURS takes the whole availability list down with a 500.
-  test.skip('BUG: an abandoned booking older than its hold does not take /slots down', async () => {
+  test('BUG: an abandoned booking older than its hold does not take /slots down', async () => {
     await fx.seed(db(), { campaigns: [fx.campaign({ slotPercent: 50, status: 'awaiting_payment', startAt: null, endAt: null, days: 2, createdAt: fx.ago(2 * fx.DAY) })] });
     const res = await get('/advertise/slots?days=3');
     expect(res.status).toBe(200);
