@@ -168,6 +168,30 @@ describe('what search never returns', () => {
     await col('embed-video').insertOne(F.shortVideo({ owner: 'hush', embed_url: '@hush/x', permlink: 'h', hive_title: 'Volcano short' }));
     expect((await search({ q: 'volcano' }).expect(200)).body.total).toBe(0);
   });
+
+  test('a moderation-hidden creator\'s public playlist is not a result', async () => {
+    await F.hideCreator(db(), 'hush');
+    await col('playlists').insertMany([
+      { name: 'Volcano picks', owner: 'hush', access: 'public', items: [] },
+      { name: 'Volcano best', owner: 'fine', access: 'public', items: [] },
+    ]);
+    const res = await search({ q: 'volcano', type: 'playlist' }).expect(200);
+    expect(res.body.results.map((r) => r.owner)).toEqual(['fine']);
+  });
+
+  // The AI-tag join reaches embed docs by owner/permlink, so it must apply the same
+  // visibility as the text search: no unlisted video, no hidden creator by owner.
+  test.each([
+    ['unlisted', { owner: 'em', listed_on_3speak: false }],
+    ['by a moderation-hidden owner without a hive_author', { owner: 'hush', hive_author: undefined }],
+  ])('the AI tag join never returns an embed video that is %s', async (_label, over) => {
+    await F.hideCreator(db(), 'hush');
+    const doc = F.embedVideo({ permlink: 'joined', hive_title: 'Untitled', ...over });
+    if (over.hive_author === undefined) delete doc.hive_author;
+    await col('embed-video').insertOne(doc);
+    await col('subtitles-tags').insertOne({ author: doc.owner, permlink: 'joined', tags: 'astronomy' });
+    expect((await search({ q: 'astronomy' }).expect(200)).body.total).toBe(0);
+  });
 });
 
 describe('ranking', () => {
@@ -327,5 +351,41 @@ describe('GET /search/suggest', () => {
   test('an UNLISTED embed video\'s title is not suggested', async () => {
     await col('embed-video').insertOne(F.embedVideo({ permlink: 'u', hive_title: 'Garden private', listed_on_3speak: false }));
     expect((await suggest('garden').expect(200)).body.suggestions).toEqual([]);
+  });
+
+  test('a moderation-hidden creator\'s tags are not suggested, legacy or embed', async () => {
+    await F.hideCreator(db(), 'hush');
+    await col('videos').insertOne(F.legacyVideo({ owner: 'hush', permlink: 'l', title: 'Untitled', tags_v2: ['gardening'] }));
+    await col('embed-video').insertMany([
+      F.embedVideo({ owner: 'hush', permlink: 'e', hive_title: 'Untitled', hive_tags: ['gardenparty'] }),
+      // owner hidden, hive_author someone else: the owner still decides
+      F.embedVideo({ owner: 'hush', hive_author: 'front', permlink: 'e2', hive_title: 'Untitled', hive_tags: ['gardenhush'] }),
+    ]);
+    expect((await suggest('garden').expect(200)).body.suggestions).toEqual([]);
+  });
+
+  test('an UNLISTED embed video\'s tags are not suggested', async () => {
+    await col('embed-video').insertOne(F.embedVideo({ permlink: 'u', hive_title: 'Untitled', hive_tags: ['gardensecret'], listed_on_3speak: false }));
+    expect((await suggest('garden').expect(200)).body.suggestions).toEqual([]);
+  });
+
+  test('an embed title whose OWNER is hidden is not suggested even under another hive_author', async () => {
+    await F.hideCreator(db(), 'hush');
+    await col('embed-video').insertOne(F.embedVideo({ owner: 'hush', hive_author: 'front', permlink: 'h', hive_title: 'Garden secrets' }));
+    expect((await suggest('garden').expect(200)).body.suggestions).toEqual([]);
+  });
+
+  test('a moderation-hidden creator\'s playlist is not suggested', async () => {
+    await F.hideCreator(db(), 'hush');
+    await col('playlists').insertOne({ name: 'Garden picks', owner: 'hush', access: 'public', items: [] });
+    expect((await suggest('garden').expect(200)).body.suggestions).toEqual([]);
+  });
+
+  test('the same tags from a visible creator are still suggested', async () => {
+    await F.hideCreator(db(), 'hush');
+    await col('videos').insertOne(F.legacyVideo({ owner: 'fine', permlink: 'l', title: 'Untitled', tags_v2: ['gardening'] }));
+    await col('embed-video').insertOne(F.embedVideo({ owner: 'fine', permlink: 'e', hive_title: 'Untitled', hive_tags: ['gardenparty'] }));
+    const tags = (await suggest('garden').expect(200)).body.suggestions.filter((x) => x.type === 'tag').map((t) => t.text);
+    expect(tags).toEqual(['gardening', 'gardenparty']);
   });
 });

@@ -97,6 +97,26 @@ function defineTagFeedSuite({ db, app, prepare }) {
       expect(F.permlinks((await get('pets').expect(200)).body.videos)).toEqual(['hive-ok']);
     });
 
+    // buildEmbedFilter dropped hidden creators by hive_author only; shorts usually
+    // have none, and `$nin` matches a missing field.
+    test('a short by a moderation-hidden creator without a hive_author is not in the shorts tab, nor counted', async () => {
+      await F.hideCreator(db(), 'hush');
+      const hidden = F.shortVideo({ owner: 'hush', embed_url: '@hush/x', permlink: 'h', hive_tags: ['pets'] });
+      delete hidden.hive_author;
+      await addEmbeds(F.shortVideo({ permlink: 'ok', hive_tags: ['pets'] }), hidden);
+      expect(F.permlinks((await get('pets', { type: 'shorts' }).expect(200)).body.videos)).toEqual(['ok']);
+      expect((await counts('pets').expect(200)).body.shorts).toBe(1);
+    });
+
+    test('"snaps" drops a moderation-hidden creator\'s short by its owner', async () => {
+      await F.hideCreator(db(), 'hush');
+      const hidden = F.shortVideo({ owner: 'hush', embed_url: '@hush/x', permlink: 'h' });
+      delete hidden.hive_author;
+      await addEmbeds(F.shortVideo({ permlink: 'ok' }), hidden);
+      expect(F.permlinks((await get('snaps', { type: 'shorts' }).expect(200)).body.videos)).toEqual(['ok']);
+      expect((await counts('snaps').expect(200)).body.shorts).toBe(1);
+    });
+
     test('a legacy video by a moderation-hidden creator', async () => {
       await F.hideCreator(db(), 'hush');
       await addLegacy(F.legacyVideo({ owner: 'hush', permlink: 'h', tags_v2: ['pets'] }), F.legacyVideo({ permlink: 'v', tags_v2: ['pets'] }));
@@ -205,6 +225,29 @@ function defineTagFeedSuite({ db, app, prepare }) {
       expect((await counts('mantecurated').expect(200)).body).toEqual({ tag: 'mantecurated', videos: 2, shorts: 1, total: 3 });
       const since = Math.floor(F.hoursAgo(1.5).getTime() / 1000);
       expect((await counts('mantecurated', { since }).expect(200)).body).toEqual({ tag: 'mantecurated', videos: 1, shorts: 0, total: 1 });
+    });
+
+    describe('stays off the curated pick and its counts', () => {
+      const hiddenShort = () => {
+        const doc = F.shortVideo({ owner: 'hush', embed_url: '@hush/x', permlink: 's-hush', mantecurated: true });
+        delete doc.hive_author;   // shorts usually have none; the owner must still decide
+        return doc;
+      };
+      test.each([
+        ['an unlisted curated embed video', () => F.embedVideo({ permlink: 'e-unlisted', mantecurated: true, listed_on_3speak: false })],
+        ['an unlisted curated short', () => F.shortVideo({ permlink: 's-unlisted', mantecurated: true, listed_on_3speak: false })],
+        ['a curated embed video by a moderation-hidden creator', () => F.embedVideo({ owner: 'hush', permlink: 'e-hush', mantecurated: true })],
+        ['a curated embed video whose hidden OWNER posted under another hive_author', () => F.embedVideo({ owner: 'hush', hive_author: 'front', permlink: 'e-front', mantecurated: true })],
+        ['a curated short by a moderation-hidden creator (no hive_author)', hiddenShort],
+      ])('%s', async (_label, make) => {
+        await F.hideCreator(db(), 'hush');
+        await addEmbeds(make());
+        for (const type of [undefined, 'videos', 'shorts']) {
+          const res = await get('mantecurated', type ? { type } : {}).expect(200);
+          expect(F.permlinks(res.body.videos).filter((p) => /hush|unlisted|front/.test(p))).toEqual([]);
+        }
+        expect((await counts('mantecurated').expect(200)).body).toEqual({ tag: 'mantecurated', videos: 2, shorts: 1, total: 3 });
+      });
     });
   });
 

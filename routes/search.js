@@ -28,9 +28,14 @@ router.get('/suggest', async (req, res) => {
         const prefixRegex = { $regex: `^${escapedQ}`, $options: 'i' };
         const containsRegex = { $regex: escapedQ, $options: 'i' };
 
+        // A moderation-hidden creator's content is hidden everywhere, suggestions
+        // included. Embed docs are checked on both owner and hive_author (shorts often
+        // have no hive_author, and the two can differ).
+        const hidden = hiddenListSync();
+
         const [titles, embedTitles, usernames, tags, embedTags, communities, playlists] = await Promise.all([
             db.collection('videos').find(
-                { title: containsRegex, status: 'published', publishFailed: { $ne: true }, owner: { $nin: hiddenListSync() } },
+                { title: containsRegex, status: 'published', publishFailed: { $ne: true }, owner: { $nin: hidden } },
                 { projection: { title: 1, author: 1, owner: 1, permlink: 1, _id: 0 } }
             ).limit(5).toArray(),
             // Embed videos that have already been broadcast to Hive should also surface
@@ -40,17 +45,18 @@ router.get('/suggest', async (req, res) => {
                     hive_title: containsRegex,
                     status: 'published',
                     listed_on_3speak: { $ne: false },   // an unlisted title is never offered
-                    hive_author: { $type: 'string', $nin: hiddenListSync() },
+                    owner: { $nin: hidden },
+                    hive_author: { $type: 'string', $nin: hidden },
                     hive_permlink: { $type: 'string' },
                 },
                 { projection: { hive_title: 1, hive_author: 1, owner: 1, hive_permlink: 1, _id: 0 } }
             ).limit(5).toArray(),
             db.collection('hiveprofiles').find(
-                { username: { $nin: hiddenListSync() }, $or: [{ username: prefixRegex }, { display_name: containsRegex }] },
+                { username: { $nin: hidden }, $or: [{ username: prefixRegex }, { display_name: containsRegex }] },
                 { projection: { username: 1, display_name: 1, profile_image: 1, _id: 0 } }
             ).limit(5).toArray(),
             db.collection('videos').find(
-                { tags_v2: containsRegex, status: 'published', publishFailed: { $ne: true } },
+                { tags_v2: containsRegex, status: 'published', publishFailed: { $ne: true }, owner: { $nin: hidden } },
                 { projection: { tags_v2: 1, _id: 0 } }
             ).limit(50).toArray().then(docs => {
                 const re = new RegExp(escapedQ, 'i');
@@ -75,7 +81,9 @@ router.get('/suggest', async (req, res) => {
                 {
                     hive_tags: containsRegex,
                     status: 'published',
-                    hive_author: { $type: 'string' },
+                    listed_on_3speak: { $ne: false },   // an unlisted video's tags are not offered either
+                    owner: { $nin: hidden },
+                    hive_author: { $type: 'string', $nin: hidden },
                 },
                 { projection: { hive_tags: 1, _id: 0 } }
             ).limit(50).toArray().then(docs => {
@@ -101,7 +109,7 @@ router.get('/suggest', async (req, res) => {
                 { projection: { name: 1, title: 1, about: 1, subscribers: 1, num_authors: 1, _id: 0 } }
             ).sort({ subscribers: -1 }).limit(5).toArray(),
             db.collection('playlists').aggregate([
-                { $match: { access: 'public', name: { $ne: 'Watch Later' }, $or: [{ name: containsRegex }, { tags: containsRegex }] } },
+                { $match: { access: 'public', name: { $ne: 'Watch Later' }, owner: { $nin: hidden }, $or: [{ name: containsRegex }, { tags: containsRegex }] } },
                 { $project: { _id: 1, name: 1, owner: 1, video_count: { $cond: { if: { $isArray: '$items' }, then: { $size: '$items' }, else: 0 } } } },
                 { $limit: 5 },
             ]).toArray()
@@ -393,7 +401,7 @@ router.get('/', async (req, res) => {
             const playlistRegex = { $regex: escapedQ, $options: 'i' };
             searches.push(
                 db.collection('playlists').aggregate([
-                    { $match: { access: 'public', name: { $ne: 'Watch Later' }, $or: [{ name: playlistRegex }, { tags: playlistRegex }] } },
+                    { $match: { access: 'public', name: { $ne: 'Watch Later' }, owner: { $nin: hiddenListSync() }, $or: [{ name: playlistRegex }, { tags: playlistRegex }] } },
                     { $project: { _id: 1, name: 1, owner: 1, thumbnail: 1, tags: 1, created_at: 1, video_count: { $cond: { if: { $isArray: '$items' }, then: { $size: '$items' }, else: 0 } } } },
                     { $sort: { created_at: -1 } },
                     { $limit: maxPerCollection },
@@ -437,6 +445,8 @@ router.get('/', async (req, res) => {
                             ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
                             $or: lookups.map(l => ({ owner: l.owner, permlink: l.permlink })),
                             status: 'published',
+                            listed_on_3speak: { $ne: false },   // unlisted stays off search on this path too
+                            owner: { $nin: hiddenListSync() },
                             hive_author: { $nin: hiddenListSync() },
                             ...nsfwFilterHiveTags(req)
                         }, { projection: { owner: 1, hive_author: 1, hive_permlink: 1, permlink: 1, hive_title: 1, embed_title: 1, originalFilename: 1, createdAt: 1, duration: 1, hive_tags: 1, thumbnail_url: 1, embed_url: 1, views: 1, short: 1, gated: 1 } }).limit(50).toArray()

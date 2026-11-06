@@ -49,13 +49,26 @@ function buildEmbedTagMatch(tagLower, useLowerField) {
 function buildEmbedFilter(req, tagLower, useLowerField) {
     const nsfw = nsfwFilterHiveTags(req);
     const tagMatch = buildEmbedTagMatch(tagLower, useLowerField);
-    const hideOwners = { hive_author: { $nin: hiddenListSync() } }; // drop hidden creators
+    // Drop hidden creators. Shorts often have no hive_author (and `$nin` matches a
+    // missing field), and an embed doc's owner can differ from its hive_author, so
+    // both are checked.
+    const hidden = hiddenListSync();
+    const hideOwners = { owner: { $nin: hidden }, hive_author: { $nin: hidden } };
 
     if (!useLowerField && nsfw.hive_tags) {
         const { hive_tags: nsfwHiveTags, ...rest } = nsfw;
         return { ...rest, ...hideOwners, $and: [{ hive_tags: nsfwHiveTags }, tagMatch] };
     }
     return { ...nsfw, ...hideOwners, ...tagMatch };
+}
+
+// Visibility for the curated pick's embed docs (videos and shorts together): an
+// unlisted doc and a moderation-hidden creator stay off it, as on every other feed.
+// `$ne: false` rather than `true` because the pick mixes shorts (which use `$ne`)
+// with videos, and a hand-picked doc is never dropped for a missing flag.
+function curatedEmbedVisibility() {
+    const hidden = hiddenListSync();
+    return { listed_on_3speak: { $ne: false }, owner: { $nin: hidden }, hive_author: { $nin: hidden } };
 }
 
 // Endpoint to get videos by tag
@@ -105,7 +118,7 @@ router.get('/videos/tag/:tag', async (req, res) => {
         };
         if (tag.toLowerCase() === 'mantecurated') {
             const legacyQuery = { mantecurated: true, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch() };
-            const embedQuery = { mantecurated: true, status: 'published', ...nsfwFilterHiveTags(req), ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch() };
+            const embedQuery = { mantecurated: true, status: 'published', ...curatedEmbedVisibility(), ...nsfwFilterHiveTags(req), ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch() };
             if (sinceDate) {
                 legacyQuery.created = { $gte: sinceDate };
                 embedQuery.createdAt = { $gte: sinceDate };
@@ -217,7 +230,7 @@ router.get('/videos/tag/:tag', async (req, res) => {
                 const shortsNsfw = nsfwFilterHiveTags(req);
                 // An unlisted short stays off the tag feed, as on every other shorts surface.
                 const query = isSnapsTag
-                    ? { short: true, status: 'published', listed_on_3speak: { $ne: false }, hive_author: { $nin: hiddenListSync() }, ...unavailableMatch(), ...hiddenFromFeedMatch(), ...shortsNsfw }
+                    ? { short: true, status: 'published', listed_on_3speak: { $ne: false }, owner: { $nin: hiddenListSync() }, hive_author: { $nin: hiddenListSync() }, ...unavailableMatch(), ...hiddenFromFeedMatch(), ...shortsNsfw }
                     : { short: true, status: 'published', listed_on_3speak: { $ne: false }, ...buildEmbedFilter(req, tagLower, useLower), ...unavailableMatch(), ...hiddenFromFeedMatch() };
                 if (sinceDate) query.createdAt = { $gte: sinceDate };
 
@@ -285,7 +298,7 @@ router.get('/videos/tag/:tag/counts', async (req, res) => {
 
         if (tagLower === 'mantecurated') {
             const legacyQuery = { mantecurated: true, owner: { $nin: hiddenListSync() }, status: 'published', ...nsfwFilter(req), ...feedAgeMatch('created'), ...unavailableMatch(), ...hiddenFromFeedMatch() };
-            const embedBaseQuery = { mantecurated: true, status: 'published', ...unavailableMatch(), ...hiddenFromFeedMatch(), ...nsfwFilterHiveTags(req) };
+            const embedBaseQuery = { mantecurated: true, status: 'published', ...curatedEmbedVisibility(), ...unavailableMatch(), ...hiddenFromFeedMatch(), ...nsfwFilterHiveTags(req) };
             if (sinceDate) {
                 legacyQuery.created = { $gte: sinceDate };
                 embedBaseQuery.createdAt = { $gte: sinceDate };
@@ -311,7 +324,7 @@ router.get('/videos/tag/:tag/counts', async (req, res) => {
         const embedVideoQuery = { short: false, listed_on_3speak: true, status: 'published', ...buildEmbedFilter(req, tagLower, useLower), ...unavailableMatch(), ...hiddenFromFeedMatch() };
         // Same filters as the shorts tab itself, so the count matches the list.
         const shortsQuery = isSnapsTag
-            ? { short: true, status: 'published', listed_on_3speak: { $ne: false }, hive_author: { $nin: hiddenListSync() }, ...unavailableMatch(), ...hiddenFromFeedMatch(), ...nsfwFilterHiveTags(req) }
+            ? { short: true, status: 'published', listed_on_3speak: { $ne: false }, owner: { $nin: hiddenListSync() }, hive_author: { $nin: hiddenListSync() }, ...unavailableMatch(), ...hiddenFromFeedMatch(), ...nsfwFilterHiveTags(req) }
             : { short: true, status: 'published', listed_on_3speak: { $ne: false }, ...buildEmbedFilter(req, tagLower, useLower), ...unavailableMatch(), ...hiddenFromFeedMatch() };
         if (sinceDate) {
             legacyQuery.created = { $gte: sinceDate };
