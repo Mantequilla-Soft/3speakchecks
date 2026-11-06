@@ -267,9 +267,10 @@ describe('POST /gdpr-admin/delete (Art. 17)', () => {
   // user agent), push preferences, podcast subscriptions (incl. private, paid or
   // password-protected feeds) and podcast listening progress. An Art. 17 erase
   // reports success while these rows stay, and an Art. 15 export omits them.
-  test.skip('BUG: erase leaves push subscriptions, push prefs, podcast subscriptions and progress behind', async () => {
+  test('erase leaves push subscriptions, push prefs, podcast subscriptions and progress behind', async () => {
     await db().collection('push-subscriptions').insertOne({ username: 'alice', endpoint: 'https://push.example/1', keys: {}, userAgent: 'UA' });
-    await db().collection('push-prefs').insertOne({ _id: 'alice', prefs: { votes: true } });
+    // seedAccount already wrote alice's prefs row now that OWNED lists it.
+    await db().collection('push-prefs').replaceOne({ _id: 'alice' }, { prefs: { votes: true } }, { upsert: true });
     await db().collection('podcast_subs').insertOne({ _id: 'alice|f1', user: 'alice', feed_id: 'f1' });
     await db().collection('podcast_progress').insertOne({ _id: 'alice|e1', user: 'alice', ep: 'e1', pos: 10 });
 

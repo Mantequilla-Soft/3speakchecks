@@ -40,6 +40,14 @@ const OWNED = [
   // `username`; an unproven one sits in `claimed_username` and is matched too.
   { coll: 'announcement_replies', field: 'username' },
   { coll: 'announcement_replies', field: 'claimed_username' },
+  // Browser push: one row per browser (endpoint, keys, user agent) and the
+  // account's notification choices (utils/webPush.js).
+  { coll: 'push-subscriptions', field: 'username' },
+  { coll: 'push-prefs', field: '_id' },
+  // Outside podcasts the account follows (a private or paid feed URL can carry a
+  // personal token) and how far it listened (services/podcastFeeds.js).
+  { coll: 'podcast_subs', field: 'user' },
+  { coll: 'podcast_progress', field: 'user' },
 ];
 // watch_history keys by a compound _id "user:owner:permlink" — matched by prefix.
 const WATCH_HISTORY = 'watch_history';
