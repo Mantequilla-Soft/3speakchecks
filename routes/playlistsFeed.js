@@ -24,6 +24,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
 const { decodePlaylistMeta } = require('../utils/playlistMeta');
+const { storedPlaylistType } = require('../utils/playlistType');
 const { getFollowingList } = require('../utils/hive');
 const { hiddenCreatorsOf } = require('../utils/userFilters');
 const { getHiddenSet } = require('../utils/hiddenCreators');
@@ -68,6 +69,9 @@ async function loadRecentPlaylists(db) {
     for (const p of rows) {
       const owner = typeof p.owner === 'string' ? p.owner.trim().toLowerCase() : '';
       if (!owner) continue;
+      // Albums marked audio only in json_metadata (the indexer stored them as
+      // `video`) belong to /audio too.
+      if (storedPlaylistType(p).type === 'audio') continue;
       const items = Array.isArray(p.items) ? p.items : [];
       const meta = decodePlaylistMeta(p.metadata);
       const first = items.slice().sort((a, b) => (a.position ?? 0) - (b.position ?? 0))[0] || null;

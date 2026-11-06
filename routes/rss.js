@@ -29,6 +29,7 @@ const generateXML = require('xml');
 const { getDb } = require('../utils/db');
 const { hiveRpcBatch } = require('../utils/hive');
 const { decodePlaylistMeta } = require('../utils/playlistMeta');
+const { storedPlaylistType } = require('../utils/playlistType');
 const { renderCover } = require('../utils/podcastCover');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -164,7 +165,7 @@ function fromAudio(a) {
         : null;
     return {
         kind: 'audio',
-        medium: a.category === 'song' ? 'music' : 'podcast',
+        medium: a.category === 'song' || a.category === 'music' ? 'music' : 'podcast',
         owner: a.owner,
         // A few rows store "author/permlink"; the watch link wants the bare permlink
         permlink: String(a.post_permlink || '').split('/').pop() || null,
@@ -764,10 +765,20 @@ async function loadPublicPlaylist(db, id) {
     return { playlist, blocked: false, live, episodes };
 }
 
-/** The feed's medium, from what the episodes are. */
-function playlistMedium(episodes) {
+/**
+ * The feed's medium: the type the owner picked (utils/playlistType.js), else
+ * worked out from what the episodes are. Voice notes and other sounds go out
+ * as `podcast`, the nearest medium the podcast namespace has.
+ */
+function playlistMedium(episodes, playlist) {
     const allAudio = episodes.length > 0 && episodes.every((e) => e.kind === 'audio');
     const allMusic = allAudio && episodes.every((e) => e.medium === 'music');
+    const stored = storedPlaylistType(playlist);
+    if (stored.type === 'video') return 'video';
+    if (stored.type === 'audio') {
+        if (stored.kind) return stored.kind === 'music' ? 'music' : 'podcast';
+        return allMusic ? 'music' : 'podcast';
+    }
     return allMusic ? 'music' : allAudio ? 'podcast' : 'video';
 }
 
@@ -818,7 +829,7 @@ router.get('/playlist/:id/card.json', async (req, res) => {
             id,
             name: playlist.name || `${playlist.owner} playlist`,
             owner: playlist.owner,
-            medium: playlistMedium(episodes),
+            medium: playlistMedium(episodes, playlist),
             description: album.description || null,
             album: (album.musicStyle || album.year || album.label || album.credits)
                 ? {
@@ -908,7 +919,7 @@ router.get('/playlist/:id.xml', async (req, res) => {
             feedPath: `rss/playlist/${id}.xml`,
             pageLink,
             coverUrl: coverLink('playlist', id, playlistCoverSource(playlist)),
-            medium: playlistMedium(episodes),
+            medium: playlistMedium(episodes, playlist),
         }));
     } catch (err) {
         console.error(`[RSS] Error generating playlist feed ${id}:`, err);

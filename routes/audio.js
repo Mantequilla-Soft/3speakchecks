@@ -6,6 +6,7 @@ const router = express.Router();
 const { getDb } = require('../utils/db');
 const { warmupAudio, capWarmup } = require('../utils/warmupAudio');
 const { decodePlaylistMeta } = require('../utils/playlistMeta');
+const { storedPlaylistType, kindFromCategories, AUDIO_KINDS } = require('../utils/playlistType');
 const { nsfwFilter } = require('../utils/filters');
 const { excludeHiddenCreators, hiddenCreatorsOf } = require('../utils/userFilters');
 const { asText } = require('../utils/input');
@@ -982,10 +983,20 @@ router.get('/creators', async (req, res) => {
 // GET /audio/playlists — public playlists that contain music, split into:
 //   by_artist    → every track is by the playlist creator
 //   by_listeners → contains at least one track by someone else
+// Playlists their owner marked `video` are left out. Each entry carries the
+// playlist `kind` (podcast | music | voice | sounds: the owner's pick, else what
+// most tracks are); ?kind= keeps one kind only.
+// ?category= (the Audio page's type tabs) matches a playlist by its saved kind
+// where the tab has one (song = music, podcast, voice_message = voice): such a
+// playlist shows under that tab with all its tracks, and under no other.
+// Playlists without a saved kind, and the other tabs, still go by the
+// categories of the tracks inside.
+const PLAYLIST_KIND_FOR_CATEGORY = { song: 'music', podcast: 'podcast', voice_message: 'voice' };
 router.get('/playlists', async (req, res) => {
     try {
         const db = getDb();
         const perGroup = Math.min(Math.max(parseInt(req.query.limit) || 24, 1), 60);
+        const wantKind = AUDIO_KINDS.includes(req.query.kind) ? req.query.kind : null;
         // ?owner=<user>: one creator's albums/playlists only (profile pages).
         const owner = String(req.query.owner || '').trim().toLowerCase();
         if (owner && !/^[a-z][a-z0-9.-]{2,15}$/.test(owner)) {
@@ -1007,7 +1018,13 @@ router.get('/playlists', async (req, res) => {
         // e.g. category "Music" keeps albums whose tracks match.
         const permlinks = [...new Set(candidates.flatMap(p => (p.items || []).map(i => i.permlink)))];
         const audioQuery = { post_permlink: { $in: permlinks }, status: 'published' };
-        applyCategoryFilter(audioQuery, req.query.category);
+        const category = typeof req.query.category === 'string' ? req.query.category : '';
+        const tabKind = PLAYLIST_KIND_FOR_CATEGORY[category] || null;
+        // With a kind tab the category is checked per playlist below, since a
+        // playlist with a saved kind keeps tracks of any category.
+        if (!tabKind) applyCategoryFilter(audioQuery, category);
+        const trackInTab = (a) => !tabKind
+            || (category === 'voice_message' ? (!a.category || a.category === 'voice_message') : a.category === category);
         if (req.query.genre) {
             const g = String(req.query.genre).trim();
             if (g) {
@@ -1037,8 +1054,18 @@ router.get('/playlists', async (req, res) => {
 
         for (const p of candidates) {
             const items = p.items || [];
-            const audioItems = items.filter(it => audioByKey.has(`${it.author}|${it.permlink}`));
+            const stored = storedPlaylistType(p);
+            if (stored.type === 'video') continue;
+            if (tabKind && stored.kind && stored.kind !== tabKind) continue;
+            const audioItems = items.filter(it => {
+                const a = audioByKey.get(`${it.author}|${it.permlink}`);
+                return a && (stored.kind || trackInTab(a));
+            });
             if (audioItems.length === 0) continue; // not a music playlist
+            const kind = stored.kind
+                || kindFromCategories(audioItems.map(it => audioByKey.get(`${it.author}|${it.permlink}`).category))
+                || 'podcast';
+            if (wantKind && kind !== wantKind) continue;
 
             // User's rule: only the creator's tracks → by artist; any track
             // from someone else → by listeners.
@@ -1082,6 +1109,7 @@ router.get('/playlists', async (req, res) => {
                 totalItems: items.length,
                 artists: [...new Set(items.map(it => it.author))].slice(0, 6),
                 album: meta?.album || null,
+                kind,
                 tracks,
                 updatedAt: p.updated_at || p.created_at || null,
             };
