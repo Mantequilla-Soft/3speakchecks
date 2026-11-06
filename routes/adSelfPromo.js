@@ -447,8 +447,14 @@ router.post('/selfpromo/book', featureVisible, express.json({ limit: '8kb' }), a
       markets: [],
       minVideoSeconds,
       maxVideoSeconds,
-      startAt: window.startAt,
-      endAt: window.endAt,
+      /* Null until the money lands, exactly like POST /campaigns: the claim sets the
+       * real window from requestedStartAt. A dated campaign reads as PAID to
+       * utils/adSlots.js, so writing the window here made an abandoned, unpaid
+       * booking hold its share of the position for the whole flight instead of
+       * for the AD_SLOT_HOLD_HOURS hold. The answer below still says which dates
+       * the flight would get if paid now. */
+      startAt: null,
+      endAt: null,
       requestedStartAt: requestedStart,
       ratePerSecondDayHbd,
       totalHbd,
