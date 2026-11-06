@@ -32,6 +32,10 @@ jobs:
           path: ~/.cache/mongodb-binaries
           key: mongodb-binaries-${{ runner.os }}-7.0.24
       - run: npm ci --no-audit --no-fund
+      # tests/routes-misc/podcastArtCover.test.js renders real covers with ffmpeg,
+      # which the runner image does not ship.
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
       - name: Test with coverage
         run: npx jest --ci --coverage
       - name: Coverage summary
