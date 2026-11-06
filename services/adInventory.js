@@ -444,12 +444,13 @@ async function runOnce() {
     const snapshot = await computeSnapshot();
     await getDb().collection(AD_INVENTORY_COLLECTION)
       .replaceOne({ _id: 'current' }, snapshot, { upsert: true });
-    const mid = snapshot.slots.find((s) => s.position > 0);
+    // Slot rows carry `percent` (slots are booked as a share of the video).
+    const mid = snapshot.slots.find((s) => s.percent > 0);
     console.log(
       `[ad-inventory] ${snapshot.sellable.sessions} sellable sessions `
       + `(${snapshot.sellable.removedPct}% removed as junk/opt-out), `
       + `${snapshot.sellable.sessionsPerDay}/day, `
-      + `${mid ? `${mid.perDay}/day at ${mid.position}s` : 'no mid-roll slot'} `
+      + `${mid ? `${mid.perDay}/day at ${mid.percent}%` : 'no mid-roll slot'} `
       + `in ${Date.now() - startedAt}ms`,
     );
     return snapshot;
