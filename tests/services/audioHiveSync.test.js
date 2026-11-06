@@ -210,12 +210,12 @@ describe('failures', () => {
     expect((await get('tb')).post_permlink).toBe('pb');
   });
 
-  // BUG: getRecentPosts() swallows every RPC failure into [] (services/audioHiveSync.js:67),
-  // so a node error or a network blip reads as "the owner has no posts" and every
-  // track in the batch is stamped hive_link_checked: true (line 199). That stamp is
-  // permanent: the query excludes it and nothing ever clears it, so a single bad
-  // minute on Hive leaves those tracks unlinked for good.
-  test.skip('BUG: a Hive outage does not permanently mark tracks as checked', async () => {
+  // Regression: getRecentPosts() used to swallow every RPC failure into [], so a node
+  // error or a network blip read as "the owner has no posts" and every track in the
+  // batch was stamped hive_link_checked: true. That stamp is permanent (the query
+  // excludes it and nothing clears it), so one bad minute on Hive left those tracks
+  // unlinked for good.
+  test('a Hive outage does not permanently mark tracks as checked', async () => {
     publish({ author: 'dj', permlink: 'p', body: playBody('trk') });
     fail.add('condenser_api.get_account_history');
     await audio().insertOne(track('dj', 'trk'));
@@ -228,12 +228,11 @@ describe('failures', () => {
     expect((await get('trk')).post_permlink).toBe('p');
   });
 
-  // BUG: the match is posts.find() over account history, which is oldest first
-  // (services/audioHiveSync.js:155), and the chosen post is never checked to
-  // still exist. A client that publishes twice and deletes one attempt can leave
-  // the track linked to the deleted post. videoHiveSync.js:497-500 documents and
-  // fixes exactly this for videos (newest live post wins via get_content).
-  test.skip('BUG: a track is linked to the live post, not to a deleted older twin', async () => {
+  // Regression: the match used to be posts.find() over account history, which is
+  // oldest first, and the chosen post was never checked to still exist. A client
+  // that published twice and deleted one attempt could leave the track linked to
+  // the deleted post. Same rule as videoHiveSync: the newest live post wins.
+  test('a track is linked to the live post, not to a deleted older twin', async () => {
     publish({ author: 'dj', permlink: 'attempt-1', body: playBody('trk') }, { alive: false });
     publish({ author: 'dj', permlink: 'attempt-2', body: playBody('trk') });
     await audio().insertOne(track('dj', 'trk'));
@@ -241,6 +240,20 @@ describe('failures', () => {
     await syncAudioHiveLinks();
 
     expect((await get('trk')).post_permlink).toBe('attempt-2');
+  });
+
+  test('a deleted newer twin is skipped for the live older one; with every twin deleted nothing is linked', async () => {
+    publish({ author: 'dj', permlink: 'first', body: playBody('trk') });
+    publish({ author: 'dj', permlink: 'second', body: playBody('trk') }, { alive: false });
+    publish({ author: 'dj', permlink: 'gone-1', body: playBody('orphan') }, { alive: false });
+    publish({ author: 'dj', permlink: 'gone-2', body: playBody('orphan') }, { alive: false });
+    await audio().insertMany([track('dj', 'trk'), track('dj', 'orphan')]);
+
+    await syncAudioHiveLinks();
+
+    expect((await get('trk')).post_permlink).toBe('first');
+    expect(await get('orphan')).toMatchObject({ hive_link_checked: true });
+    expect((await get('orphan')).post_permlink).toBeUndefined();
   });
 
   test('an empty backlog makes no Hive call', async () => {

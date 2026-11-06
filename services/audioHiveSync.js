@@ -58,15 +58,19 @@ async function getRecentPosts(account, limit = HIVE_POSTS_PER_USER) {
     // snap-style audio replies under peak.snaps that hivemind hides from
     // bridge.get_account_posts. Returns {author, permlink, body, json_metadata}
     // shaped like a hivemind post so the caller doesn't change.
+    //
+    // A failed read THROWS. It used to read as "no posts", and the caller then
+    // stamped every track of the owner hive_link_checked for good after one bad
+    // minute on Hive. The caller's catch now leaves them for the next run.
     const ops = await hiveRpc('condenser_api.get_account_history', [
         account,
         -1,
         Math.max(limit, 50),
         COMMENT_OP_FILTER_LOW,
         0,
-    ]).catch(() => []);
+    ]);
 
-    if (!Array.isArray(ops)) return [];
+    if (!Array.isArray(ops)) throw new Error(`account history for ${account} is not a list`);
 
     const posts = [];
     const seen = new Set();
@@ -91,20 +95,47 @@ async function getRecentPosts(account, limit = HIVE_POSTS_PER_USER) {
     return posts;
 }
 
-// Is (author/permlink)'s Hive post a pay-per-listen post? Reads the stored
-// beneficiaries via get_content (persists well past payout). Returns
-// true/false, or null if we couldn't determine it (don't poison the flag).
-async function isPplPost(author, permlink) {
+// Reads (author/permlink)'s post via get_content. `live`: true when it is still
+// on chain, false when Hive answers with the zeroed stub of a deleted/missing
+// post, null when the read failed. `ppl`: is it a pay-per-listen post, from the
+// stored beneficiaries (persist well past payout); null when unknown (don't
+// poison the flag).
+async function readPost(author, permlink) {
+    let c;
     try {
-        const c = await hiveRpc('condenser_api.get_content', [author, permlink]);
-        if (!c || !Array.isArray(c.beneficiaries)) return false;
-        const total = c.beneficiaries
-            .filter(b => b && b.account === PPL_BENEFICIARY)
-            .reduce((sum, b) => sum + (Number(b.weight) || 0), 0);
-        return total >= PPL_MIN_WEIGHT;
+        c = await hiveRpc('condenser_api.get_content', [author, permlink]);
     } catch {
-        return null;
+        return { live: null, ppl: null };
     }
+    if (!c || !c.author) return { live: false, ppl: null };
+    if (!Array.isArray(c.beneficiaries)) return { live: true, ppl: false };
+    const total = c.beneficiaries
+        .filter(b => b && b.account === PPL_BENEFICIARY)
+        .reduce((sum, b) => sum + (Number(b.weight) || 0), 0);
+    return { live: true, ppl: total >= PPL_MIN_WEIGHT };
+}
+
+const referencesTrack = (p, audio) => p.body && (
+    p.body.includes(audio.permlink) ||
+    p.body.includes(`play?a=${audio.permlink}`) ||
+    p.body.includes(`audio_cid=${audio.audio_cid}`)
+);
+
+// Of the owner's posts that reference the track, the newest one STILL ON CHAIN.
+// Account history is oldest first and keeps the comment op of a post that was
+// later deleted, so the first op found can be a dropped duplicate (see
+// pickLivePost in videoHiveSync.js). When a post cannot be read, it is taken
+// unverified (ppl unknown) rather than skipped: the newest attempt is the
+// likely survivor, and a failed read must never turn into "no match".
+async function pickLiveMatch(posts, audio) {
+    for (let i = posts.length - 1; i >= 0; i -= 1) {
+        const p = posts[i];
+        if (!referencesTrack(p, audio)) continue;
+        const { live, ppl } = await readPost(p.author, p.permlink);
+        if (live === false) continue;   // deleted: try the next older one
+        return { match: p, ppl };
+    }
+    return { match: null, ppl: null };
 }
 
 /**
@@ -148,17 +179,10 @@ async function syncAudioHiveLinks() {
     for (const [owner, items] of Object.entries(byOwner)) {
         try {
             const posts = await getRecentPosts(owner);
-            if (!Array.isArray(posts)) continue;
 
             for (const audio of items) {
                 // Search for the audio permlink in post bodies
-                const match = posts.find(p =>
-                    p.body && (
-                        p.body.includes(audio.permlink) ||
-                        p.body.includes(`play?a=${audio.permlink}`) ||
-                        p.body.includes(`audio_cid=${audio.audio_cid}`)
-                    )
-                );
+                const { match, ppl } = await pickLiveMatch(posts, audio);
 
                 if (match) {
                     // Pull through any audio metadata the uploader put in json_metadata.audio
@@ -182,7 +206,6 @@ async function syncAudioHiveLinks() {
 
                     // Flag pay-per-listen posts so the player only opens
                     // listen sessions for tracks that actually earn that way.
-                    const ppl = await isPplPost(match.author, match.permlink);
                     if (ppl !== null) $set.ppl = ppl;
 
                     if (ENABLE_MONGO_WRITES) {
