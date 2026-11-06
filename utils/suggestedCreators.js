@@ -66,7 +66,13 @@ async function getRecentCreatorEngagement(db, { force = false } = {}) {
   ]);
 
   const commentByKey = new Map(commentRows.map((r) => [r._id, r.comments || 0]));      // _id = author/permlink
-  const reshareByKey = new Map(reshareRows.map((r) => [`${lc(r._id.a)}/${r._id.p}`, r.n]));
+  // Grouped on the raw author, so `Alice/x` and `alice/x` arrive as two rows: add
+  // them up under the lowercased key instead of letting the second overwrite the first.
+  const reshareByKey = new Map();
+  for (const r of reshareRows) {
+    const key = `${lc(r._id.a)}/${r._id.p}`;
+    reshareByKey.set(key, (reshareByKey.get(key) || 0) + r.n);
+  }
 
   const byAuthor = new Map();
   const add = (author, hivePermlink, views, title, thumbnail, created) => {
