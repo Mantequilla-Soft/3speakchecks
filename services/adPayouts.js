@@ -1016,12 +1016,15 @@ async function settlePeriod(db, period, deps = {}) {
   }
 
   const rows = [...owed.entries()]
-    .map(([account, v]) => ({ account, hbd: Math.round(v.hbd * 1000) / 1000, kind: v.kind }))
+    .map(([account, v]) => ({ account, hbd: Math.round(v.hbd * 1000) / 1000, exact: v.hbd, kind: v.kind }))
     .sort((a, b) => b.hbd - a.hbd);
   const payable = rows.filter((r) => r.hbd >= AD_PAYOUT_MIN_HBD);
   // Dust below Hive's 0.001 precision would round to nothing if sent. Carry it
   // rather than dropping it: across a long tail of small creators that is real money.
-  const dust = rows.filter((r) => r.hbd < AD_PAYOUT_MIN_HBD).reduce((a, r) => a + r.hbd, 0);
+  // 🚨 Summed from the UNROUNDED shares: a share under 0.0005 rounds to 0, so a sum
+  // of rounded shares carried nothing at all. Only rows that are not sent are
+  // counted, so nothing paid this period is also carried.
+  const dust = rows.filter((r) => r.hbd < AD_PAYOUT_MIN_HBD).reduce((a, r) => a + r.exact, 0);
 
   // `hbd` stays the HBD-equivalent total — it is what every report, test and dust
   // threshold is expressed in. `amounts` is what actually gets sent.
