@@ -121,9 +121,13 @@ async function unlinkIfRevoked({ hive_username, platform, platform_username }) {
     const stillPresent = typeof profile.text === 'string' && profile.text.includes(hash);
     if (stillPresent) {
         const now = new Date();
-        await getLinksCollection().updateOne(filter, {
-            $set: { verified: true, verified_at: now, last_checked: now, last_error: null },
-        });
+        // A claim only becomes verified here under the same rule as verifyAndStore:
+        // never while another Hive account holds this channel verified.
+        const otherClaim = existing.verified ? null : await findOtherVerifiedClaim(filter);
+        const set = otherClaim
+            ? { last_checked: now }
+            : { verified: true, verified_at: now, last_checked: now, last_error: null };
+        await getLinksCollection().updateOne(filter, { $set: set });
         const refreshed = await getLinksCollection().findOne(filter);
         return { status: 'still_present', record: refreshed };
     }

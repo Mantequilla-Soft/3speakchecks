@@ -259,7 +259,7 @@ describe('unlinkIfRevoked', () => {
   // an unverified claim first, have the channel show both hashes, then call unlink.
   // The one-verified-owner-per-channel rule (409 CHANNEL_ALREADY_LINKED on /verify/check)
   // is bypassed through /verify/unlink.
-  test.skip('BUG: unlink cannot turn a claim into a second verified owner of a channel', async () => {
+  test('unlink cannot turn a claim into a second verified owner of a channel', async () => {
     // alice owns the channel (beforeEach). mallory stores an unverified claim...
     bio = '';
     await verifyAndStore({ hive_username: 'mallory', platform: 'youtube', platform_username: '@alicetv' });
