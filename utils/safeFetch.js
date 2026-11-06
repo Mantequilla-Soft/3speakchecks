@@ -122,7 +122,10 @@ function requestOnce(u, { headers, timeoutMs, maxBytes, deadline }) {
     req.on('response', (res) => {
       const status = res.statusCode || 0;
       if (status >= 300 && status < 400 || status === 304 || status >= 400) {
-        res.resume();
+        // The body is not wanted. Close the connection rather than drain it: a
+        // hostile host can send an endless redirect body, and with the timer
+        // cleared nothing would ever stop the drain.
+        req.destroy();
         clearTimeout(timer);
         return resolve({ status, headers: res.headers, body: null });
       }
@@ -139,11 +142,20 @@ function requestOnce(u, { headers, timeoutMs, maxBytes, deadline }) {
       else if (enc === 'br') stream = res.pipe(zlib.createBrotliDecompress());
       const chunks = [];
       let size = 0;
+      let tooLarge = false;
       stream.on('data', (c) => {
+        if (tooLarge) return;
         size += c.length;
         if (size > maxBytes) {
+          // Reject HERE. For an uncompressed answer `stream` is `res`, so after
+          // res.destroy() a stream.destroy(err) is a no-op and no 'error' would
+          // come: the buffered part would end up resolved as the whole body.
+          tooLarge = true;
+          chunks.length = 0;
+          clearTimeout(timer);
+          reject(new FetchError('too_large', 'feed is too large'));
           res.destroy();
-          stream.destroy(new FetchError('too_large', 'feed is too large'));
+          if (stream !== res) stream.destroy();
           return;
         }
         chunks.push(c);
