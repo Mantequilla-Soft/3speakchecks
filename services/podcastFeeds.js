@@ -247,11 +247,18 @@ async function gc() {
   if (removed) console.log(`[podcasts] removed ${removed} feed(s) nobody follows`);
 }
 
-function start() {
+/**
+ * Start the feed worker. `shared: false` (a replica checker, BACKGROUND_JOBS=false)
+ * spawns only the worker, which this instance's routes ask() to probe a feed someone
+ * follows and to fetch episode notes. Polling every feed, the gc and podping are
+ * shared work, and stay with the one instance that runs the background jobs.
+ */
+function start({ shared = true } = {}) {
   if (!ENABLED) { console.log('[podcasts] disabled (PODCAST_FEEDS_ENABLED=false)'); return; }
   if (!ENABLE_MONGO_WRITES) { console.log('[podcasts] skipped: ENABLE_MONGO_WRITES=false'); return; }
-  ensureIndexes().catch((e) => console.warn('[podcasts] index setup:', e.message));
   spawn();
+  if (!shared) { console.log('[podcasts] worker only (replica): no polling, gc or podping'); return; }
+  ensureIndexes().catch((e) => console.warn('[podcasts] index setup:', e.message));
   setTimeout(() => {
     tick().catch(() => {});
     setInterval(() => tick().catch(() => {}), TICK_SEC * 1000).unref();

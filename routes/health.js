@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
+const os = require('os');
 const { getDb } = require('../utils/db');
+const { CHECKER_INSTANCE, BACKGROUND_JOBS } = require('../utils/config');
 
 // ── Liveness probe for the frontend maintenance gate ─────────────────────────
 // The web app hits /healthz on load and shows its maintenance takeover when this
@@ -27,12 +29,17 @@ let failStreak = { since: 0, count: 0 };
 
 async function pingMongo() {
     const db = getDb(); // throws if we never connected
-    await Promise.race([
-        db.command({ ping: 1 }),
-        new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('ping timeout')), HEALTH_PING_TIMEOUT_MS)
-        ),
-    ]);
+    let timer;
+    try {
+        await Promise.race([
+            db.command({ ping: 1 }),
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error('ping timeout')), HEALTH_PING_TIMEOUT_MS);
+            }),
+        ]);
+    } finally {
+        clearTimeout(timer); // /health/latency pings on every call: no timer left per request
+    }
 }
 
 router.get('/healthz', async (req, res) => {
@@ -69,6 +76,30 @@ router.get('/healthz', async (req, res) => {
     }
     healthCache = { ts: now, ok, mongo };
     res.json({ ok, maintenance: false, mongo, cached: false, ts: now });
+});
+
+// ── Instance latency, for the frontend's checker pick ────────────────────────
+// With several checker instances on one Mongo (checker.3speak.tv,
+// checker-us.3speak.tv, ...) the frontend races this route to pick the fastest one
+// for the viewer. The browser's round trip is only half the cost: every feed makes
+// several Mongo round trips from the instance, so an instance close to the viewer
+// but far from the database can still be the slower one. So this does ONE real
+// Mongo round trip (`ping`, reads nothing) before answering and reports it as db_ms;
+// the request time already holds one trip, db_ms lets the client weigh the rest.
+// Never cached (that would hide the trip it exists to measure). 503 when the
+// database is unreachable, so the client picks another instance.
+router.get('/health/latency', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.set('Timing-Allow-Origin', '*');
+    const instance = CHECKER_INSTANCE || os.hostname();
+    const started = process.hrtime.bigint();
+    try {
+        await pingMongo();
+        const dbMs = Number(process.hrtime.bigint() - started) / 1e6;
+        res.json({ ok: true, instance, primary: BACKGROUND_JOBS, db_ms: Math.round(dbMs * 10) / 10 });
+    } catch (_) {
+        res.status(503).json({ ok: false, instance, primary: BACKGROUND_JOBS, error: 'database unreachable' });
+    }
 });
 
 router.get('/', (req, res) => {
