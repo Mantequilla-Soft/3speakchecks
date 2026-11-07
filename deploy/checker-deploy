@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# Deploy one commit of Mantequilla-Soft/3speakchecks `main` to the checker on THIS box.
+# Installed root-owned at /usr/local/sbin/checker-deploy; the GitHub Action reaches it
+# only through the `deploy-checker` SSH user's forced command (checker-deploy-entry).
+#
+#   checker-deploy check  <40-hex sha>   verify everything, change nothing
+#   checker-deploy deploy <40-hex sha>   fast-forward to <sha>, restart, smoke test,
+#                                        roll back on any failure
+#
+# Box settings come from /etc/checker-deploy.conf (root-owned):
+#   NAME=helsinki|us  REPO=<checkout>  UNIT=<systemd unit>  RUN_AS=<service user>
+#   NODE_BIN=<dir with node + npm>  PORT=<local port>  EXPECT_PRIMARY=true|false
+#   ALLOWED_LOCAL="routes/adServe.js"   (tracked files that may carry a local patch)
+#
+# Rules:
+# - <sha> must be on origin/main. Exactly <sha> is deployed, never a newer, untested tip.
+# - Never goes backwards: a <sha> already contained in the running commit is a no-op.
+# - Local patches (ALLOWED_LOCAL) survive the fast-forward. If upstream changed a locally
+#   patched file, the deploy refuses: a human merges that by hand.
+# - Any other local edit to a tracked file: refused.
+# - /health/latency must report `primary` = EXPECT_PRIMARY. A replica (false) that
+#   reports true is running the shared jobs (payouts, broadcasts): it is STOPPED at once.
+set -euo pipefail
+umask 022
+
+CONF=/etc/checker-deploy.conf
+STATE_DIR=/var/lib/checker-deploy
+LOG=/var/log/checker-deploy.log
+LOCK=/run/lock/checker-deploy.lock
+SYS_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+LOCK_WAIT_SECONDS=900
+BOOT_WAIT_SECONDS=120
+STABLE_SECONDS=20
+
+verb="${1:-}"; sha="${2:-}"
+[[ "$verb" =~ ^(check|deploy)$ ]] || { echo "usage: checker-deploy check|deploy <40-hex sha>" >&2; exit 2; }
+[[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be 40 lowercase hex characters" >&2; exit 2; }
+
+# The conf is data, not code: parse KEY=VALUE lines, never `source` it.
+NAME= REPO= UNIT= RUN_AS= NODE_BIN= PORT= EXPECT_PRIMARY= ALLOWED_LOCAL=
+[ -f "$CONF" ] || { echo "missing $CONF" >&2; exit 2; }
+while IFS='=' read -r k v; do
+  [[ "$k" =~ ^[A-Z_]+$ ]] || continue
+  v="${v%\"}"; v="${v#\"}"
+  case "$k" in
+    NAME|REPO|UNIT|RUN_AS|NODE_BIN|PORT|EXPECT_PRIMARY|ALLOWED_LOCAL) printf -v "$k" '%s' "$v" ;;
+  esac
+done < <(grep -E '^[A-Z_]+=' "$CONF")
+for k in NAME REPO UNIT RUN_AS NODE_BIN PORT EXPECT_PRIMARY; do
+  [ -n "${!k}" ] || { echo "$CONF: $k is not set" >&2; exit 2; }
+done
+[[ "$EXPECT_PRIMARY" =~ ^(true|false)$ ]] || { echo "$CONF: EXPECT_PRIMARY must be true or false" >&2; exit 2; }
+[[ "$PORT" =~ ^[0-9]+$ ]] || { echo "$CONF: PORT must be a number" >&2; exit 2; }
+
+export PATH="$NODE_BIN:$SYS_PATH"
+mkdir -p "$STATE_DIR"
+exec 9>"$LOCK"
+if ! flock -w "$LOCK_WAIT_SECONDS" 9; then echo "another deploy holds the lock" >&2; exit 3; fi
+
+log() { printf '%s [%s %s %s] %s\n' "$(date -u +%FT%TZ)" "$NAME" "$verb" "${sha:0:8}" "$*" | tee -a "$LOG" >&2; }
+die() { log "FAILED: $*"; exit 1; }
+as() { runuser -u "$RUN_AS" -- env HOME="$(getent passwd "$RUN_AS" | cut -d: -f6)" PATH="$PATH" "$@"; }
+g() { as git -C "$REPO" "$@"; }
+
+http_code() { curl -s -o /dev/null --max-time 15 -w '%{http_code}' "http://127.0.0.1:$PORT$1" || true; }
+latency_json() { curl -s --max-time 15 "http://127.0.0.1:$PORT/health/latency" || true; }
+
+# Every check the smoke test makes. Prints the first failure, returns 1 on any.
+smoke() {
+  local body primary code path
+  body=$(latency_json)
+  if grep -q '"ok":true' <<<"$body"; then :; else echo "/health/latency not ok: ${body:0:200}"; return 1; fi
+  primary=$(grep -oE '"primary":(true|false)' <<<"$body" | cut -d: -f2)
+  if [ "$primary" != "$EXPECT_PRIMARY" ]; then
+    if [ "$EXPECT_PRIMARY" = false ] && [ "$primary" = true ]; then
+      # A replica running the shared jobs pays and broadcasts a second time. Stop it now.
+      systemctl stop "$UNIT" || true
+      echo "REPLICA REPORTS primary:true (background jobs ON). $UNIT STOPPED. Fix BACKGROUND_JOBS before starting it."
+      return 2
+    fi
+    echo "/health/latency primary=$primary, expected $EXPECT_PRIMARY"; return 1
+  fi
+  for path in /healthz '/feeds/new?limit=3' '/feeds/trending?limit=3' '/audio/creators?limit=3'; do
+    code=$(http_code "$path")
+    [ "$code" = 200 ] || { echo "$path -> $code"; return 1; }
+  done
+  return 0
+}
+
+# Wait for the restarted unit to answer, then make sure it STAYS up (a crash loop
+# answers once and dies). Returns smoke()'s code.
+wait_healthy() {
+  local deadline=$((SECONDS + BOOT_WAIT_SECONDS)) out rc pid
+  while :; do
+    out=$(smoke) && break
+    rc=$?
+    [ "$rc" = 2 ] && { log "$out"; return 2; }
+    [ $SECONDS -ge $deadline ] && { log "not healthy after ${BOOT_WAIT_SECONDS}s: $out"; return 1; }
+    sleep 3
+  done
+  pid=$(systemctl show -p MainPID --value "$UNIT")
+  sleep "$STABLE_SECONDS"
+  if ! systemctl is-active --quiet "$UNIT" || [ "$(systemctl show -p MainPID --value "$UNIT")" != "$pid" ]; then
+    log "$UNIT restarted or died within ${STABLE_SECONDS}s of answering"; return 1
+  fi
+  out=$(smoke) || { rc=$?; log "second smoke failed: $out"; return $rc; }
+  return 0
+}
+
+# ── checks (both verbs) ─────────────────────────────────────────────────────────────
+log "start"
+[ -d "$REPO/.git" ] || die "$REPO is not a git checkout"
+g fetch -q origin main || die "git fetch failed"
+g cat-file -e "$sha^{commit}" 2>/dev/null || die "$sha is not on origin/main (unknown after fetching main)"
+g merge-base --is-ancestor "$sha" origin/main || die "$sha is not on origin/main"
+
+old=$(g rev-parse HEAD)
+if [ "$old" = "$sha" ] || g merge-base --is-ancestor "$sha" "$old"; then
+  log "already deployed (running ${old:0:8} contains ${sha:0:8}), nothing to do"
+  out=$(smoke) || { rc=$?; die "running instance unhealthy: $out (rc $rc)"; }
+  log "running instance healthy"
+  exit 0
+fi
+g merge-base --is-ancestor "$old" "$sha" || die "running ${old:0:8} is not an ancestor of ${sha:0:8} (history diverged): fix by hand"
+
+changed=$(g diff --name-only "$old" "$sha")
+local_mod=$(g diff --name-only HEAD)
+staged=$(g diff --cached --name-only)
+[ -z "$staged" ] || die "staged changes in $REPO: $staged"
+for f in $local_mod; do
+  allowed=no
+  for a in $ALLOWED_LOCAL; do [ "$f" = "$a" ] && allowed=yes; done
+  [ "$allowed" = yes ] || die "local edit to tracked file $f (only ALLOWED_LOCAL may carry a patch)"
+  if grep -qxF "$f" <<<"$changed"; then
+    die "upstream changed $f, which carries a local patch here: merge it by hand, then re-run"
+  fi
+done
+
+# Syntax of every changed JS file at the target commit, before anything touches disk.
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+chmod 755 "$tmp"
+while IFS= read -r f; do
+  case "$f" in *.js|*.cjs|*.mjs) ;; *) continue ;; esac
+  g cat-file -e "$sha:$f" 2>/dev/null || continue   # deleted
+  g show "$sha:$f" > "$tmp/check.${f##*.}"
+  node --check "$tmp/check.${f##*.}" 2>"$tmp/err" || die "syntax error in $f at ${sha:0:8}: $(head -c 300 "$tmp/err")"
+done <<<"$changed"
+
+deps=no
+grep -qxE 'package(-lock)?\.json' <<<"$changed" && deps=yes
+n=$(grep -c . <<<"$changed" || true)
+log "plan: ${old:0:8} -> ${sha:0:8}, $n file(s) changed, npm ci: $deps, local patches kept: ${local_mod:-none}"
+
+if [ "$verb" = check ]; then
+  out=$(smoke) || { rc=$?; die "running instance unhealthy: $out (rc $rc)"; }
+  log "check ok: running instance healthy, deploy would apply cleanly"
+  exit 0
+fi
+
+# ── deploy ──────────────────────────────────────────────────────────────────────────
+rollback() {
+  log "rolling back to ${old:0:8}"
+  g reset -q --keep "$old" || { log "ROLLBACK FAILED: git reset --keep $old. Fix by hand."; exit 1; }
+  if [ "$deps" = yes ]; then (cd "$REPO" && as npm ci --omit=dev --no-audit --no-fund >/dev/null) || log "npm ci during rollback failed"; fi
+  systemctl restart "$UNIT"
+  if wait_healthy; then log "rolled back, ${old:0:8} healthy again"; else log "ROLLBACK UNHEALTHY: check $UNIT by hand"; fi
+  printf '%s\n' "$old" > "$STATE_DIR/deployed_sha"
+  exit 1
+}
+
+g merge -q --ff-only "$sha" || die "fast-forward to $sha failed"
+if [ "$deps" = yes ]; then
+  log "package files changed: npm ci --omit=dev"
+  (cd "$REPO" && as npm ci --omit=dev --no-audit --no-fund >/dev/null) || { log "npm ci failed"; rollback; }
+fi
+systemctl restart "$UNIT"
+set +e
+wait_healthy; rc=$?
+set -e
+if [ "$rc" = 2 ]; then
+  # The replica was stopped on purpose (jobs ON). Do not restart it by rolling back.
+  g reset -q --keep "$old" || true
+  die "replica reported primary:true, $UNIT left STOPPED, code reset to ${old:0:8}"
+fi
+[ "$rc" = 0 ] || rollback
+
+printf '%s\n' "$sha" > "$STATE_DIR/deployed_sha"
+log "deployed ${sha:0:8} OK"
