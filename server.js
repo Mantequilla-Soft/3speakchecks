@@ -5,7 +5,7 @@ const { handleRouteError } = require('./utils/asyncErrors');
 const cors = require('cors');
 const cron = require('node-cron');
 
-const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, BADGE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN, VIDEO_HIVE_SYNC_ENABLED, VIDEO_HIVE_SYNC_INTERVAL_MIN, DURATION_SYNC_ENABLED, DURATION_SYNC_INTERVAL_MIN, AD_INVENTORY_ENABLED, AD_INVENTORY_INTERVAL_H } = require('./utils/config');
+const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, BADGE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN, VIDEO_HIVE_SYNC_ENABLED, VIDEO_HIVE_SYNC_INTERVAL_MIN, DURATION_SYNC_ENABLED, DURATION_SYNC_INTERVAL_MIN, AD_INVENTORY_ENABLED, AD_INVENTORY_INTERVAL_H, BACKGROUND_JOBS } = require('./utils/config');
 const { connectToMongo, getDb } = require('./utils/db');
 const { calculateAndFlagTrendingVideos } = require('./services/trending');
 const { syncHiveCommunities } = require('./services/communitySync');
@@ -177,6 +177,52 @@ async function startServer() {
     // Build the trending / new / shorts candidate pools now and keep them fresh, so
     // no viewer waits on a cold one (each costs seconds of Mongo + Hive to build).
     require('./utils/feedPools').startFeedPoolWarmer(getDb);
+
+    // ── Per-process jobs: EVERY instance runs these. They fill this process's own
+    // memory (rates, queues, hot set) that its routes answer from; what they write to
+    // Mongo is an idempotent cache upsert, harmless when two instances do it.
+    //
+    // Platform rate defaults live in Mongo so a price can change without a restart.
+    // Loaded before anything can quote: platformRate() falls back to the compiled
+    // default until this resolves, so a slow first read prices at the built-in rate
+    // rather than at zero, but there is no reason to serve even one quote that way.
+    adSettings.schedule()
+        .then(() => console.log('Ad platform rates loaded'))
+        .catch((e) => console.error('[ad-settings] initial load:', e.message));
+
+    // Engagement affinity: per-viewer "whose videos do I engage with, and about
+    // what" for the discover/interests boost. DEMAND-SEEDED — the queue is filled by
+    // viewers who actually request a feed, so Hive load tracks real traffic rather
+    // than the size of the user table. In-process, like commentCounts below. The
+    // queue is per process, so each instance drains what its own viewers asked for.
+    scheduleEngagementSync();
+
+    // Feed card stats (payout/votes/comments): drain the lazily-built refresh queue
+    // from Hive into `video-stats`. Populated by what the feeds actually serve —
+    // see services/videoStats.js. No-op unless VIDEO_STATS_ENABLED. Per-process
+    // queue, as above.
+    scheduleVideoStats();
+
+    // Pulse hot set: old videos being watched again, for Video Pulse to restore to a
+    // hotnode (#93). Read-only, in memory. No-op unless PULSE_HOTSET_ENABLED.
+    require('./services/pulseHotSet').schedulePulseHotSet();
+
+    // Outside podcast feeds: a worker thread polls every followed feed every 30 min,
+    // and podping announces channel feeds that gained an episode (a no-op while the
+    // local podping-hivepinger is not up). The worker also answers this instance's
+    // routes (probe a followed feed, episode notes), so every instance spawns it;
+    // the polling, gc and podping run on the background-jobs instance only.
+    podcastFeeds.start({ shared: BACKGROUND_JOBS });
+
+    // ── Shared jobs: ONE instance only. Everything below writes shared data, moves
+    // money or broadcasts to Hive (payouts, scheduled posts, follows, syncs, scans),
+    // so a second instance on the same Mongo would do all of it twice. Replicas set
+    // BACKGROUND_JOBS=false and stop here.
+    if (!BACKGROUND_JOBS) {
+        console.log('BACKGROUND_JOBS=false: replica instance, serving requests only (no payouts, broadcasts, syncs or scans)');
+        listen();
+        return;
+    }
 
     // GDPR request retention. A closed request still holds the requester's email +
     // message. We keep it a short window after fulfilment (audit / appeal) then
@@ -461,10 +507,6 @@ async function startServer() {
         console.log(`Suspicious activity scan scheduled every ${susIntervalMs / 60000} min (first run in 10 min)`);
     }
 
-    // Podping: announce channel feeds that gained an episode, via the local
-    // podping-hivepinger. Each run is a no-op while hivepinger is not up.
-    // Outside podcast feeds: a worker thread polls every followed feed every 30 min.
-    podcastFeeds.start();
 
     // Lightning tips: @v4vapp credits whose memo links a 3Speak post become
     // supports. Main thread, see services/lightningSupports.js.
@@ -490,14 +532,6 @@ async function startServer() {
         console.log('Podping disabled (PODPING_ENABLED=false)');
     }
 
-    // Platform rate defaults live in Mongo so a price can change without a restart.
-    // Loaded before anything can quote: platformRate() falls back to the compiled
-    // default until this resolves, so a slow first read prices at the built-in rate
-    // rather than at zero, but there is no reason to serve even one quote that way.
-    adSettings.schedule()
-        .then(() => console.log('Ad platform rates loaded'))
-        .catch((e) => console.error('[ad-settings] initial load:', e.message));
-
     adPayouts.schedule();
     adCreativeSync.schedule();
 
@@ -510,21 +544,10 @@ async function startServer() {
     // cheaply. In-process (network I/O, not CPU) — see services/commentCounts.js.
     scheduleCommentCounts();
 
-    // Engagement affinity: per-viewer "whose videos do I engage with, and about
-    // what" for the discover/interests boost. DEMAND-SEEDED — the queue is filled by
-    // viewers who actually request a feed, so Hive load tracks real traffic rather
-    // than the size of the user table. In-process, like commentCounts above.
-    scheduleEngagementSync();
+    listen();
+}
 
-    // Feed card stats (payout/votes/comments): drain the lazily-built refresh queue
-    // from Hive into `video-stats`. Populated by what the feeds actually serve —
-    // see services/videoStats.js. No-op unless VIDEO_STATS_ENABLED.
-    scheduleVideoStats();
-
-    // Pulse hot set: old videos being watched again, for Video Pulse to restore to a
-    // hotnode (#93). Read-only, in memory. No-op unless PULSE_HOTSET_ENABLED.
-    require('./services/pulseHotSet').schedulePulseHotSet();
-
+function listen() {
     app.listen(PORT, () => {
         console.log(`Server is running on port ${PORT}`);
         console.log(`Health check: http://localhost:${PORT}`);

@@ -143,6 +143,15 @@ module.exports = {
     RATE_LIMIT_MAX: parseInt(process.env.RATE_LIMIT_MAX) || 10,
 
     PORT: process.env.PORT || 3000,
+    // Several checker instances can share one Mongo (checker.3speak.tv,
+    // checker-us.3speak.tv, ...). Exactly ONE of them runs the background jobs:
+    // payouts, Hive broadcasts (scheduled posts, follows, collect_subscriptions),
+    // syncs, scans and pool builders. Every other instance sets
+    // BACKGROUND_JOBS=false and only serves requests, or payouts and broadcasts
+    // would run once per instance. Default on, so a lone instance behaves as before.
+    BACKGROUND_JOBS: process.env.BACKGROUND_JOBS !== 'false',
+    // A short name for this instance in /health/latency (default: the hostname).
+    CHECKER_INSTANCE: String(process.env.CHECKER_INSTANCE || '').trim(),
     MONGODB_URI: process.env.MONGODB_URI,
     DATABASE_NAME: process.env.DATABASE_NAME || 'threespeak',
     COLLECTION_NAME: process.env.COLLECTION_NAME || 'contentcreators',
