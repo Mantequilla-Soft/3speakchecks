@@ -24,6 +24,38 @@ function applyCategoryFilter(query, value) {
     }
 }
 
+// The Audio page's type tabs that stand for a playlist kind (utils/playlistType.js).
+const PLAYLIST_KIND_FOR_CATEGORY = { song: 'music', podcast: 'podcast', voice_message: 'voice' };
+
+// How recently a host must have added one of their own files to a playlist of
+// the tab's kind to count as a creator of that kind (when no date filter is set).
+const KIND_HOST_RECENT_DAYS = 30;
+
+/**
+ * The (owner, post_permlink) pairs of files their owners keep in a public
+ * playlist saved as `kind`, for owners who added one of their own files to such
+ * a playlist since `since`. A podcaster recording in the browser uploads voice
+ * tracks; putting them in a podcast playlist makes them podcast episodes.
+ */
+async function kindHostTracks(db, kind, since) {
+    const rows = await db.collection('playlists').find(
+        // A saved kind sits top-level, or only in json_metadata for playlists
+        // saved before the indexer kept it; storedPlaylistType reads both.
+        { access: 'public', 'items.0': { $exists: true }, $or: [{ audio_kind: kind }, { json_metadata: { $exists: true } }] },
+        { projection: { owner: 1, type: 1, audio_kind: 1, json_metadata: 1, items: 1 } },
+    ).toArray();
+    const addedMs = (t) => (typeof t === 'number' ? (t < 1e12 ? t * 1000 : t) : (Date.parse(t) || 0));
+    const pairs = [];
+    for (const p of rows) {
+        if (typeof p.owner !== 'string' || !p.owner) continue;
+        if (storedPlaylistType(p).kind !== kind) continue;
+        const own = (p.items || []).filter((it) => it.author === p.owner && it.permlink);
+        if (!own.some((it) => addedMs(it.added_at) >= since.getTime())) continue;
+        for (const it of own) pairs.push({ owner: p.owner, post_permlink: it.permlink });
+    }
+    return pairs;
+}
+
 function categoryMatchClause(value) {
     if (value === 'voice_message') {
         return { $or: [{ category: 'voice_message' }, { category: null }, { category: { $exists: false } }] };
@@ -930,8 +962,19 @@ router.get('/creators', async (req, res) => {
         const autoTagFilter = await autoTagPermlinkFilter(db, req.query.auto_tag);
         if (autoTagFilter) audioQuery.permlink = autoTagFilter;
 
-        // Category + genre filters (mirrors /audio)
-        applyCategoryFilter(audioQuery, req.query.category);
+        // Category + genre filters (mirrors /audio). On a tab that stands for a
+        // playlist kind, a host's own files in a recently fed playlist of that
+        // kind count too, whatever their track category.
+        const category = typeof req.query.category === 'string' ? req.query.category : '';
+        const tabKind = PLAYLIST_KIND_FOR_CATEGORY[category] || null;
+        const hostTracks = tabKind
+            ? await kindHostTracks(db, tabKind, audioQuery.createdAt?.$gte || new Date(Date.now() - KIND_HOST_RECENT_DAYS * 86400000))
+            : [];
+        if (hostTracks.length) {
+            audioQuery.$and = (audioQuery.$and || []).concat([{ $or: [categoryMatchClause(category), ...hostTracks] }]);
+        } else {
+            applyCategoryFilter(audioQuery, category);
+        }
         if (req.query.genre) {
             const g = String(req.query.genre).trim();
             if (g) {
@@ -991,7 +1034,6 @@ router.get('/creators', async (req, res) => {
 // playlist shows under that tab with all its tracks, and under no other.
 // Playlists without a saved kind, and the other tabs, still go by the
 // categories of the tracks inside.
-const PLAYLIST_KIND_FOR_CATEGORY = { song: 'music', podcast: 'podcast', voice_message: 'voice' };
 router.get('/playlists', async (req, res) => {
     try {
         const db = getDb();
