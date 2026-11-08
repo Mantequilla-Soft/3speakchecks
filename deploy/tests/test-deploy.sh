@@ -27,7 +27,8 @@ patch_script() {
     -e "s|^BOOT_WAIT_SECONDS=.*|BOOT_WAIT_SECONDS=2|" \
     -e "s|^LOCK_WAIT_SECONDS=.*|LOCK_WAIT_SECONDS=2|" \
     "$SRC")
-  if grep -nE '/etc/|/var/|/run/|/mnt/|/opt/' <<<"$s" | grep -v '^[0-9]*:#'; then
+  # SYS_PATH is skipped: it now carries this machine's own PATH (a CI runner has /opt/...).
+  if grep -nE '/etc/|/var/|/run/|/mnt/|/opt/' <<<"$s" | grep -vE '^[0-9]+:(#|SYS_PATH=)'; then
     echo "the patched script still references real paths (above); update patch_script"; exit 1
   fi
   printf '%s\n' "$s" > "$SB/deploy"; chmod +x "$SB/deploy"
