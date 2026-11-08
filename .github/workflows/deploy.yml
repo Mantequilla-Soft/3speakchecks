@@ -1,0 +1,96 @@
+name: Deploy
+
+# Every commit that lands on main (a merged PR) goes to both production checkers once the
+# Tests workflow has passed for it:
+#   1. US (checker-us.3speak.tv, replica, BACKGROUND_JOBS=false): the canary
+#   2. Helsinki (checker.3speak.tv, the primary that runs payouts and broadcasts),
+#      only if the US deploy succeeded
+# Each box runs /usr/local/sbin/checker-deploy through a forced-command SSH user: it
+# deploys exactly the tested commit, keeps the box's local patches, restarts, smoke tests
+# and rolls back on failure. A replica that comes up reporting primary:true is stopped.
+#
+# Manual run (Actions > Deploy > Run workflow): mode `check` verifies both boxes without
+# changing anything; `deploy` deploys the selected main commit.
+on:
+  workflow_run:
+    workflows: [Tests]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: check = verify only, deploy = deploy main
+        type: choice
+        options: [check, deploy]
+        default: check
+      target:
+        type: choice
+        options: [both, us, helsinki]
+        default: both
+
+permissions:
+  contents: read
+
+# One deploy at a time, never cancelled half way: a newer merge waits for the running one.
+concurrency:
+  group: checker-deploy
+  cancel-in-progress: false
+
+env:
+  # workflow_run: the commit the Tests run passed for. Manual: the main tip it was started on.
+  SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+  MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'deploy' }}
+
+jobs:
+  us:
+    name: US (canary, replica)
+    # Tests passed on a push to main, or a manual run that includes the US box.
+    if: >-
+      (github.event_name == 'workflow_run'
+        && github.event.workflow_run.conclusion == 'success'
+        && github.event.workflow_run.event == 'push')
+      || (github.event_name == 'workflow_dispatch' && inputs.target != 'helsinki')
+    runs-on: ubuntu-latest
+    environment: checker-production
+    timeout-minutes: 25
+    steps:
+      - name: ${{ env.MODE }} ${{ env.SHA }} on the US box
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "bad sha"; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id && chmod 600 ~/.ssh/id
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/id -p "${{ vars.US_PORT }}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o BatchMode=yes -o ServerAliveInterval=30 \
+            "${{ vars.DEPLOY_USER }}@${{ vars.US_HOST }}" "$MODE $SHA"
+
+  helsinki:
+    name: Helsinki (primary)
+    needs: us
+    # After a successful US run; or a manual run of Helsinki alone (US skipped).
+    if: >-
+      always()
+      && (needs.us.result == 'success'
+          || (needs.us.result == 'skipped' && github.event_name == 'workflow_dispatch' && inputs.target == 'helsinki'))
+      && (github.event_name == 'workflow_run' || inputs.target != 'us')
+    runs-on: ubuntu-latest
+    environment: checker-production
+    timeout-minutes: 25
+    steps:
+      - name: ${{ env.MODE }} ${{ env.SHA }} on Helsinki
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "bad sha"; exit 1; }
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id && chmod 600 ~/.ssh/id
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/id -p "${{ vars.HELSINKI_PORT }}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o BatchMode=yes -o ServerAliveInterval=30 \
+            "${{ vars.DEPLOY_USER }}@${{ vars.HELSINKI_HOST }}" "$MODE $SHA"

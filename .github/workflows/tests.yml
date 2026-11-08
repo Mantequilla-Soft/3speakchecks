@@ -69,3 +69,16 @@ jobs:
           name: coverage
           path: coverage/
           retention-days: 14
+
+  deploy-scripts:
+    # deploy/: the box-side deploy script and its SSH forced command, in a sandbox
+    # (throwaway git origin, stubbed systemctl/curl/npm). Part of Tests, so a broken
+    # deploy script also blocks the Deploy workflow.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: bash deploy/tests/run.sh
