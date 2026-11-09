@@ -5,7 +5,7 @@ const { handleRouteError } = require('./utils/asyncErrors');
 const cors = require('cors');
 const cron = require('node-cron');
 
-const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, BADGE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN, VIDEO_HIVE_SYNC_ENABLED, VIDEO_HIVE_SYNC_INTERVAL_MIN, DURATION_SYNC_ENABLED, DURATION_SYNC_INTERVAL_MIN, AD_INVENTORY_ENABLED, AD_INVENTORY_INTERVAL_H, BACKGROUND_JOBS } = require('./utils/config');
+const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, BADGE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN, THUMBNAIL_FRAME_ENABLED, THUMBNAIL_FRAME_INTERVAL_MIN, VIDEO_HIVE_SYNC_ENABLED, VIDEO_HIVE_SYNC_INTERVAL_MIN, DURATION_SYNC_ENABLED, DURATION_SYNC_INTERVAL_MIN, AD_INVENTORY_ENABLED, AD_INVENTORY_INTERVAL_H, BACKGROUND_JOBS } = require('./utils/config');
 const { connectToMongo, getDb } = require('./utils/db');
 const { calculateAndFlagTrendingVideos } = require('./services/trending');
 const { syncHiveCommunities } = require('./services/communitySync');
@@ -16,6 +16,7 @@ const { startTagSyncWatcher } = require('./services/tagSync');
 const { syncAudioHiveLinks, syncAudioPostTitles } = require('./services/audioHiveSync');
 const { syncEmbedCategories } = require('./services/embedCategorySync');
 const { syncThumbnails } = require('./services/thumbnailSync');
+const { generateFrameThumbnails } = require('./services/thumbnailFrame');
 const { syncVideoHiveLinks } = require('./services/videoHiveSync');
 const { syncAllDurations } = require('./services/durationSync');
 const { syncPremiumFromSubs } = require('./services/premiumSubsSync');
@@ -359,6 +360,24 @@ async function startServer() {
             }, thumbIntervalMs);
         }, 90 * 1000);
         console.log(`Thumbnail sync scheduled every ${THUMBNAIL_SYNC_INTERVAL_MIN}min (first run in 90s)`);
+    }
+
+    // Videos with no thumbnail anywhere get a frame of the video instead (after
+    // thumbnailSync has looked at the post). Runs are serialised: one ffmpeg at a time.
+    if (THUMBNAIL_FRAME_ENABLED) {
+        let frameRunning = false;
+        const runFrames = () => {
+            if (syncRunning || frameRunning) return;
+            frameRunning = true;
+            generateFrameThumbnails()
+                .catch(err => console.error('Frame thumbnail error:', err))
+                .finally(() => { frameRunning = false; });
+        };
+        setTimeout(() => {
+            runFrames();
+            setInterval(runFrames, THUMBNAIL_FRAME_INTERVAL_MIN * 60 * 1000);
+        }, 5 * 60 * 1000);
+        console.log(`Frame thumbnails scheduled every ${THUMBNAIL_FRAME_INTERVAL_MIN}min (first run in 5min)`);
     }
 
     // Link embed-video docs to their Hive post where the external indexer left

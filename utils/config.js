@@ -774,6 +774,21 @@ module.exports = {
     THUMBNAIL_SYNC_FRESH_RECHECK_MIN: parseInt(process.env.THUMBNAIL_SYNC_FRESH_RECHECK_MIN) || 30,
     THUMBNAIL_SYNC_RECHECK_DAYS: parseInt(process.env.THUMBNAIL_SYNC_RECHECK_DAYS) || 7,
 
+    // --- Frame thumbnails (services/thumbnailFrame.js) ---
+    // Last resort for a video with no thumbnail anywhere (not on the doc, not on
+    // the Hive post): a frame of the video, uploaded to the 3Speak image host.
+    // Off without IMAGE_UPLOAD_KEY (the image host's bearer key) or ffmpeg.
+    THUMBNAIL_FRAME_ENABLED: parseBool(process.env.THUMBNAIL_FRAME_ENABLED, true),
+    THUMBNAIL_FRAME_INTERVAL_MIN: parseInt(process.env.THUMBNAIL_FRAME_INTERVAL_MIN) || 10,
+    // One ffmpeg at a time, so a run is a few seconds per video: keep it small.
+    THUMBNAIL_FRAME_BATCH: parseInt(process.env.THUMBNAIL_FRAME_BATCH) || 10,
+    // Gives the uploading app (and thumbnailSync) time to add a real thumbnail.
+    THUMBNAIL_FRAME_MIN_AGE_MIN: parseInt(process.env.THUMBNAIL_FRAME_MIN_AGE_MIN) || 120,
+    THUMBNAIL_FRAME_RETRY_H: parseInt(process.env.THUMBNAIL_FRAME_RETRY_H) || 6,
+    THUMBNAIL_FRAME_MAX_ATTEMPTS: parseInt(process.env.THUMBNAIL_FRAME_MAX_ATTEMPTS) || 3,
+    IMAGE_UPLOAD_URL: process.env.IMAGE_UPLOAD_URL || 'https://images.3speak.tv',
+    IMAGE_UPLOAD_KEY: process.env.IMAGE_UPLOAD_KEY || '',
+
     // --- Video → Hive link backfill (services/videoHiveSync.js) ---
     // Fills hive_author/hive_permlink on embed-video docs the external indexer
     // never reached — 4,053 of 6,598 shorts as of 2026-09-20. Without that pair
