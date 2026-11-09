@@ -16,8 +16,11 @@ const fx = require('./_fixtures');
 jest.mock('child_process', () => require('./_fixtures').childProcessMock());
 jest.mock('../../utils/adGateways', () => ({ ...jest.requireActual('../../utils/adGateways'), startGatewayProbe: jest.fn() }));
 jest.mock('../../utils/warmupAudio', () => ({ warmupAudio: jest.fn() }));
+// The streaming server, asked whether a room is live (utils/liveRoom.js has its own tests).
+jest.mock('../../utils/liveRoom', () => ({ liveRoom: jest.fn() }));
 const env = fx.useAdEnv();
 const { warmupAudio } = require('../../utils/warmupAudio');
+const { liveRoom } = require('../../utils/liveRoom');
 const testDb = require('../helpers/db');
 const { buildApp } = require('../helpers/app');
 const config = require('../../utils/config');
@@ -29,6 +32,8 @@ fx.freezeTime();
 beforeEach(() => {
   jest.setSystemTime(fx.NOW);
   warmupAudio.mockResolvedValue({ owners: [], allowed: [] });
+  liveRoom.mockReset();
+  liveRoom.mockResolvedValue({ liveAt: '2026-11-01T11:00:00.000Z' });
 });
 
 const SESSIONS = 'ad_sessions';
@@ -214,6 +219,25 @@ describe('live streams', () => {
   test('length targeting treats a stream as AD_LIVE_ASSUMED_SECONDS long', async () => {
     await fx.seed(db(), fx.placement({ campaign: { minVideoSeconds: config.AD_LIVE_ASSUMED_SECONDS + 1 } }).all);
     expect((await open(live())).body.reason).toBe('no_eligible_campaign');
+  });
+
+  test('the streaming server is asked whether this host is live in this room', async () => {
+    await fx.seed(db(), fx.placement({ campaign: { slotPercent: 0 } }).all);
+    await open(live({ owner: 'Host1' })).expect(200);
+    expect(liveRoom).toHaveBeenCalledWith('host1', 'room-1');
+  });
+
+  test('a room that is not a live stream by that host gets nothing: no invented rooms drawing streamer money', async () => {
+    await fx.seed(db(), fx.together(fx.placement({ campaign: { slotPercent: 0 } }), fx.placement({ format: 'video_ticker' })));
+    liveRoom.mockResolvedValue(null);
+    expect((await open(live())).body).toEqual({ ad: null, reason: 'not_live' });
+    expect(await db().collection(SESSIONS).countDocuments({ surface: 'live' })).toBe(0);
+  });
+
+  test('a watch page is never asked about: the check is for streams only', async () => {
+    await fx.seed(db(), fx.placement().all);
+    await open({ owner: 'creator1', permlink: 'vid-1', capId: hex(8) });
+    expect(liveRoom).not.toHaveBeenCalled();
   });
 
   test('with live ads switched off a stream gets nothing', async () => {
