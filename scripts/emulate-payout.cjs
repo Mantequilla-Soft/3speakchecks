@@ -1,80 +1,107 @@
 /**
  * "What would the next payout send?" — answered against LIVE data, without paying
- * anyone and without leaving a mark.
+ * anyone and without writing anything.
  *
- *   node scripts/emulate-payout.cjs
+ *   node scripts/emulate-payout.cjs                    the period running now
+ *   node scripts/emulate-payout.cjs --period 2026-11-06  a given period (its start day)
  *
- * Runs the real settlePeriod() on the real database, then restores every write it
- * made: payout rows, the period record, and the payoutId stamped on each impression.
- * Campaigns are never touched, so a flight that is mid-run stays mid-run.
+ * Runs the real settlePeriod() against a READ-ONLY handle on the real database
+ * (utils/readOnlyDb.js): every read is real, every write is recorded and dropped.
+ * What it prints comes from those recorded writes, so it is exactly what a real
+ * settlement would have written: the payout rows (with their per-label parts), the
+ * period record, and how many impressions, viewer rows and listener rows it would
+ * have claimed.
  *
- * Transfers are stubbed by the module's OWN dry-run branch rather than by patching
- * it: AD_PAYOUT_ACTIVE_KEY is deleted from the environment before adPayouts is
- * required, and that module reads the key once at load. So the code path under test
- * is the one that runs in production, minus the broadcast.
+ * 🚨 History: this script used to settle for real and then undo its writes. The undo
+ * missed the `payoutId` stamped on viewer and listener rows, so a run on production
+ * would have marked real people's watching settled without paying them, and its
+ * delete-and-reinsert of every payout row raced the real payout job. Never go back
+ * to that shape: if this needs to see something new, read it, do not write it.
  *
- * ⚠️ It writes and then rolls back, so do not run it against a settle in progress:
- * the rollback would undo that too. It is a read-only question asked with write-shaped
- * machinery, which is the only way to ask it accurately.
+ * Transfers are not part of settlement (payPending sends them), and
+ * AD_PAYOUT_ACTIVE_KEY is removed from the environment before anything loads, so
+ * nothing here can sign one either way.
  */
 process.chdir(require('path').join(__dirname, '..'));
 require('dotenv').config();
-delete process.env.AD_PAYOUT_ACTIVE_KEY;          // force dry run
+delete process.env.AD_PAYOUT_ACTIVE_KEY;
 
-const db = require('../utils/db');
+const dbModule = require('../utils/db');
 const cfg = require('../utils/config');
+const { readOnlyDb } = require('../utils/readOnlyDb');
 const { settlePeriod, periodContaining, accrualFor } = require('../services/adPayouts');
 
-(async () => {
-  await db.connectToMongo();
-  const d = db.getDb();
-  const PAYOUTS = cfg.AD_PAYOUTS_COLLECTION;
-  const PERIODS = cfg.AD_PAYOUT_PERIODS_COLLECTION;
-  const IMPS = cfg.AD_IMPRESSIONS_COLLECTION;
+const fmt = (n) => (Number(n) || 0).toFixed(3);
 
-  // ── snapshot, so this leaves no trace ──
-  const beforePayouts = await d.collection(PAYOUTS).find({}).toArray();
-  const beforePeriods = await d.collection(PERIODS).find({}).toArray();
-  const impsWithPayout = await d.collection(IMPS).find({ payoutId: { $ne: null } }, { projection: { _id: 1, payoutId: 1 } }).toArray();
-  const campsBefore = await d.collection('ad_campaigns').find({}, { projection: { _id: 1, status: 1, deliveredImpressions: 1 } }).toArray();
+/** The emulation itself, separate from the database connection so it can be tested. */
+async function emulate(realDb, period, log = console.log) {
+  const { db, writes } = readOnlyDb(realDb);
 
-  const period = periodContaining(Date.now());
-  console.log(`period ${period.key}  ${period.start.toISOString()} → ${period.end.toISOString()}\n`);
-
-  const camps = await d.collection('ad_campaigns').find({}).toArray();
+  const camps = await db.collection(cfg.AD_CAMPAIGNS_COLLECTION).find({}).toArray();
   let revenue = 0;
   for (const c of camps) {
     const a = accrualFor(c, period.start, period.end);
     revenue += a;
-    console.log(`  flight ${c._id}  accrued ${a.toFixed(5)} HBD of its ${c.paidHbd} paid`);
+    if (a > 0) log(`  flight ${c._id}  accrues ${a.toFixed(5)} HBD of its ${c.paidHbd} paid`);
   }
-  console.log(`\n  revenue this period : ${revenue.toFixed(5)} HBD`);
-  console.log(`  creator pool (${cfg.AD_CREATOR_POOL_PCT}%)  : ${(revenue * cfg.AD_CREATOR_POOL_PCT / 100).toFixed(5)} HBD`);
+  log(`\n  revenue this period : ${revenue.toFixed(5)} HBD`);
+  log(`  creator pool (${cfg.AD_CREATOR_POOL_PCT}%)  : ${(revenue * cfg.AD_CREATOR_POOL_PCT / 100).toFixed(5)} HBD`);
+  log(`  viewer pool  (${cfg.AD_VIEWER_POOL_PCT}%)  : from SHOWN campaigns only, see the period record below`);
 
-  const res = await settlePeriod(d, period);
-  console.log('\n  settle result:', JSON.stringify(res));
+  const result = await settlePeriod(db, period);
+  if (!result) {
+    log('\n  settlePeriod returned nothing: the period is already settled, or a lookup failed (see above).');
+  }
 
-  const rows = await d.collection(PAYOUTS).find({ periodKey: period.key }).toArray();
-  console.log(`\n  payout rows it would write: ${rows.length}`);
-  rows.forEach(r => console.log(`     @${r.account}  ${r.hbd} HBD  (${r.kind})  status=${r.status}`));
-  const per = await d.collection(PERIODS).findOne({ _id: period.key });
+  // Payout rows: writePayoutRows upserts one per (periodKey, account).
+  const rows = writes
+    .filter((w) => w.collection === cfg.AD_PAYOUTS_COLLECTION && w.op === 'updateOne')
+    .map((w) => ({ account: w.args[0].account, ...(w.args[1].$set || {}) }))
+    .sort((a, b) => (b.hbd || 0) - (a.hbd || 0));
+  log(`\n  payout rows it would write: ${rows.length}`);
+  for (const r of rows) {
+    const legs = (r.amounts || []).map((l) => `${fmt(l.amount)} ${l.symbol}`).join(' + ') || 'nothing sendable';
+    const parts = r.parts && Object.keys(r.parts).length > 1
+      ? `  [${Object.entries(r.parts).map(([k, v]) => `${k} ${fmt(v)}`).join(', ')}]` : '';
+    log(`     @${r.account}  ${fmt(r.hbd)} HBD  (${r.kind})  = ${legs}${parts}`);
+  }
+  const byKind = {};
+  for (const r of rows) {
+    for (const [k, v] of Object.entries(r.parts && Object.keys(r.parts).length ? r.parts : { [r.kind]: r.hbd })) {
+      byKind[k] = (byKind[k] || 0) + (Number(v) || 0);
+    }
+  }
+  if (rows.length) log(`\n  by label: ${Object.entries(byKind).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${fmt(v)}`).join(' · ')}`);
+
+  // What it would claim.
+  const claimed = (collection) => writes
+    .filter((w) => w.collection === collection && w.op === 'updateMany')
+    .reduce((a, w) => a + ((w.args[0]?._id?.$in || []).length), 0);
+  log(`\n  would claim: ${claimed(cfg.AD_IMPRESSIONS_COLLECTION)} impressions, `
+    + `${claimed(cfg.AD_VIEWER_WATCH_COLLECTION)} viewer rows, ${claimed(cfg.AD_LISTENER_LISTEN_COLLECTION)} listener rows`);
+
+  const per = writes.find((w) => w.collection === cfg.AD_PAYOUT_PERIODS_COLLECTION && w.op === 'updateOne')?.args[1]?.$set;
   if (per) {
-    console.log(`\n  period record: revenue ${per.revenueHbd} pool ${per.poolHbd} rate ${per.ratePerImpression}`);
-    console.log(`                 impressions ${per.impressions} recipients ${per.recipients} dust carried ${per.carriedOut}`);
+    log(`\n  period record: revenue ${fmt(per.revenueHbd)} pool ${fmt(per.poolHbd)} rate ${per.ratePerImpression}`);
+    log(`                 impressions ${per.impressions} recipients ${per.recipients} dust carried ${fmt(per.carriedOut)}`);
+    log(`                 viewer pool ${fmt(per.viewerPoolHbd)} (carried in ${fmt(per.viewerCarriedIn)}) paid ${fmt(per.viewerPaidHbd)} `
+      + `to ${per.viewerRecipients}, carried out ${fmt(per.viewerCarriedOut)}`);
   }
+  log(`\n  nothing was written: ${writes.length} write(s) recorded and dropped.`);
+  return { result, rows, writes, period: per || null };
+}
 
-  // ── roll back ──
-  await d.collection(PAYOUTS).deleteMany({});
-  if (beforePayouts.length) await d.collection(PAYOUTS).insertMany(beforePayouts);
-  await d.collection(PERIODS).deleteMany({});
-  if (beforePeriods.length) await d.collection(PERIODS).insertMany(beforePeriods);
-  await d.collection(IMPS).updateMany({}, { $set: { payoutId: null } });
-  for (const i of impsWithPayout) await d.collection(IMPS).updateOne({ _id: i._id }, { $set: { payoutId: i.payoutId } });
+if (require.main === module) {
+  (async () => {
+    const i = process.argv.indexOf('--period');
+    const at = i > 0 ? Date.parse(`${process.argv[i + 1]}T12:00:00Z`) : Date.now();
+    if (!Number.isFinite(at)) { console.error('--period wants YYYY-MM-DD'); process.exit(2); }
+    const period = periodContaining(at);
+    await dbModule.connectToMongo();
+    console.log(`period ${period.key}  ${period.start.toISOString()} → ${period.end.toISOString()}\n`);
+    await emulate(dbModule.getDb(), period);
+    process.exit(0);
+  })().catch((err) => { console.error(err); process.exit(1); });
+}
 
-  const campsAfter = await d.collection('ad_campaigns').find({}, { projection: { _id: 1, status: 1, deliveredImpressions: 1 } }).toArray();
-  const changed = campsAfter.filter((a, i) => JSON.stringify(a) !== JSON.stringify(campsBefore[i]));
-  console.log(`\n  rolled back. payout rows: ${await d.collection(PAYOUTS).countDocuments({})}, periods: ${await d.collection(PERIODS).countDocuments({})}`);
-  console.log(`  unsettled impressions restored: ${await d.collection(IMPS).countDocuments({ payoutId: null })}`);
-  console.log(`  campaigns changed by this run  : ${changed.length} (0 = your running ads untouched)`);
-  process.exit(0);
-})();
+module.exports = { emulate };
