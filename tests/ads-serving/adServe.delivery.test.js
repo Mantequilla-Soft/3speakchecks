@@ -161,6 +161,15 @@ describe('POST /m/:sid/w: seconds of the spot that actually played', () => {
     const s = await session({ campaignId: null });
     expect((await post(`/m/${s.sid}/w`, { seconds: 3 })).body).toEqual({ ok: false, reason: 'no_spot' });
   });
+
+  test('a live stream\'s pre-roll is tagged live, so its host is paid as a streamer; a video\'s roll is not', async () => {
+    const live = await session({ surface: 'live', owner: 'host1', permlink: 'room-1', adFirstFetchAt: fx.ago(10 * 1000) });
+    await post(`/m/${live.sid}/w`, { seconds: 9 }).expect(200);
+    expect(await impressionOf(live.sid, live.campaignId)).toMatchObject({ completed: true, live: true, owner: 'host1', permlink: 'room-1' });
+    const vod = await session({ adFirstFetchAt: fx.ago(10 * 1000) });
+    await post(`/m/${vod.sid}/w`, { seconds: 9 }).expect(200);
+    expect((await impressionOf(vod.sid, vod.campaignId)).live).toBeUndefined();
+  });
 });
 
 describe('POST /m/:sid/skipped', () => {
@@ -175,6 +184,12 @@ describe('POST /m/:sid/skipped', () => {
   test('without a spot it is refused', async () => {
     const s = await session({ campaignId: null });
     expect((await post(`/m/${s.sid}/skipped`)).body).toEqual({ ok: false, reason: 'no_spot' });
+  });
+
+  test('a skipped pre-roll on a live stream is tagged live', async () => {
+    const s = await session({ surface: 'live' });
+    await post(`/m/${s.sid}/skipped`).expect(200, { ok: true });
+    expect(await impressionOf(s.sid, s.campaignId)).toMatchObject({ skipped: true, live: true });
   });
 });
 

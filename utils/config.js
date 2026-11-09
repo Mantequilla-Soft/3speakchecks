@@ -67,6 +67,18 @@ const LISTENER_PODCAST_POOL_PCT = clampedPct('AD_LISTENER_PODCAST_POOL_PCT', 0,
     100 - CREATOR_POOL_PCT - VIEWER_POOL_PCT - LISTENER_AUDIO_POOL_PCT, `creator, viewer and listener audio`);
 const LISTENER_POOL_PCT = LISTENER_AUDIO_POOL_PCT + LISTENER_PODCAST_POOL_PCT;
 
+/* 🆕 ONE POOL FOR WATCHING AND LISTENING (owner, 2026-11-09). Listeners are no
+ * longer paid from pools of their own: video viewers, stream viewers and listeners
+ * (3Speak audio and outside podcasts alike) share the viewer pool at one rate per
+ * qualifying second, and each payout row says which ('viewer', 'stream-viewer',
+ * 'listener'). The listener points fold INTO the viewer pool, so the split stays
+ * creator 50 / viewer 15 (was 10 + listener 5) and nobody's rate drops.
+ *
+ * The two AD_LISTENER_*_POOL_PCT keys are still read so a deploy needs no .env
+ * change on either box. Tidying .env later (AD_VIEWER_POOL_PCT=15, both listener
+ * keys removed) gives exactly the same split. */
+const VIEWER_SHARE_PCT = VIEWER_POOL_PCT + LISTENER_POOL_PCT;
+
 /* The referrer's cut, in the same percentage points of the whole.
  *
  * Paid when the ADVERTISER who booked the campaign was themselves referred to the
@@ -976,13 +988,10 @@ module.exports = {
     // platform keeps is the remainder (100 - creator - viewer). Funding viewers out
     // of the creator pool would be paying them with creators' money, which is not
     // the deal creators agreed to.
-    AD_VIEWER_POOL_PCT: VIEWER_POOL_PCT,
-
-    // Listener rewards (see LISTENER_*_POOL_PCT above): points of the whole for
-    // 3Speak audio and for outside podcast episodes, default 0 until switched on.
-    AD_LISTENER_AUDIO_POOL_PCT: LISTENER_AUDIO_POOL_PCT,
-    AD_LISTENER_PODCAST_POOL_PCT: LISTENER_PODCAST_POOL_PCT,
-    AD_LISTENER_POOL_PCT: LISTENER_POOL_PCT,
+    //
+    // Since 2026-11-09 this is the share for watching AND listening: the old listener
+    // points are folded in (see VIEWER_SHARE_PCT above).
+    AD_VIEWER_POOL_PCT: VIEWER_SHARE_PCT,
     // Listening records of people who agreed to be identified for listening, and
     // only them: one row per (listener, kind, id), written by routes/audioListen.js.
     // Separate from the anonymous `listen-durations` for the same reason as viewers.

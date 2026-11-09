@@ -37,6 +37,7 @@ const { getDb } = require('../utils/db');
 const { adDecision, audioAdDecision, isPremiumViewer } = require('../utils/adEligibility');
 const { linkedAudioPermlink } = require('../utils/linkedAudio');
 const { warmupAudio } = require('../utils/warmupAudio');
+const { liveRoom } = require('../utils/liveRoom');
 const {
   AD_CAMPAIGNS_COLLECTION, AD_CREATIVES_COLLECTION, AD_IMPRESSIONS_COLLECTION, ADVERTISERS_COLLECTION,
   AD_SELFPROMO_ALLOWED_OWNERS, AD_TICKER_ALLOWED_OWNERS, AD_TICKER_FREQUENCY_CAP_MINUTES, AD_AUDIO_COOLDOWN_MINUTES,
@@ -1228,6 +1229,11 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
      *     page's placement maths (positionPercent of that length);
      *   - the session is tagged 'live', and so are its impressions. */
     if (surface === 'live' && !AD_LIVE_ENABLED) return res.json({ ad: null, reason: 'live_ads_off' });
+    /* 🚨 The room must really be a live stream by the host named (utils/liveRoom.js),
+     * asked of the streaming server. A live ad pays its host as a streamer, so without
+     * this anyone could invent a room, name themselves host, and draw on real
+     * advertisers' money. Fails closed: no answer, no ad. */
+    if (surface === 'live' && !(await liveRoom(owner, permlink))) return res.json({ ad: null, reason: 'not_live' });
     const bannerOverlay = surface === 'live' ? true : askedBannerOverlay;
     /* WHICH APPLICATION is playing this, as opposed to `surface`, which is which
      * kind of slot within it. Carried onto the impression so delivery can be read
@@ -2943,6 +2949,7 @@ router.post('/:sid/w', servingVisible, express.json({ limit: '1kb' }), async (re
         owner: session.surface === 'upload' ? session.viewer : session.owner,
         permlink: session.permlink,
         country: session.country || null,
+        ...(session.surface === 'live' ? { live: true } : {}),
       },
       // Never $set alongside $max on the same field — see recordDelivery.
       maxFacts: { watchedSeconds: Math.round(credited * 100) / 100 },
@@ -2978,6 +2985,7 @@ router.post('/:sid/skipped', servingVisible, express.json({ limit: '1kb' }), asy
         // anything. It is a real signal about a spot, and a skipped impression is not
         // the same as one watched to the end even though both are billed.
         skipped: true,
+        ...(session.surface === 'live' ? { live: true } : {}),
       },
       completed: true,
     });
@@ -3209,6 +3217,8 @@ router.get('/:sid/:n', servingVisible, async (req, res) => {
         owner: session.owner,
         permlink: session.permlink,
         country: session.country || null,
+        // A live stream's pre-roll: paid to the host as a streamer (adPayouts.js).
+        ...(session.surface === 'live' ? { live: true } : {}),
       },
       /* 🚨 Watching the PRE-UPLOAD spot does not complete it. Posting does.
        *
