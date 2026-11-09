@@ -2943,6 +2943,7 @@ router.post('/:sid/w', servingVisible, express.json({ limit: '1kb' }), async (re
         owner: session.surface === 'upload' ? session.viewer : session.owner,
         permlink: session.permlink,
         country: session.country || null,
+        ...(session.surface === 'live' ? { live: true } : {}),
       },
       // Never $set alongside $max on the same field — see recordDelivery.
       maxFacts: { watchedSeconds: Math.round(credited * 100) / 100 },
@@ -2978,6 +2979,7 @@ router.post('/:sid/skipped', servingVisible, express.json({ limit: '1kb' }), asy
         // anything. It is a real signal about a spot, and a skipped impression is not
         // the same as one watched to the end even though both are billed.
         skipped: true,
+        ...(session.surface === 'live' ? { live: true } : {}),
       },
       completed: true,
     });
@@ -3209,6 +3211,8 @@ router.get('/:sid/:n', servingVisible, async (req, res) => {
         owner: session.owner,
         permlink: session.permlink,
         country: session.country || null,
+        // A live stream's pre-roll: paid to the host as a streamer (adPayouts.js).
+        ...(session.surface === 'live' ? { live: true } : {}),
       },
       /* 🚨 Watching the PRE-UPLOAD spot does not complete it. Posting does.
        *

@@ -83,13 +83,13 @@ async function seedCampaign(db, period, over = {}) {
 
 let sidSeq = 0;
 /** `n` completed, unpaid impressions of campaign `c` on `owner`'s video. */
-async function seedImpressions(db, c, n, { owner, permlink = 'video', at, period } = {}) {
+async function seedImpressions(db, c, n, { owner, permlink = 'video', at, period, extra = {} } = {}) {
   const when = at || midOf(period);
   const rows = Array.from({ length: n }, () => {
     sidSeq += 1;
     return {
       sid: `sid-${sidSeq}`, campaignId: c._id, owner, permlink,
-      completed: true, completedAt: when, at: when, payoutId: null,
+      completed: true, completedAt: when, at: when, payoutId: null, ...extra,
     };
   });
   if (rows.length) await cols(db).impressions.insertMany(rows);

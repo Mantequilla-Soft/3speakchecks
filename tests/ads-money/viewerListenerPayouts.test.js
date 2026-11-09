@@ -1,16 +1,17 @@
 /**
- * Viewer and listener rewards (services/adPayouts.js payViewers, payListeners and
- * the listener pools inside settlePeriod), and the one merged payout row an account
- * gets when it earned for several reasons in one period (writePayoutRows).
+ * The viewer pool (services/adPayouts.js payViewers), which since 2026-11-09 pays
+ * everyone who watched or listened at one rate per second, each payout labelled
+ * ('viewer', 'stream-viewer', 'listener'); stream hosts paid as 'streamer'; and the
+ * one merged payout row an account gets when it earned for several reasons in one
+ * period (writePayoutRows).
  *
- * Against a real MongoDB. Listener pools are switched on here at the live values
- * (3.5 audio + 1.5 podcast), so the split is 50 / 10 / 3.5 / 1.5 / 2 / 5.
+ * Against a real MongoDB, at the default split 50 creator / 10 viewer / 2 / 5. The
+ * listener points folding into the viewer pool (live: 10 + 3.5 + 1.5 = 15) is
+ * tested on the config itself at the end.
  *
  * Ports scripts/test-ad-viewer-rewards (the payout part), test-ad-payout-safety
  * (case 2) and test-ad-viewer-creator-merge.
  */
-process.env.AD_LISTENER_AUDIO_POOL_PCT = '3.5';
-process.env.AD_LISTENER_PODCAST_POOL_PCT = '1.5';
 
 jest.mock('../../utils/hive', () => ({ ...jest.requireActual('../../utils/hive'), hiveRpcBatch: jest.fn() }));
 
@@ -35,8 +36,10 @@ afterEach(() => jest.useRealTimers());
 
 const watchOf = (viewer) => F.cols(db()).watch.find({ viewer }).toArray();
 
-test('listener pools are on in this file at the live split', () => {
-  expect([cfg.AD_LISTENER_AUDIO_POOL_PCT, cfg.AD_LISTENER_PODCAST_POOL_PCT]).toEqual([3.5, 1.5]);
+test('this file runs at the default split: viewer pool 10, no listener pools', () => {
+  expect(cfg.AD_VIEWER_POOL_PCT).toBe(10);
+  expect(cfg).not.toHaveProperty('AD_LISTENER_AUDIO_POOL_PCT');
+  expect(cfg).not.toHaveProperty('AD_LISTENER_POOL_PCT');
 });
 
 describe('viewers are paid pro rata by qualifying seconds', () => {
@@ -146,69 +149,107 @@ describe('a viewer under the minimum keeps their entitlement', () => {
   });
 });
 
-describe('listeners are paid from their own pool per kind (real database)', () => {
-  test('3Speak audio and outside podcasts are separate pools and separate rows', async () => {
-    await F.seedListens(db(), [['alice', 'audio', 3000], ['bob', 'audio', 1000], ['carol', 'podcast', 500]]);
-    const audio = await P.payListeners(db(), period, 'audio', 4);
-    expect(audio.rows.map((r) => [r.account, r.hbd, r.kind])).toEqual([['alice', 3, 'listener-audio'], ['bob', 1, 'listener-audio']]);
+describe('one pool for watching and listening, each labelled (owner, 2026-11-09)', () => {
+  test('video viewers, stream viewers and listeners share one pool by their seconds', async () => {
+    await F.seedWatches(db(), [['viewer-a', 1200]]);
+    await F.seedWatches(db(), [['stream-b', 600]], { live: true });
+    await F.seedListens(db(), [['carol', 'audio', 100], ['dan', 'podcast', 100]]);
+    const res = await P.payViewers(db(), period, 20);
+    expect(res).toMatchObject({ recipients: 4, paidHbd: 20, carriedOut: 0 });
     const paid = await F.payoutsOf(db(), period.key);
-    expect(paid.alice).toMatchObject({ kind: 'listener-audio', amounts: [{ symbol: 'HBD', amount: 3 }] });
-    // The podcast listener is in the other pool and is left for it.
-    expect((await F.cols(db()).listens.findOne({ listener: 'carol' })).payoutId).toBeNull();
+    expect(Object.fromEntries(Object.entries(paid).map(([a, r]) => [a, [r.hbd, r.kind]]))).toEqual({
+      'viewer-a': [12, 'viewer'], 'stream-b': [6, 'stream-viewer'], carol: [1, 'listener'], dan: [1, 'listener'],
+    });
+    // Both ledgers are claimed, each in its own collection.
+    expect(await F.cols(db()).watch.countDocuments({ payoutId: period.key })).toBe(2);
+    expect(await F.cols(db()).listens.countDocuments({ payoutId: period.key })).toBe(2);
+  });
+
+  test('one account that watched a video, watched a stream and listened: one transfer, every part named', async () => {
+    await F.seedWatches(db(), [['tib', 600]]);
+    await F.seedWatches(db(), [['tib', 300]], { live: true });
+    await F.seedListens(db(), [['tib', 'podcast', 100]]);
+    await P.payViewers(db(), period, 10);
+    const rows = await F.cols(db()).payouts.find({ periodKey: period.key }).toArray();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      account: 'tib', hbd: 10, kind: 'listener+stream-viewer+viewer',
+      parts: { viewer: 6, 'stream-viewer': 3, listener: 1 }, amounts: [{ symbol: 'HBD', amount: 10 }],
+    });
+    expect(P.payoutMemo({ kind: rows[0].kind, periodKey: period.key }))
+      .toBe(`3Speak ad revenue share (listener+stream-viewer+viewer) - ${period.key}`);
+  });
+
+  test('the parts of a split row add up to exactly the rounded total', async () => {
+    await F.seedWatches(db(), [['tib', 1]]);
+    await F.seedWatches(db(), [['tib', 1]], { live: true });
+    await F.seedListens(db(), [['tib', 'audio', 1]]);
+    const res = await P.payViewers(db(), period, 1, null, { defer: true });
+    expect(res.rows.reduce((a, r) => a + r.hbd, 0)).toBeCloseTo(1, 9);
+    expect(res.rows.map((r) => r.hbd).sort()).toEqual([0.333, 0.333, 0.334]);
+  });
+
+  test('the minimum is decided on the account total, so parts too small alone still go out together', async () => {
+    // 0.0006 + 0.0006: each alone is under 0.001, together they are sendable.
+    await F.seedWatches(db(), [['tib', 6]]);
+    await F.seedListens(db(), [['tib', 'audio', 6], ['big', 'audio', 9988]]);
+    const res = await P.payViewers(db(), period, 1, null, { defer: true });
+    expect(res.rows.filter((r) => r.account === 'tib').reduce((a, r) => a + r.hbd, 0)).toBe(0.001);
+    expect((await F.cols(db()).listens.findOne({ listener: 'tib' })).payoutId).toBe(period.key);
   });
 
   test('a listener under the minimum keeps building up; blocked listeners are claimed and leave the denominator', async () => {
     await F.seedListens(db(), [['alice', 'podcast', 9990], ['tiny', 'podcast', 1], ['badadib', 'podcast', 9999]]);
-    const res = await P.payListeners(db(), period, 'podcast', 0.5, { HBD: 0.5 }, { defer: true });
-    expect(res.rows.map((r) => [r.account, r.hbd])).toEqual([['alice', 0.5]]);
-    expect(res.carriedOut).toBe(0);
+    const res = await P.payViewers(db(), period, 0.5, { HBD: 0.5 }, { defer: true });
+    expect(res.rows.map((r) => [r.account, r.hbd, r.kind])).toEqual([['alice', 0.5, 'listener']]);
     const byName = Object.fromEntries((await F.cols(db()).listens.find({}).toArray()).map((r) => [r.listener, r.payoutId]));
     expect(byName).toEqual({ alice: period.key, tiny: null, badadib: period.key });
   });
 
   test('only blocked listeners: claimed, and the whole pool carries', async () => {
     await F.seedListens(db(), [['badadib', 'audio', 100]]);
-    expect(await P.payListeners(db(), period, 'audio', 2)).toMatchObject({ recipients: 0, carriedOut: 2 });
+    expect(await P.payViewers(db(), period, 2)).toMatchObject({ recipients: 0, carriedOut: 2 });
     expect((await F.cols(db()).listens.findOne({ listener: 'badadib' })).payoutId).toBe(period.key);
   });
 
-  test('rows with no seconds or no listener name earn nothing', async () => {
+  test('listen rows with no seconds or no listener name earn nothing', async () => {
     await F.seedListens(db(), [['alice', 'audio', 100], [null, 'audio', 100], ['bob', 'audio', 0]]);
-    const res = await P.payListeners(db(), period, 'audio', 2, null, { defer: true });
+    const res = await P.payViewers(db(), period, 2, null, { defer: true });
     expect(res.rows.map((r) => [r.account, r.hbd])).toEqual([['alice', 1]]);
     expect(res.carriedOut).toBe(1);
   });
 });
 
-describe('listener pools inside a settlement', () => {
-  test('a shown period funds 3.5 audio and 1.5 podcast, each shared by its own listeners', async () => {
+describe('inside a settlement', () => {
+  test('listeners are paid from the shown period\'s viewer pool, next to the viewers', async () => {
     const c = await F.seedCampaign(db(), period);
     await F.seedImpressions(db(), c, 1, { owner: 'creator-x', period });
-    await F.seedListens(db(), [['alice', 'audio', 600], ['bob', 'audio', 600], ['carol', 'podcast', 60]]);
+    await F.seedWatches(db(), [['bob', 500]]);
+    await F.seedListens(db(), [['alice', 'audio', 250], ['carol', 'podcast', 250]]);
     await P.settlePeriod(db(), period);
     const paid = await F.payoutsOf(db(), period.key);
-    expect([paid.alice.hbd, paid.bob.hbd, paid.carol.hbd]).toEqual([1.75, 1.75, 1.5]);
-    expect(paid.carol.kind).toBe('listener-podcast');
+    expect([paid.bob.hbd, paid.alice.hbd, paid.carol.hbd]).toEqual([5, 2.5, 2.5]);
+    expect([paid.bob.kind, paid.alice.kind, paid.carol.kind]).toEqual(['viewer', 'listener', 'listener']);
     const doc = await F.cols(db()).periods.findOne({ _id: period.key });
-    expect(doc.listeners).toEqual({
-      audio: { poolHbd: 3.5, recipients: 2, paidHbd: 3.5, carriedIn: 0, carriedOut: 0, carriedOutAssets: {} },
-      podcast: { poolHbd: 1.5, recipients: 1, paidHbd: 1.5, carriedIn: 0, carriedOut: 0, carriedOutAssets: {} },
-    });
+    expect(doc).toMatchObject({ viewerPoolHbd: 10, viewerPaidHbd: 10, viewerRecipients: 3 });
+    expect(doc).not.toHaveProperty('listeners');
   });
 
-  test('a listener pool nobody qualified for carries into the next period, in its asset', async () => {
-    const c = await F.seedCampaign(db(), period, { paidAssets: { HIVE: 400 } });
-    await F.seedImpressions(db(), c, 1, { owner: 'creator-x', period });
-    await P.settlePeriod(db(), period);
-    const doc = await F.cols(db()).periods.findOne({ _id: period.key });
-    expect(doc.listeners.audio).toMatchObject({ poolHbd: 3.5, carriedOut: 3.5, carriedOutAssets: { HIVE: 14 } });
-
-    // Next period nothing is shown, but the carried audio pool still goes out.
+  test('what an old listener pool carried (before 2026-11-09) is paid from the viewer pool, in its assets', async () => {
+    await F.cols(db()).periods.insertOne({
+      _id: period.key, status: 'settled', endAt: period.end, carryTo: next.key,
+      viewerCarriedOut: 0.5, viewerCarriedOutAssets: { HBD: 0.5 },
+      listeners: {
+        audio: { carriedOut: 3.5, carriedOutAssets: { HIVE: 14 } },
+        podcast: { carriedOut: 1.5, carriedOutAssets: { HBD: 1.5 } },
+      },
+    });
     await F.seedListens(db(), [['alice', 'audio', 100]]);
     await P.settlePeriod(db(), next);
     const row = (await F.payoutsOf(db(), next.key)).alice;
-    expect(row).toMatchObject({ hbd: 3.5, kind: 'listener-audio', amounts: [{ symbol: 'HIVE', amount: 14 }] });
-    expect((await F.cols(db()).periods.findOne({ _id: next.key })).listeners.audio.carriedIn).toBe(3.5);
+    expect(row).toMatchObject({ hbd: 5.5, kind: 'listener' });
+    expect(Object.fromEntries(row.amounts.map((l) => [l.symbol, l.amount]))).toEqual({ HIVE: 14, HBD: 2 });
+    expect((await F.cols(db()).periods.findOne({ _id: next.key })).viewerCarriedIn).toBe(5.5);
   });
 
   test('the platform keeps what is left: the encoder cut still comes out of it', async () => {
@@ -218,6 +259,36 @@ describe('listener pools inside a settlement', () => {
     const paid = await F.payoutsOf(db(), period.key);
     expect(paid[cfg.AD_ENCODER_ACCOUNT].hbd).toBe(5);
     expect(paid['creator-x'].hbd).toBe(50);
+  });
+});
+
+describe('stream hosts are paid as streamers (owner, 2026-11-09)', () => {
+  test('an ad shown on a live stream pays the host the full share, labelled streamer', async () => {
+    const c = await F.seedCampaign(db(), period);
+    await F.seedImpressions(db(), c, 4, { owner: 'host1', permlink: 'room-1', period, extra: { live: true } });
+    await P.settlePeriod(db(), period);
+    const paid = await F.payoutsOf(db(), period.key);
+    expect(paid.host1).toMatchObject({ hbd: 50, kind: 'streamer', parts: { streamer: 50 } });
+  });
+
+  test('a host whose videos and streams both carried ads: one transfer, creator and streamer named', async () => {
+    const c = await F.seedCampaign(db(), period);
+    await F.seedImpressions(db(), c, 3, { owner: 'tib', period });
+    await F.seedImpressions(db(), c, 1, { owner: 'tib', permlink: 'room-1', period, extra: { live: true } });
+    await P.settlePeriod(db(), period);
+    const rows = await F.cols(db()).payouts.find({ periodKey: period.key, account: 'tib' }).toArray();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ hbd: 50, kind: 'creator+streamer', parts: { creator: 37.5, streamer: 12.5 } });
+    expect(P.payoutMemo(rows[0])).toBe(`3Speak ad revenue share (creator+streamer) - ${period.key}`);
+  });
+
+  test('every kind someone earns for themselves counts toward their referrer\'s bonus', async () => {
+    const row = (kind, hbd) => ({ account: 'newbie', kind, hbd, amounts: [{ symbol: 'HBD', amount: hbd }] });
+    const earner = [row('streamer', 1), row('stream-viewer', 0.5), row('listener', 0.5)];
+    const b = await P.planEarnerReferralBonus(db(), earner, period, 100, F.stubDeps({
+      referrals: { newbie: { referrer: 'alice', source: 'link', referredAt: period.start } }, real: ['alice'],
+    }));
+    expect(b.rows).toEqual([{ account: 'alice', hbd: 0.2, amounts: [{ symbol: 'HBD', amount: 0.2 }], kind: 'earner-referral' }]);
   });
 });
 
@@ -257,8 +328,9 @@ describe('one row per account per period, holding every reason it was paid', () 
     await F.seedListens(db(), [['tib', 'audio', 10]]);
     await P.settlePeriod(db(), period);
     const row = (await F.payoutsOf(db(), period.key)).tib;
-    expect(row).toMatchObject({ hbd: 63.5, parts: { creator: 50, viewer: 10, 'listener-audio': 3.5 } });
-    expect(row.kind.split('+').sort()).toEqual(['creator', 'listener-audio', 'viewer']);
+    // Watching and listening share the one viewer pool (10), half each by seconds.
+    expect(row).toMatchObject({ hbd: 60, parts: { creator: 50, viewer: 5, listener: 5 } });
+    expect(row.kind).toBe('creator+listener+viewer');
   });
 
   /* BUG (services/adPayouts.js:706), cosmetic but it reaches the transfer memo. The
@@ -316,5 +388,27 @@ describe('one row per account per period, holding every reason it was paid', () 
     expect(written).toHaveLength(1);
     expect(written[0]).toMatchObject({ hbd: 3, kind: 'creator', parts: { creator: 3 } });
     expect(written[0].amounts).toEqual([{ symbol: 'HBD', amount: 1 }, { symbol: 'HIVE', amount: 8 }]);
+  });
+});
+
+describe('the split: listener points fold into the viewer pool', () => {
+  const load = (env) => {
+    const saved = { ...process.env };
+    Object.assign(process.env, env);
+    let out;
+    jest.isolateModules(() => { out = require('../../utils/config'); });
+    process.env = saved;
+    return out;
+  };
+
+  test('the live .env (viewer 10, audio 3.5, podcast 1.5) is a viewer pool of 15 with no change to the file', () => {
+    const c = load({ AD_VIEWER_POOL_PCT: '10', AD_LISTENER_AUDIO_POOL_PCT: '3.5', AD_LISTENER_PODCAST_POOL_PCT: '1.5' });
+    expect(c.AD_VIEWER_POOL_PCT).toBe(15);
+    expect([c.AD_REFERRAL_POOL_PCT, c.AD_ENCODER_POOL_PCT]).toEqual([2, 5]);
+  });
+
+  test('the tidied .env (viewer 15, no listener keys) is the same split', () => {
+    const c = load({ AD_VIEWER_POOL_PCT: '15', AD_LISTENER_AUDIO_POOL_PCT: '', AD_LISTENER_PODCAST_POOL_PCT: '' });
+    expect(c.AD_VIEWER_POOL_PCT).toBe(15);
   });
 });

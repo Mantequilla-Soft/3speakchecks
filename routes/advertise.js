@@ -56,7 +56,6 @@ const {
   AD_VIEWER_PREFS_COLLECTION,
   AD_VIEWER_WATCH_COLLECTION,
   AD_LISTENER_LISTEN_COLLECTION,
-  AD_LISTENER_POOL_PCT,
   HIVE_AUTH_REQUIRED,
   SIGNATURE_TIMESTAMP_TOLERANCE_MS,
   AD_APPLY_MAX_PER_WINDOW,
@@ -163,8 +162,10 @@ function splitOf(doc) {
   // platform's own cut, so the creator side is the same number whether or not anyone
   // watching is opted in.
   const viewerPct = round1(AD_VIEWER_POOL_PCT);
-  // Listener rewards, from the platform side too (0 until switched on in .env).
-  const listenerPct = round1(AD_LISTENER_POOL_PCT);
+  // Listeners are paid from the viewer pool since 2026-11-09 (utils/config.js
+  // VIEWER_SHARE_PCT), so they have no share of their own any more. Still sent, as
+  // 0, for any client that reads the field.
+  const listenerPct = 0;
   return {
     poolPct: AD_CREATOR_POOL_PCT,
     communityPct,

@@ -1,6 +1,7 @@
 /**
- * Listener rewards in the ad payout (services/adPayouts.js payListeners and the
- * per-reason breakdown in writePayoutRows), against an in-memory database.
+ * Listener rewards in the ad payout (services/adPayouts.js payViewers, which pays
+ * listeners from the viewer pool since 2026-11-09, and the per-reason breakdown in
+ * writePayoutRows), against an in-memory database.
  * Nothing here talks to Mongo or Hive.
  */
 const { ObjectId } = require('mongodb');
@@ -35,30 +36,31 @@ const row = (listener, kind, seconds, extra = {}) => ({ listener, kind, id: `${k
 let pay;
 beforeAll(() => {
   jest.spyOn(console, 'log').mockImplementation(() => {});
-  ({ payListeners: pay } = require('../services/adPayouts'));
+  ({ payViewers: pay } = require('../services/adPayouts'));
 });
 
-describe('payListeners', () => {
-  test('a pool at 0% pays nobody and claims nothing (listener rewards are off by default)', async () => {
+describe('listeners in the viewer pool', () => {
+  test('an empty pool pays nobody and claims nothing', async () => {
     const db = fakeDb({ ad_listener_listen: [row('alice', 'audio', 600)] });
-    expect(await pay(db, period, 'audio', 0)).toEqual({ recipients: 0, paidHbd: 0, carriedOut: 0, rows: [] });
+    expect(await pay(db, period, 0)).toEqual({ recipients: 0, paidHbd: 0, carriedOut: 0, rows: [] });
     expect(db.data.ad_listener_listen[0].payoutId).toBeNull();
   });
 
-  test('shares one kind\'s pool by that kind\'s seconds, and labels the rows', async () => {
+  test('3Speak audio and outside podcasts are one label, shared with viewers by seconds', async () => {
     const db = fakeDb({
-      ad_listener_listen: [row('alice', 'audio', 3000), row('bob', 'audio', 1000), row('carol', 'podcast', 9999)],
+      ad_listener_listen: [row('alice', 'audio', 3000), row('carol', 'podcast', 1000)],
+      ad_viewer_watch: [{ viewer: 'bob', owner: 'x', permlink: 'v', contentSeconds: 1000, payoutId: null }],
     });
-    const res = await pay(db, period, 'audio', 4, null, { defer: true });
-    expect(res.rows.map((r) => [r.account, r.hbd, r.kind])).toEqual([['alice', 3, 'listener-audio'], ['bob', 1, 'listener-audio']]);
-    // The podcast listener is in another pool and stays unpaid and unclaimed.
-    expect(db.data.ad_listener_listen.find((r) => r.listener === 'carol').payoutId).toBeNull();
+    const res = await pay(db, period, 5, null, { defer: true });
+    expect(res.rows.map((r) => [r.account, r.hbd, r.kind]).sort()).toEqual([
+      ['alice', 3, 'listener'], ['bob', 1, 'viewer'], ['carol', 1, 'listener'],
+    ]);
     expect(db.data.ad_listener_listen.filter((r) => r.payoutId === period.key)).toHaveLength(2);
   });
 
   test('nobody qualified: the whole pool carries to the next period', async () => {
     const db = fakeDb({ ad_listener_listen: [] });
-    expect((await pay(db, period, 'podcast', 1.5)).carriedOut).toBe(1.5);
+    expect((await pay(db, period, 1.5)).carriedOut).toBe(1.5);
   });
 
   test('blocked accounts leave the denominator and are not paid', async () => {
@@ -66,14 +68,14 @@ describe('payListeners', () => {
       ad_listener_listen: [row('alice', 'audio', 1000), row('spammer', 'audio', 1000)],
       contentcreators: [{ username: 'spammer', adRewardDisabled: true }],
     });
-    const res = await pay(db, period, 'audio', 2, null, { defer: true });
+    const res = await pay(db, period, 2, null, { defer: true });
     expect(res.rows.map((r) => [r.account, r.hbd])).toEqual([['alice', 2]]);
   });
 
   test('a settlement run twice pays a listen once', async () => {
     const db = fakeDb({ ad_listener_listen: [row('alice', 'audio', 1000)] });
-    await pay(db, period, 'audio', 1, null, { defer: true });
-    const again = await pay(db, period, 'audio', 1, null, { defer: true });
+    await pay(db, period, 1, null, { defer: true });
+    const again = await pay(db, period, 1, null, { defer: true });
     expect(again.rows).toEqual([]);
   });
 });

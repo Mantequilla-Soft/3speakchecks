@@ -316,6 +316,13 @@ describe('GET /m/:sid/:n, the measured segments', () => {
     expect((await db().collection(config.AD_CAMPAIGNS_COLLECTION).findOne({ _id: s.campaignId })).deliveredImpressions).toBe(1);
   });
 
+  test('a live stream\'s pre-roll completing on its closing segment is tagged live', async () => {
+    cdn();
+    const s = await session({ surface: 'live', adFirstFetchAt: fx.ago(60 * 1000) });
+    await seg(s, 'b').expect(302);
+    expect(await impression(s.sid)).toMatchObject({ completed: true, live: true });
+  });
+
   test('a one-segment spot completes on its single measured fetch', async () => {
     cdn({ [SPOT]: fx.mediaPlaylist([5]) });
     const s = await session({ adFirstFetchAt: fx.ago(10 * 1000) });

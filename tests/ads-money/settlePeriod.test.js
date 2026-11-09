@@ -35,10 +35,10 @@ afterEach(() => jest.useRealTimers());
 const periodDoc = (key = period.key) => F.cols(db()).periods.findOne({ _id: key });
 
 describe('the defaults this file is written against', () => {
-  test('creator 50, viewer 10, referrer 2, encoder 5, listeners off, nobody shares with a community', () => {
+  test('creator 50, viewer 10 (listeners share it), referrer 2, encoder 5, nobody shares with a community', () => {
     expect([cfg.AD_CREATOR_POOL_PCT, cfg.AD_VIEWER_POOL_PCT, cfg.AD_REFERRAL_POOL_PCT, cfg.AD_ENCODER_POOL_PCT])
       .toEqual([50, 10, 2, 5]);
-    expect([cfg.AD_LISTENER_AUDIO_POOL_PCT, cfg.AD_LISTENER_PODCAST_POOL_PCT, cfg.AD_DEFAULT_COMMUNITY_PCT]).toEqual([0, 0, 0]);
+    expect(cfg.AD_DEFAULT_COMMUNITY_PCT).toBe(0);
     expect(cfg.AD_EXCLUDED_ACCOUNTS).toEqual(['badadib']);
     expect(period).toEqual({
       key: '2026-10-01', start: new Date('2026-10-01T07:00:00Z'), end: new Date('2026-10-04T07:00:00Z'),
