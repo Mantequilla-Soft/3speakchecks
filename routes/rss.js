@@ -31,6 +31,7 @@ const { hiveRpcBatch } = require('../utils/hive');
 const { decodePlaylistMeta } = require('../utils/playlistMeta');
 const { storedPlaylistType } = require('../utils/playlistType');
 const { renderCover } = require('../utils/podcastCover');
+const { createConcurrencyGate } = require('../utils/concurrencyGate');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const PAGE_DOMAIN = process.env.RSS_FEED_BASE_URL || 'https://3speak.tv';
@@ -58,6 +59,16 @@ const FEED_LIMIT = parseInt(process.env.RSS_FEED_LIMIT, 10) || 30;
 // A playlist feed is the whole series (someone subscribing to a 30-day
 // challenge wants every day), so it carries far more than a channel feed.
 const PLAYLIST_FEED_LIMIT = parseInt(process.env.RSS_PLAYLIST_FEED_LIMIT, 10) || 300;
+
+// At most this many feeds build at once, with a short queue behind them (see
+// utils/concurrencyGate.js): a podcast-index crawl must never take the whole
+// Mongo pool from the rest of the checker. Both feed routes share the one gate.
+const feedGate = createConcurrencyGate({
+    name: 'rss',
+    max: parseInt(process.env.RSS_MAX_CONCURRENT, 10) || 8,
+    maxQueue: parseInt(process.env.RSS_MAX_QUEUE, 10) || 32,
+    queueTimeoutMs: parseInt(process.env.RSS_QUEUE_TIMEOUT_MS, 10) || 15000,
+});
 
 // Feed covers go through nginx's image cache (snippets/3speak-img.conf,
 // /img/c/ -> /rss/cover/ here), which keeps each rendered JPEG on disk.
@@ -867,7 +878,7 @@ router.get('/playlist/:id/card.json', async (req, res) => {
  * series (a daily show, a 30-day challenge) without the rest of the channel.
  * Episodes by other creators keep their own author and value block.
  */
-router.get('/playlist/:id.xml', async (req, res) => {
+router.get('/playlist/:id.xml', feedGate, async (req, res) => {
     const db = getDb();
     const { id } = req.params;
 
@@ -933,7 +944,7 @@ router.get('/playlist/:id.xml', async (req, res) => {
  * Returns a Podcast 2.0-compatible RSS feed for the given 3Speak channel.
  * If the user is banned or has no published videos, returns an empty feed.
  */
-router.get('/:username.xml', async (req, res) => {
+router.get('/:username.xml', feedGate, async (req, res) => {
     const db = getDb();
     const { username } = req.params;
 
