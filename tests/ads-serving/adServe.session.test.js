@@ -4,7 +4,7 @@
  * frequency cap, premium) and scripts/test-ad-banner-video.cjs (a video banner rides
  * the session as a manifest, not an image).
  *
- * The gates, in the order the route runs them: stage, rate limit, datacenter, input,
+ * The gates, in the order the route runs them: stage, rate limit, datacenter, crawler, input,
  * one ad per network per video per day, the creator's own connection, the eligibility
  * decision, the quiet period, short videos; then the approval gate, servability, the
  * per-format caps, markets and length targeting; then least-delivered first, one
@@ -422,6 +422,17 @@ describe('caps keyed on the caller\'s network', () => {
     await fx.seed(db(), fx.placement().all);
     expect((await open({}, { ip: '203.0.113.50' })).body).toEqual({ ad: null, reason: 'datacenter' });
     expect((await open({}, { headers: { 'X-Real-IP': '', 'X-Forwarded-For': '203.0.113.9, 10.0.0.1' } })).body.reason).toBe('datacenter');
+  });
+
+  test('crawlers that render the page get no ad, and no session is written for them', async () => {
+    await fx.seed(db(), fx.placement().all);
+    const applebot = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15 (Applebot/0.1; +http://www.apple.com/go/applebot)';
+    const before = await db().collection(SESSIONS).countDocuments();
+    expect((await open({}, { headers: { 'User-Agent': applebot } })).body).toEqual({ ad: null, reason: 'crawler' });
+    expect(await db().collection(SESSIONS).countDocuments()).toBe(before);
+    // The same request from a browser is served.
+    const chrome = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36';
+    expect((await open({}, { headers: { 'User-Agent': chrome } })).body.ad).not.toBeNull();
   });
 });
 
