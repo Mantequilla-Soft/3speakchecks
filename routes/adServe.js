@@ -56,6 +56,7 @@ const { knownShape, shapeWithin, targetFor, conformedSegment, conformOn } = requ
 const { formatOf } = require('../utils/adFormats');
 const { burnSegment } = require('../services/adBurner');
 const { isDatacenterIp } = require('../utils/datacenterIp');
+const { isCrawlerUa } = require('../utils/crawlerUa');
 const {
   AUDIO_TICKER_ENABLED, AUDIO_TICKER_ALLOWED_OWNERS, audioTickerAllowedOn, readyRendersFor, ttsFilePath,
 } = require('../utils/adTts');
@@ -1184,6 +1185,10 @@ router.post('/session', express.json({ limit: '8kb' }), async (req, res) => {
     // Hosting ranges (clouds, VPS, datacenter VPNs): no real viewer browses from
     // one, a script does. Same offline list as ButrAuth's signup gate; fails open.
     if (isDatacenterIp(callerIp(req))) return res.json({ ad: null, reason: 'datacenter' });
+    // Crawlers that render watch pages run the player too. Handing them an ad records
+    // an "impression" nobody saw, which dilutes every real creator's share and tells
+    // the advertiser it was delivered. Only agents that say they are automated.
+    if (isCrawlerUa(req.get('user-agent'))) return res.json({ ad: null, reason: 'crawler' });
     await ensureSessionIndexes();
 
     const b = req.body || {};
