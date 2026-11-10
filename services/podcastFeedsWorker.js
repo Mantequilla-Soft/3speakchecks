@@ -110,7 +110,9 @@ async function writeEpisodes(feed, episodes, { firstFetch, prune }) {
   const announced = new Set(announce.map((r) => r._id));
 
   const ops = rows.map((r) => {
-    const { _id, guid, ...fields } = r;
+    const { _id, ...fields } = r;
+    // Kept for a 3Speak playlist's RSS feed, which passes the episode on under its own guid.
+    fields.guid = String(r.guid).slice(0, 500);
     // Seen "now" only for what we announce; everything else is dated by its own
     // pubDate, so it can never show up as a new-episode notification later.
     const firstSeen = announced.has(_id) ? now : (r.published_at && r.published_at < now ? r.published_at : now);
@@ -270,7 +272,7 @@ const hostOf = (url) => { try { return new URL(url).hostname; } catch (_) { retu
 async function tick() {
   await connect();
   const due = await db.collection(FEEDS)
-    .find({ next_poll_at: { $lte: new Date() }, subscribers: { $gt: 0 } })
+    .find({ next_poll_at: { $lte: new Date() }, $or: [{ subscribers: { $gt: 0 } }, { playlist_refs: { $gt: 0 } }] })
     .sort({ next_poll_at: 1 }).limit(TICK_BATCH).toArray();
   // At most PER_HOST feeds per host per tick: an OPML full of anchor.fm shows
   // should not look like an attack on anchor.fm. The rest stay due for next tick.

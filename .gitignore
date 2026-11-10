@@ -17,3 +17,7 @@ internal-docs/
 
 # test coverage reports
 coverage/
+
+# datacenter IP ranges, regenerated daily by services/ipRanges.js
+data/datacenter-ranges.json
+data/datacenter-ranges.json.tmp

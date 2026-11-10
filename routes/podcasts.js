@@ -22,11 +22,15 @@
  *   GET  /podcasts/art/:token/:px.jpg              cover art, see utils/podcastArt.js
  *   GET  /podcasts/progress?user=&ids=|&feed=      how far the user got in episodes
  *   POST /podcasts/progress                        save that (session vouch, below)
+ *   POST /podcasts/bundle   { urls, cursor?, limit? }   the shows a 3Speak playlist names
+ *                           and their episodes merged by date (utils/playlistFeeds.js)
  *
  * Writes, signed:
  *   POST /podcasts/subscribe   { user, urls: [..], titles?: [..], private?: [..], signature, timestamp }
  *   POST /podcasts/unsubscribe { user, feed_id, signature, timestamp }
  *   POST /podcasts/notify      { user, feed_id, notify, signature, timestamp }
+ *   POST /podcasts/resolve     { user, url, signature, timestamp }   check a show before
+ *                              a playlist owner adds it (no follow; public feeds only)
  *
  * Proof of who is asking, either:
  * - a VOUCH from our own API (`<action>-vouch`, signed by @threespeak's posting key
@@ -63,6 +67,7 @@ const media = require('../utils/podcastMedia');
 const { artToken, urlFromToken, renderArt, SIZES } = require('../utils/podcastArt');
 const podcastFeeds = require('../services/podcastFeeds');
 const directories = require('../utils/podcastDirectories');
+const { MAX_PLAYLIST_FEEDS, feedRefs, findFeedsFor, internalOwner } = require('../utils/playlistFeeds');
 
 const router = express.Router();
 const { FEEDS, EPISODES, SUBS, PROGRESS } = podcastFeeds.collections;
@@ -1038,10 +1043,19 @@ router.post('/progress/hide', express.json({ limit: '2kb' }), async (req, res) =
 
 // ─── Writes ───────────────────────────────────────────────────────────────────
 
-/** 3Speak's own channel feeds belong in the 3Speak tab, not here. */
-function internalOwner(key) {
-  const m = key.match(/^(?:[a-z0-9-]+\.)?3speak\.tv\/rss\/([a-z0-9.-]+)\.xml$/);
-  return m ? m[1] : null;
+/**
+ * Fetch a public feed URL we have no working row for, through the worker. A show's
+ * website rather than its feed: try the feed the page announces (`resolved_url`).
+ */
+async function probePublic(url, key) {
+  const r = await podcastFeeds.ask('probe', { url }, 35000);
+  if (r.ok || (r.code !== 'not_a_podcast' && r.code !== 'parse_error')) return r;
+  const found = await directories.discoverFeed(url);
+  if (!found || urlKey(found) === key) return r;
+  if (internalOwner(urlKey(found))) return { ok: false, code: 'internal_feed' };
+  const known = await getDb().collection(FEEDS).findOne({ $or: [{ url_key: urlKey(found) }, { alt_keys: urlKey(found) }] }, { projection: { _id: 1, last_ok_at: 1 } });
+  const again = known && known.last_ok_at ? { ok: true, feed_id: known._id.toHexString() } : await podcastFeeds.ask('probe', { url: found }, 35000);
+  return again.ok ? { ...again, resolved_url: found } : again;
 }
 
 router.post('/subscribe', express.json({ limit: '256kb' }), async (req, res) => {
@@ -1108,18 +1122,10 @@ router.post('/subscribe', express.json({ limit: '256kb' }), async (req, res) => 
 
     if (single && (!feed || !feed.last_ok_at)) {
       // One URL: fetch it now, so the person learns right away whether it is a podcast.
-      let r = await podcastFeeds.ask('probe', isPrivate ? { url, private: true, owner: user } : { url }, 35000);
-      // A show's website rather than its feed: try the feed the page announces.
-      if (!isPrivate && !r.ok && (r.code === 'not_a_podcast' || r.code === 'parse_error')) {
-        const found = await directories.discoverFeed(url);
-        if (found && urlKey(found) !== key && internalOwner(urlKey(found))) {
-          r = { ok: false, code: 'internal_feed' };
-        } else if (found && urlKey(found) !== key) {
-          const known = await feeds.findOne({ $or: [{ url_key: urlKey(found) }, { alt_keys: urlKey(found) }] }, { projection: { _id: 1, last_ok_at: 1 } });
-          r = known && known.last_ok_at ? { ok: true, feed_id: known._id.toHexString() } : await podcastFeeds.ask('probe', { url: found }, 35000);
-          if (r.ok) out.resolved_url = found;
-        }
-      }
+      const r = isPrivate
+        ? await podcastFeeds.ask('probe', { url, private: true, owner: user }, 35000)
+        : await probePublic(url, key);
+      if (r.resolved_url) out.resolved_url = r.resolved_url;
       if (!r.ok) { out.code = r.code || 'error'; continue; }
       feed = { _id: new ObjectId(r.feed_id) };
     } else if (!feed) {
@@ -1178,6 +1184,105 @@ router.post('/unsubscribe', express.json({ limit: '4kb' }), async (req, res) => 
   } catch (err) {
     console.error('[podcasts] unsubscribe:', err.message);
     res.status(500).json({ success: false, error: 'could not unfollow' });
+  }
+});
+
+// ─── Shows inside 3Speak playlists ────────────────────────────────────────────
+
+/**
+ * A playlist owner is about to add a show: find or fetch it (a directory link or
+ * the show's website work as on subscribe) and answer with the feed URL to store
+ * in the playlist. Signed like a follow, because it can make us fetch a new URL
+ * and store a row; nobody follows anything.
+ */
+router.post('/resolve', express.json({ limit: '8kb' }), async (req, res) => {
+  if (!podcastFeeds.enabled()) return disabled(res);
+  const b = req.body || {};
+  const raw = typeof b.url === 'string' ? b.url.trim() : '';
+  if (!raw || raw.length > 2000) return res.status(400).json({ success: false, error: 'url required' });
+  const proof = await proveUser(b, 'resolve', urlsDigest([raw]));
+  if (proof.error) return res.status(proof.error[0]).json({ success: false, error: proof.error[1], expected_message: proof.expected_message });
+  if (tooMany(proof.user)) return res.status(429).json({ success: false, error: 'too many changes, try again later' });
+  // A playlist is public on chain: never a password or token in it.
+  if (splitCredentials(raw).auth) return res.json({ success: false, code: 'private_feed' });
+  try {
+    const resolved = await directories.resolveLink(raw);
+    if (resolved.code) return res.json({ success: false, ...resolved });
+    const url = resolved.url;
+    try { checkUrl(url); } catch (err) { return res.json({ success: false, code: err.code || 'bad_url' }); }
+    const key = urlKey(url);
+    const owner = internalOwner(key);
+    if (owner) return res.json({ success: false, code: 'internal_feed', owner });
+    const feeds = getDb().collection(FEEDS);
+    let feed = await feeds.findOne({ $or: [{ url_key: key }, { alt_keys: key }], private: { $ne: true } });
+    if (!feed || !feed.last_ok_at) {
+      const r = await probePublic(url, key);
+      if (!r.ok) return res.json({ success: false, code: r.code || 'error' });
+      feed = await feeds.findOne({ _id: new ObjectId(r.feed_id) });
+      if (!feed) return res.json({ success: false, code: 'error' });
+    }
+    await fillMissingArt([feed]);
+    res.json({ success: true, feed: presentFeed(feed, { subscribers: feed.subscribers || 0 }) });
+  } catch (err) {
+    console.error('[podcasts] resolve:', err.message);
+    res.status(500).json({ success: false, error: 'could not check the show' });
+  }
+});
+
+const BUNDLE_PAGE = 30;
+// `<published_at ISO>|<episode id>`: the last episode of the page before.
+const CURSOR_RE = /^(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\|([0-9a-f]{24}:[A-Za-z0-9_-]{16})$/;
+
+/**
+ * The outside shows of a 3Speak playlist and their episodes, newest first. The page
+ * sends the playlist's feed URLs (it has read the playlist, private or not); a URL
+ * we have no row for yet comes back in `missing` (the next playlist sync adds it).
+ */
+router.post('/bundle', express.json({ limit: '64kb' }), async (req, res) => {
+  const b = req.body || {};
+  if (!Array.isArray(b.urls) || b.urls.length > MAX_PLAYLIST_FEEDS * 2) {
+    return res.status(400).json({ success: false, error: `urls must be a list of at most ${MAX_PLAYLIST_FEEDS} feed URLs` });
+  }
+  const limit = Math.min(60, Math.max(1, parseInt(b.limit, 10) || BUNDLE_PAGE));
+  let after = null;
+  if (b.cursor) {
+    const m = CURSOR_RE.exec(String(b.cursor));
+    if (!m) return res.status(400).json({ success: false, error: 'invalid cursor' });
+    after = { at: new Date(m[1]), id: m[2] };
+  }
+  const refs = feedRefs(b.urls);
+  try {
+    const byKey = await findFeedsFor(getDb(), refs);
+    const rows = [...new Map([...byKey.values()].map((f) => [f._id.toHexString(), f])).values()];
+    await fillMissingArt(rows);
+    const ids = rows.map((f) => f._id);
+    const q = { feed_id: { $in: ids } };
+    if (after) q.$or = [{ published_at: { $lt: after.at } }, { published_at: after.at, _id: { $lt: after.id } }];
+    const col = getDb().collection(EPISODES);
+    const [eps, total] = await Promise.all([
+      ids.length ? col.find(q, { projection: EPISODE_LIST }).sort({ published_at: -1, _id: -1 }).limit(limit).toArray() : [],
+      ids.length && !after ? col.countDocuments({ feed_id: { $in: ids } }) : null,
+    ]);
+    const shown = new Set();
+    const feedsOut = [];
+    for (const ref of refs) {
+      const f = byKey.get(ref.key);
+      if (!f || shown.has(f._id.toHexString())) continue;
+      shown.add(f._id.toHexString());
+      feedsOut.push(presentFeed(f));
+    }
+    const last = eps.length === limit ? eps[eps.length - 1] : null;
+    res.json({
+      success: true,
+      feeds: feedsOut,
+      episodes: eps.map(presentEpisode),
+      ...(total !== null ? { total } : {}),
+      next_cursor: last && last.published_at ? `${last.published_at.toISOString()}|${last._id}` : null,
+      missing: refs.filter((r) => !byKey.has(r.key)).map((r) => r.url),
+    });
+  } catch (err) {
+    console.error('[podcasts] bundle:', err.message);
+    res.status(500).json({ success: false, error: 'could not load the shows' });
   }
 });
 
