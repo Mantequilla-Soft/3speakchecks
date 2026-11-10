@@ -73,6 +73,8 @@ describe('server.js job gate', () => {
     'startFeedPoolWarmer(getDb)',
     'adSettings.schedule()',
     'podcastFeeds.start({ shared: BACKGROUND_JOBS })',
+    // Each box reads its own range file; without it the ad datacenter gate fails open.
+    "require('./services/ipRanges').start()",
   ])('%s runs on every instance', (call) => {
     expect(at(call)).toBeLessThan(gate);
   });

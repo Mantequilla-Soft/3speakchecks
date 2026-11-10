@@ -215,6 +215,11 @@ async function startServer() {
     // the polling, gc and podping run on the background-jobs instance only.
     podcastFeeds.start({ shared: BACKGROUND_JOBS });
 
+    // Datacenter IP ranges for the ad server (utils/datacenterIp.js): refresh the
+    // checker's own copy daily. EVERY instance, replicas too: each box reads its own
+    // file, and without one the ad gate fails open. Fetch-only, writes no shared data.
+    require('./services/ipRanges').start();
+
     // ── Shared jobs: ONE instance only. Everything below writes shared data, moves
     // money or broadcasts to Hive (payouts, scheduled posts, follows, syncs, scans),
     // so a second instance on the same Mongo would do all of it twice. Replicas set

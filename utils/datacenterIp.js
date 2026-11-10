@@ -6,10 +6,17 @@
  * does. Reflectionbot ran from 16.216.88.0/23 and generated one paid impression
  * per page load before it was caught (2026-09-28).
  *
- * CommonJS port of butrauth/backend/src/services/ip-intel.js, reading the SAME
- * file that ButrAuth's refresh timer (butrauth-ip-ranges-prod.service) rewrites
- * nightly, so both services judge an address identically. Keep the parsing and
+ * CommonJS port of butrauth/backend/src/services/ip-intel.js. Keep the parsing and
  * coalescing in step with that file.
+ *
+ * Which file (first match wins, re-decided on every recheck):
+ *   1. AD_DATACENTER_RANGES_PATH, when set.
+ *   2. data/datacenter-ranges.json, the checker's own copy, written daily by
+ *      services/ipRanges.js on every instance.
+ *   3. ButrAuth's copy next to this checkout (../butrauth/backend/data/...), which
+ *      is what the checker read before it refreshed its own. Covers the first
+ *      minutes after a deploy on a box that has ButrAuth; elsewhere the module
+ *      fails open until the first refresh lands.
  *
  *   * Offline. No address ever leaves the box.
  *   * FAILS OPEN. A missing or unreadable file means every address is clean:
@@ -21,14 +28,21 @@
 const fs = require('fs');
 const path = require('path');
 
-const RANGES_PATH = process.env.AD_DATACENTER_RANGES_PATH
-  || path.join(__dirname, '..', '..', 'butrauth', 'backend', 'data', 'datacenter-ranges.json');
+const LOCAL_RANGES_PATH = path.join(__dirname, '..', 'data', 'datacenter-ranges.json');
+const LEGACY_RANGES_PATH = path.join(__dirname, '..', '..', 'butrauth', 'backend', 'data', 'datacenter-ranges.json');
+
+/** The file to read: the env override, else the checker's own copy, else ButrAuth's. */
+function pickRangesPath({ env = process.env.AD_DATACENTER_RANGES_PATH, exists = fs.existsSync } = {}) {
+  if (env) return env;
+  return exists(LOCAL_RANGES_PATH) ? LOCAL_RANGES_PATH : LEGACY_RANGES_PATH;
+}
 const ENABLED = process.env.AD_BLOCK_DATACENTER_IPS !== 'false';
 const RECHECK_MS = 10 * 60 * 1000;
 
 let v4 = [];
 let v6 = [];
 let loadedMtime = 0;
+let loadedPath = null;
 let lastCheck = 0;
 let warned = false;
 
@@ -129,9 +143,9 @@ function coalesce(sorted) {
   return out;
 }
 
-function loadRanges() {
+function loadRanges(file) {
   try {
-    const doc = JSON.parse(fs.readFileSync(RANGES_PATH, 'utf8'));
+    const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
     const nextV4 = [];
     const nextV6 = [];
     for (const entry of doc.ranges || []) {
@@ -147,7 +161,7 @@ function loadRanges() {
     if (!nextV4.length && !nextV6.length) throw new Error('no ranges in file');
     v4 = coalesce(nextV4);
     v6 = coalesce(nextV6);
-    console.log(`[datacenterIp] loaded ${v4.length} v4 + ${v6.length} v6 ranges from ${RANGES_PATH}`);
+    console.log(`[datacenterIp] loaded ${v4.length} v4 + ${v6.length} v6 ranges from ${file}`);
   } catch (err) {
     if (!warned) console.warn(`[datacenterIp] ranges unavailable (${err.message}), failing OPEN`);
     warned = true;
@@ -158,11 +172,14 @@ function refreshIfChanged() {
   const now = Date.now();
   if (now - lastCheck < RECHECK_MS && (v4.length || v6.length)) return;
   lastCheck = now;
+  // Re-decided each time: the checker's own copy appears after the first refresh.
+  const file = pickRangesPath();
+  if (file !== loadedPath) { loadedPath = file; loadedMtime = 0; }
   try {
-    const mtime = fs.statSync(RANGES_PATH).mtimeMs;
-    if (mtime !== loadedMtime) { loadedMtime = mtime; loadRanges(); }
+    const mtime = fs.statSync(file).mtimeMs;
+    if (mtime !== loadedMtime) { loadedMtime = mtime; loadRanges(file); }
   } catch (err) {
-    if (!warned) console.warn(`[datacenterIp] cannot stat ${RANGES_PATH} (${err.message}), failing OPEN`);
+    if (!warned) console.warn(`[datacenterIp] cannot stat ${file} (${err.message}), failing OPEN`);
     warned = true;
   }
 }
@@ -193,4 +210,8 @@ function lookupIp(rawIp) {
 
 const isDatacenterIp = (rawIp) => lookupIp(rawIp).datacenter;
 
-module.exports = { lookupIp, isDatacenterIp };
+module.exports = {
+  lookupIp, isDatacenterIp,
+  // For services/ipRanges.js (the refresher) and tests.
+  parseCidrV4, parseCidrV6, pickRangesPath, LOCAL_RANGES_PATH, LEGACY_RANGES_PATH,
+};
