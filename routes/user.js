@@ -364,12 +364,26 @@ router.get('/check/:username', async (req, res) => {
         // Check if user can post (not banned AND can upload)
         const canPost = !user.banned && user.canUpload === true;
 
-        res.json({
+        const out = {
             canPost: canPost,
             username: username,
             banned: user.banned,
             canUpload: user.canUpload
-        });
+        };
+        // The admin panel's block note (written by /warmup/accounts/action) is
+        // meant for the blocked user, who sees it on 3speak.tv. Only sent while
+        // the block is on, so a cleared block never leaks an old note.
+        if (user.canUpload === false) {
+            if (typeof user.uploadBlockedReason === 'string' && user.uploadBlockedReason.trim()) {
+                out.uploadBlockedReason = user.uploadBlockedReason.trim().slice(0, 1000);
+            }
+            if (user.uploadBlockedAt) {
+                const at = new Date(user.uploadBlockedAt);
+                if (!Number.isNaN(at.getTime())) out.uploadBlockedAt = at.toISOString();
+            }
+        }
+
+        res.json(out);
 
     } catch (error) {
         console.error('Error checking user permissions:', error);

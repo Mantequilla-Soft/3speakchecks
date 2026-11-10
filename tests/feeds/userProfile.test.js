@@ -287,6 +287,35 @@ describe('GET /check/:username', () => {
   });
 });
 
+describe('GET /check/:username: the upload block note', () => {
+  const blockedAt = new Date('2026-11-10T09:00:00Z');
+
+  test('sends the note and when the block started while uploads are blocked', async () => {
+    await db().collection('contentcreators').insertOne({
+      username: '~newbie', canUpload: false, uploadBlockedReason: '  Only post your own videos.  ',
+      uploadBlockedAt: blockedAt, uploadBlockedBy: 'admin1',
+    });
+    const res = await get('/check/~newbie').expect(200);
+    expect(res.body).toMatchObject({
+      canPost: false, canUpload: false,
+      uploadBlockedReason: 'Only post your own videos.', uploadBlockedAt: blockedAt.toISOString(),
+    });
+    // who blocked them stays in the admin panel
+    expect(res.body).not.toHaveProperty('uploadBlockedBy');
+  });
+
+  test('sends neither once the block is lifted, nor an empty note', async () => {
+    await db().collection('contentcreators').insertMany([
+      { username: 'freed', canUpload: true, uploadBlockedReason: 'old note', uploadBlockedAt: blockedAt },
+      { username: 'quiet', canUpload: false, uploadBlockedReason: '   ' },
+    ]);
+    const freed = (await get('/check/freed').expect(200)).body;
+    expect(freed).not.toHaveProperty('uploadBlockedReason');
+    expect(freed).not.toHaveProperty('uploadBlockedAt');
+    expect((await get('/check/quiet').expect(200)).body).not.toHaveProperty('uploadBlockedReason');
+  });
+});
+
 describe('POST /check-hidden', () => {
   test('answers which of the named accounts are hidden creators', async () => {
     await F.hideCreator(db(), 'hush');
