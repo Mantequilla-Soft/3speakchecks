@@ -10,7 +10,9 @@
  *   there within seconds, so a ping for a feed we follow marks it due right away;
  * - sends a web push for each new episode to the people who follow that show
  *   (push kind `podcasts`); the bell itself needs no rows, see routes/podcasts.js;
- * - drops feeds nobody follows any more, with their episodes, after a grace week.
+ * - drops feeds nobody follows any more, with their episodes, after a grace week;
+ * - keeps the shows that 3Speak playlists name (utils/playlistFeeds.js) as if
+ *   followed: `playlist_refs` counts the playlists, set every PLAYLIST_SYNC_MIN.
  *
  * Collections (all small, all ours):
  *   podcast_feeds     one row per show, shared by everyone who added it (a
@@ -30,6 +32,8 @@ const { hiveRpcCall } = require('../utils/hive');
 const { ENABLE_MONGO_WRITES } = require('../utils/config');
 const push = require('../utils/webPush');
 const { urlKey } = require('../utils/podcastParse');
+const { checkUrl } = require('../utils/safeFetch');
+const { playlistFeedRefs, findFeedsFor, internalOwner } = require('../utils/playlistFeeds');
 
 const WORKER_PATH = path.join(__dirname, 'podcastFeedsWorker.js');
 const FEEDS = 'podcast_feeds';
@@ -51,6 +55,7 @@ const PODPING_MAX_LAG = 1200;
 const PODPING_MIN_REFETCH_MS = 2 * 60 * 1000;
 const ORPHAN_GRACE_MS = 7 * 24 * 3600 * 1000;
 const PUSH_MAX_PER_FEED = 2;
+const PLAYLIST_SYNC_MIN = Math.max(1, parseInt(process.env.PODCAST_PLAYLIST_SYNC_MIN, 10) || 10);
 
 let worker = null;
 let seq = 0;
@@ -193,7 +198,7 @@ async function podpingOnce() {
     const res = await db.collection(FEEDS).updateMany(
       {
         $or: [{ url_key: { $in: list } }, { alt_keys: { $in: list } }],
-        subscribers: { $gt: 0 },
+        $or: [{ subscribers: { $gt: 0 } }, { playlist_refs: { $gt: 0 } }],
         // A ping is a hint, not a command: anyone can send one, so it can make us
         // look sooner, never hammer a host.
         last_fetch_at: { $lt: new Date(Date.now() - PODPING_MIN_REFETCH_MS) },
@@ -227,6 +232,7 @@ async function gc() {
   const now = Date.now();
   const candidates = await db.collection(FEEDS).find({
     subscribers: { $lte: 0 },
+    playlist_refs: { $not: { $gt: 0 } },
     $or: [
       { orphaned_at: { $lt: new Date(now - ORPHAN_GRACE_MS) } },
       // Rows a failed probe or an abandoned import left behind.
@@ -247,6 +253,66 @@ async function gc() {
   if (removed) console.log(`[podcasts] removed ${removed} feed(s) nobody follows`);
 }
 
+// ─── Shows inside playlists ───────────────────────────────────────────────────
+
+/**
+ * Count, for every show, the playlists that name it (`playlist_refs`), so the
+ * worker polls it and the gc leaves it alone like a followed one. A URL we have
+ * no row for yet gets a pending one, which the worker reads on its next tick.
+ * A show no playlist names any more starts the same grace week as an unfollowed one.
+ */
+async function syncPlaylistFeeds() {
+  const db = getDb();
+  const counts = new Map(); // url_key → { url, n }
+  const cursor = db.collection('playlists').find({ json_metadata: { $exists: true } }, { projection: { json_metadata: 1 } });
+  for await (const p of cursor) {
+    for (const ref of playlistFeedRefs(p)) {
+      const c = counts.get(ref.key);
+      if (c) c.n += 1;
+      else counts.set(ref.key, { url: ref.url, n: 1 });
+    }
+  }
+  const refs = [...counts].map(([key, v]) => ({ key, url: v.url }));
+  const found = await findFeedsFor(db, refs, { _id: 1, playlist_refs: 1 });
+  const now = new Date();
+
+  const perRow = new Map(); // row id → { row, n }
+  let created = 0;
+  for (const ref of refs) {
+    const row = found.get(ref.key);
+    const n = counts.get(ref.key).n;
+    if (row) {
+      const id = row._id.toHexString();
+      const entry = perRow.get(id) || { row, n: 0 };
+      entry.n += n;
+      perRow.set(id, entry);
+      continue;
+    }
+    if (internalOwner(ref.key)) continue;
+    try { checkUrl(ref.url); } catch (_) { continue; }
+    try {
+      const doc = { url: ref.url, url_key: ref.key, alt_keys: [], status: 'pending', subscribers: 0, error_count: 0, created_at: now, next_poll_at: now, playlist_refs: n };
+      const ins = await db.collection(FEEDS).insertOne(doc);
+      perRow.set(ins.insertedId.toHexString(), { row: { _id: ins.insertedId, playlist_refs: n }, n });
+      created += 1;
+    } catch (err) {
+      if (!(err && err.code === 11000)) throw err;
+    }
+  }
+
+  const ops = [...perRow.values()]
+    .filter(({ row, n }) => row.playlist_refs !== n)
+    .map(({ row, n }) => ({ updateOne: { filter: { _id: row._id }, update: { $set: { playlist_refs: n }, $unset: { orphaned_at: '' } } } }));
+  if (ops.length) await db.collection(FEEDS).bulkWrite(ops, { ordered: false });
+
+  const kept = [...perRow.values()].map(({ row }) => row._id);
+  const dropped = { playlist_refs: { $gt: 0 }, _id: { $nin: kept } };
+  await db.collection(FEEDS).updateMany({ ...dropped, subscribers: { $lte: 0 } }, { $set: { playlist_refs: 0, orphaned_at: now } });
+  await db.collection(FEEDS).updateMany(dropped, { $set: { playlist_refs: 0 } });
+  if (created) console.log(`[podcasts] ${created} show(s) from playlists added`);
+  return { shows: perRow.size, created };
+}
+
 /**
  * Start the feed worker. `shared: false` (a replica checker, BACKGROUND_JOBS=false)
  * spawns only the worker, which this instance's routes ask() to probe a feed someone
@@ -264,6 +330,9 @@ function start({ shared = true } = {}) {
     setInterval(() => tick().catch(() => {}), TICK_SEC * 1000).unref();
   }, 45 * 1000).unref();
   setInterval(() => gc().catch((e) => console.warn('[podcasts] gc:', e.message)), 60 * 60 * 1000).unref();
+  const syncPlaylists = () => syncPlaylistFeeds().catch((e) => console.warn('[podcasts] playlist shows:', e.message));
+  setTimeout(syncPlaylists, 30 * 1000).unref();
+  setInterval(syncPlaylists, PLAYLIST_SYNC_MIN * 60 * 1000).unref();
   if (PODPING_ENABLED) startPodping();
   console.log(`[podcasts] outside feeds on: poll tick ${TICK_SEC}s, podping ${PODPING_ENABLED ? 'on' : 'off'}`);
 }
@@ -273,5 +342,6 @@ module.exports = {
   ask,
   enabled: () => ENABLED && ENABLE_MONGO_WRITES,
   collections: { FEEDS, EPISODES, SUBS, PROGRESS },
-  _test: { pingedUrls },
+  syncPlaylistFeeds,
+  _test: { pingedUrls, gc },
 };

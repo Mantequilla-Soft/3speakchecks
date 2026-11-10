@@ -127,7 +127,8 @@ describe('adding a feed (probe)', () => {
     expect(row.next_poll_at.getTime()).toBeGreaterThan(Date.now() + 20 * MINUTE);
     const eps = await episodes().find({ feed_id: row._id }).sort({ published_at: -1 }).toArray();
     expect(eps.map((e) => e._id)).toEqual([episodeId(r.feed_id, 'ep-2'), episodeId(r.feed_id, 'ep-1')]);
-    expect(eps[0]).toMatchObject({ title: 'Episode 2', duration: 600, mime: 'audio/mpeg' });
+    // The feed's own guid is kept: a 3Speak playlist's RSS feed passes the episode on under it.
+    expect(eps[0]).toMatchObject({ title: 'Episode 2', duration: 600, mime: 'audio/mpeg', guid: 'ep-2' });
     // A first read never counts as "new episodes": each is dated by its own pubDate.
     expect(eps[0].first_seen_at.getTime()).toBe(eps[0].published_at.getTime());
     // The first fetch is unconditional.

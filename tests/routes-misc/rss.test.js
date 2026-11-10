@@ -442,6 +442,92 @@ describe('GET /rss/playlist/:id.xml, one feed per public playlist', () => {
   });
 });
 
+describe('GET /rss/playlist/:id.xml with outside shows in the playlist', () => {
+  const { ObjectId } = require('mongodb');
+  const SHOW = new ObjectId('aaaaaaaaaaaaaaaaaaaaaaaa');
+  const NODE = `02${'a'.repeat(64)}`;
+  // The site sends json_metadata as a JSON string; the indexer stores it encoded once more.
+  const withFeeds = (feeds, extra = {}) => playlist({ json_metadata: JSON.stringify(JSON.stringify({ tags: ['x'], feeds })), ...extra });
+  const show = (extra = {}) => ({
+    _id: SHOW, url: 'https://feeds.example.com/show.xml', url_key: 'feeds.example.com/show.xml', alt_keys: ['old.example.com/show'],
+    title: 'Outside Show', author: 'Outside Host', image: 'https://cdn.example.com/show.jpg', status: 'ok', subscribers: 0,
+    value: { method: 'keysend', suggested: 0.00000005, recipients: [{ name: 'Host', type: 'node', address: NODE, split: 100 }] },
+    ...extra,
+  });
+  const outsideEp = (n, extra = {}) => ({
+    _id: `${SHOW.toHexString()}:${String(n).padStart(16, 'x')}`, feed_id: SHOW, title: `Outside ${n}`,
+    guid: `urn:outside:${n}`, audio_url: `https://cdn.example.com/${n}.mp3`, mime: 'audio/mpeg', bytes: 4242,
+    duration: 1800, summary: `Summary ${n}`, published_at: day(n), ...extra,
+  });
+
+  test('outside episodes merge by date, keep their guid and file, and pay their own show', async () => {
+    await db().collection('playlists').insertOne(withFeeds([{ url: 'https://old.example.com/show/', title: 'Outside Show' }]));
+    await seedPlaylistEpisodes();
+    await db().collection('podcast_feeds').insertOne(show());
+    await db().collection('podcast_episodes').insertMany([outsideEp(0), outsideEp(4), outsideEp(20, { published_at: null })]);
+
+    const { doc } = await feed(`/rss/playlist/${PLAYLIST_ID}.xml`);
+    const ch = doc.rss.channel;
+    // Nothing at channel level: an outside item must never inherit the owner's block.
+    expect(ch['podcast:value']).toBeUndefined();
+    const items = itemsOf(doc);
+    expect(items.map((i) => i.title)).toEqual(['Outside 0', 'Audio guest', 'Outside 4', 'Audio day-2', 'Legacy day-1']);
+
+    const out = items[0];
+    expect(textOf(out.guid)).toBe('urn:outside:0');
+    expect(out.enclosure).toMatchObject({ '@_url': 'https://cdn.example.com/0.mp3', '@_type': 'audio/mpeg', '@_length': '4242' });
+    expect(out['itunes:author']).toBe('Outside Host');
+    expect(out['itunes:image']['@_href']).toBe('https://cdn.example.com/show.jpg');
+    const value = asList(out['podcast:value']);
+    expect(value).toHaveLength(1);
+    expect(value[0]['@_type']).toBe('lightning');
+    expect(asList(value[0]['podcast:valueRecipient'])[0]).toMatchObject({ '@_address': NODE, '@_split': '100' });
+
+    // The owner's own episodes now carry the owner's block themselves.
+    const own = items[3];
+    expect(asList(own['podcast:value']).map((v) => v['@_type'])).toEqual(['lightning', 'HBD']);
+    expect(asList(asList(own['podcast:value'])[1]['podcast:valueRecipient'])[0]['@_address']).toBe('alice');
+  });
+
+  test('a show without a value block pays nobody; a 3Speak post already in the playlist is listed once', async () => {
+    await db().collection('playlists').insertOne(withFeeds([{ url: 'https://feeds.example.com/show.xml' }]));
+    await seedPlaylistEpisodes();
+    await db().collection('podcast_feeds').insertOne(show({ value: undefined }));
+    await db().collection('podcast_episodes').insertMany([
+      outsideEp(0, { guid: undefined }),
+      outsideEp(1, { link: 'https://3speak.tv/watch?v=bob/guest' }),
+    ]);
+    const items = itemsOf((await feed(`/rss/playlist/${PLAYLIST_ID}.xml`)).doc);
+    expect(items.map((i) => i.title)).toEqual(['Outside 0', 'Audio guest', 'Audio day-2', 'Legacy day-1']);
+    expect(items[0]['podcast:value']).toBeUndefined();
+    // Stored before guids were kept: the file is the guid.
+    expect(textOf(items[0].guid)).toBe('https://cdn.example.com/0.mp3');
+  });
+
+  test('private feed rows, the playlist\'s own feed and unknown URLs add nothing', async () => {
+    await db().collection('playlists').insertOne(withFeeds([
+      { url: 'https://feeds.example.com/show.xml' },
+      { url: `https://3speak.tv/rss/playlist/${PLAYLIST_ID}.xml` },
+      { url: 'https://nobody.example.com/feed' },
+    ]));
+    await seedPlaylistEpisodes();
+    await db().collection('podcast_feeds').insertOne(show({ private: true }));
+    await db().collection('podcast_episodes').insertOne(outsideEp(0));
+    const { doc } = await feed(`/rss/playlist/${PLAYLIST_ID}.xml`);
+    expect(itemsOf(doc).map((i) => i.title)).toEqual(['Audio guest', 'Audio day-2', 'Legacy day-1']);
+    expect(asList(doc.rss.channel['podcast:value']).map((v) => v['@_type'])).toEqual(['lightning', 'HBD']);
+  });
+
+  test('a playlist of outside shows only is a podcast feed', async () => {
+    await db().collection('playlists').insertOne(withFeeds([{ url: 'https://feeds.example.com/show.xml' }], { items: [] }));
+    await db().collection('podcast_feeds').insertOne(show());
+    await db().collection('podcast_episodes').insertMany([outsideEp(1), outsideEp(2)]);
+    const { doc } = await feed(`/rss/playlist/${PLAYLIST_ID}.xml`);
+    expect(doc.rss.channel['podcast:medium']).toBe('podcast');
+    expect(itemsOf(doc).map((i) => i.title)).toEqual(['Outside 1', 'Outside 2']);
+  });
+});
+
 // ─── Playlist share card ──────────────────────────────────────────────────────
 
 describe('GET /rss/playlist/:id/card.json, the link preview', () => {
