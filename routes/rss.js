@@ -1,7 +1,8 @@
 /**
  * RSS Feed Endpoints
  * GET /rss/:username.xml       one feed per channel
- * GET /rss/playlist/:id.xml    one feed per public playlist / album
+ * GET /rss/playlist/:id.xml    one feed per public playlist / album, with the
+ *                              episodes of the outside shows it names merged in
  * GET /rss/cover/user/:username.jpg, /rss/cover/playlist/:id.jpg
  *                              square JPEG cover art, behind nginx's /img/c/ cache
  *
@@ -30,6 +31,7 @@ const { getDb } = require('../utils/db');
 const { hiveRpcBatch } = require('../utils/hive');
 const { decodePlaylistMeta } = require('../utils/playlistMeta');
 const { storedPlaylistType } = require('../utils/playlistType');
+const { playlistFeedRefs, findFeedsFor, threeSpeakRef } = require('../utils/playlistFeeds');
 const { renderCover } = require('../utils/podcastCover');
 const { createConcurrencyGate } = require('../utils/concurrencyGate');
 
@@ -374,7 +376,8 @@ function valueBlocks(account, displayName) {
  * the channel-level value block pays; an episode by anyone else (only possible
  * in a playlist feed) gets its own author and value block.
  */
-function buildItem(video, itunesAuthor, feedOwner) {
+function buildItem(video, itunesAuthor, feedOwner, everyItemPays = false) {
+    if (video.outside) return buildOutsideItem(video);
     const foreign = feedOwner && video.owner !== feedOwner;
     const itemAuthor = foreign ? video.owner : itunesAuthor;
     const baseThumbUrl = video.thumb;
@@ -437,7 +440,50 @@ function buildItem(video, itunesAuthor, feedOwner) {
             ...(video.duration > 0 ? [{ 'itunes:duration': hms(video.duration) }] : []),
             ...enclosure,
             ...alternate,
-            ...(foreign ? valueBlocks(video.owner, video.owner) : [])
+            ...(foreign || everyItemPays ? valueBlocks(video.owner, foreign ? video.owner : itunesAuthor) : [])
+        ]
+    };
+}
+
+/** An outside show's Lightning value block (utils/podcastParse.js valueOf) as XML. */
+function outsideValueBlock(value) {
+    if (!value || !Array.isArray(value.recipients) || !value.recipients.length) return [];
+    const attr = { type: 'lightning', method: value.method || 'keysend' };
+    if (value.suggested) attr.suggested = String(value.suggested);
+    return [{
+        'podcast:value': [
+            { _attr: attr },
+            ...value.recipients.map((r) => {
+                const a = { name: r.name || '', type: r.type, address: r.address, split: String(r.split) };
+                if (r.customKey) a.customKey = r.customKey;
+                if (r.customValue) a.customValue = r.customValue;
+                if (r.fee) a.fee = 'true';
+                return { 'podcast:valueRecipient': { _attr: a } };
+            }),
+        ],
+    }];
+}
+
+/**
+ * An episode of an outside show in a playlist feed: passed on as its own feed has
+ * it (guid, file, link) with the show's value block, so a boost goes to that show.
+ * Without one it has none: the playlist feed then carries no channel-level block
+ * either (buildFeed `everyItemPays`), so the item never inherits the owner's.
+ */
+function buildOutsideItem(ep) {
+    return {
+        item: [
+            { title: { _cdata: ep.title || '' } },
+            { 'itunes:author': { _cdata: ep.author || '' } },
+            { 'itunes:episodeType': 'full' },
+            ...(ep.link ? [{ link: ep.link }] : []),
+            { pubDate: new Date(ep.created).toUTCString() },
+            { guid: [{ _attr: { isPermaLink: 'false' } }, ep.guid] },
+            { description: { _cdata: ep.description || ep.title || '' } },
+            ...(ep.thumb ? [{ 'itunes:image': { _attr: { href: ep.thumb } } }] : []),
+            ...(ep.duration > 0 ? [{ 'itunes:duration': hms(ep.duration) }] : []),
+            { enclosure: { _attr: { url: ep.media.url, length: ep.media.length || 0, type: ep.media.type } } },
+            ...outsideValueBlock(ep.value),
         ]
     };
 }
@@ -447,7 +493,7 @@ function buildItem(video, itunesAuthor, feedOwner) {
  * `feedPath` / `pageLink` / `medium` are given (podcastSettings then carries
  * the playlist's title, description and cover).
  */
-function buildFeed({ username, videos, itunesAuthor, podcastSettings, feedPath, pageLink, coverUrl, medium = 'video' }) {
+function buildFeed({ username, videos, itunesAuthor, podcastSettings, feedPath, pageLink, coverUrl, medium = 'video', everyItemPays = false }) {
     const feedUrl = `${DOMAIN_NO_PROTO}/${feedPath || `rss/${username}.xml`}`;
     const selfUrl = `${PAGE_PROTOCOL}://${feedUrl}`;
     const link = pageLink || `${PAGE_PROTOCOL}://${DOMAIN_NO_PROTO}/user/${username}`;
@@ -543,9 +589,10 @@ function buildFeed({ username, videos, itunesAuthor, podcastSettings, feedPath, 
                     ...podcast_categories.map(category => ({
                         'itunes:category': { _attr: { text: category } }
                     })),
-                    ...valueBlocks(username, itunesAuthor),
+                    // A playlist with outside shows in it: each item names who it pays.
+                    ...(everyItemPays ? [] : valueBlocks(username, itunesAuthor)),
                     // Append video items below
-                    ...videos.map(v => buildItem(v, itunesAuthor, username))
+                    ...videos.map(v => buildItem(v, itunesAuthor, username, everyItemPays))
                 ]
             }
         ]
@@ -777,6 +824,51 @@ async function loadPublicPlaylist(db, id) {
 }
 
 /**
+ * The newest episodes of the outside shows a playlist names (utils/playlistFeeds.js),
+ * shaped like the 3Speak episodes so they merge by date. `outside` marks them for
+ * buildItem; `ref` is the 3Speak post one links to, when it does.
+ */
+async function loadOutsideEpisodes(db, playlist, limit) {
+    const refs = playlistFeedRefs(playlist);
+    if (!refs.length) return [];
+    const byKey = await findFeedsFor(db, refs, { title: 1, author: 1, image: 1, link: 1, value: 1 });
+    const feeds = new Map([...byKey.values()].map((f) => [f._id.toHexString(), f]));
+    if (!feeds.size) return [];
+    const rows = await db.collection('podcast_episodes')
+        .find({ feed_id: { $in: [...feeds.values()].map((f) => f._id) }, published_at: { $type: 'date' }, private: { $ne: true } },
+            { projection: { chapters_inline: 0, persons: 0, soundbites: 0, transcripts: 0 } })
+        .sort({ published_at: -1 }).limit(limit).toArray();
+    return rows.map((e) => {
+        const feed = feeds.get(e.feed_id.toHexString()) || {};
+        return {
+            outside: true,
+            kind: 'audio',
+            medium: 'podcast',
+            title: e.title || '',
+            author: feed.author || feed.title || '',
+            description: e.summary || '',
+            created: e.published_at,
+            duration: Math.round(e.duration || 0),
+            thumb: e.image || feed.image || '',
+            link: e.link || feed.link || '',
+            guid: e.guid || e.audio_url,
+            media: { url: e.audio_url, type: e.mime || 'audio/mpeg', length: e.bytes || 0 },
+            value: e.value || feed.value || null,
+            ref: threeSpeakRef(e.link),
+        };
+    });
+}
+
+/** The playlist's own episodes and its outside shows' ones, newest first; a 3Speak post only once. */
+function mergeOutside(episodes, outside, limit) {
+    if (!outside.length) return episodes;
+    const have = new Set(episodes.map((e) => `${e.owner}/${e.permlink}`));
+    return [...episodes, ...outside.filter((e) => !e.ref || !have.has(e.ref))]
+        .sort((a, b) => new Date(b.created) - new Date(a.created))
+        .slice(0, limit);
+}
+
+/**
  * The feed's medium: the type the owner picked (utils/playlistType.js), else
  * worked out from what the episodes are. Voice notes and other sounds go out
  * as `podcast`, the nearest medium the podcast namespace has.
@@ -895,7 +987,7 @@ router.get('/playlist/:id.xml', feedGate, async (req, res) => {
         if (!loaded) {
             return res.status(404).send(emptyFeed('Playlist not found', pageLink, 'This playlist does not exist or is private.'));
         }
-        const { playlist, episodes } = loaded;
+        const { playlist } = loaded;
         const owner = playlist.owner;
         const title = playlist.name || `${owner} playlist`;
 
@@ -905,10 +997,12 @@ router.get('/playlist/:id.xml', feedGate, async (req, res) => {
             return res.send(emptyFeed(title, pageLink, 'Playlist unavailable.'));
         }
 
-        const [itunesAuthor, ownerSettings] = await Promise.all([
+        const [itunesAuthor, ownerSettings, outside] = await Promise.all([
             fetchItunesAuthor(owner),
             fetchPodcastSettings(db, owner),
+            loadOutsideEpisodes(db, playlist, PLAYLIST_FEED_LIMIT),
         ]);
+        const episodes = mergeOutside(loaded.episodes, outside, PLAYLIST_FEED_LIMIT);
 
         const album = decodePlaylistMeta(playlist.metadata)?.album || {};
         const podcastSettings = {
@@ -931,6 +1025,7 @@ router.get('/playlist/:id.xml', feedGate, async (req, res) => {
             pageLink,
             coverUrl: coverLink('playlist', id, playlistCoverSource(playlist)),
             medium: playlistMedium(episodes, playlist),
+            everyItemPays: outside.length > 0,
         }));
     } catch (err) {
         console.error(`[RSS] Error generating playlist feed ${id}:`, err);
