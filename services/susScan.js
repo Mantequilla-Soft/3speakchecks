@@ -13,15 +13,23 @@
  * not stopped by any UA rule, so the signals here are about SHAPE, not identity.
  *
  * Detectors (window = the last SUS_SCAN_WINDOW_H hours, default 2):
- *   crawler_sessions       view-durations from a known crawler UA (should be 0: nginx
- *                          answers their tracking calls with a 204)
  *   ua_country_burst       one UA + country makes most of a video's sessions
  *   video_view_spike       a video far above its own 7-day rate
- *   repeat_ip_views        one address replaying the same video (views.ipHash)
- *   ad_impression_spike    a creator's ad impressions far above their 7-day rate
+ *   ad_impression_spike    a creator's COMPLETED (payable) ad impressions far above
+ *                          their 7-day rate
  *   ads_without_watching   more ad impressions than watch sessions on a video
  *   self_view_ads          ads on the viewer's OWN video (not the pre-upload gate)
  *   upload_gate_farming    many pre-upload ads, few actual uploads
+ *
+ * Retired 2026-11-10 (owner: too noisy, nothing payable behind them):
+ *   crawler_sessions  known crawler UAs; nginx already answers their tracking calls.
+ *   repeat_ip_views   one address replaying a video. It only moves the old `views`
+ *                     counter: ads pay on completed impressions (one played ad per
+ *                     address per video per 24h) and viewer rewards are one row per
+ *                     viewer per video. 100 of the first 108 alerts were these two.
+ *   ad_impression_spike used to count every started impression; a datacenter range
+ *   polling sessions it never played (taskmaster4450, 33 started, 0 completed) set
+ *   it off with nothing payable behind it.
  *
  * A finding is alerted ONCE per (detector, subject, UTC day), remembered in the
  * `sus_alerts` collection, so a pattern that persists does not repeat every run.
@@ -42,10 +50,8 @@ const CRAWLER_RE = /reflectionbot|googlebot|google-inspectiontool|storebot-googl
 
 // Thresholds. Deliberately conservative: an alert channel that cries wolf gets muted.
 const T = {
-  crawlerMin: 3,
   burstMin: 15, burstShare: 0.6,
   spikeMin: 25, spikeRatio: 5,
-  repeatIpMin: 10,
   impSpikeMin: 30, impSpikeRatio: 4,
   noWatchMin: 20, noWatchRatio: 2,
   selfViewMin: 3,
@@ -71,24 +77,6 @@ async function detect(db, now) {
   const buckets = (BASELINE_DAYS * 24) / WINDOW_H;   // windows in the baseline period
   const vd = db.collection('view-durations');
   const out = [];
-
-  // ── crawler_sessions ──
-  const crawlers = await vd.aggregate([
-    { $match: { _id: winId, userAgent: CRAWLER_RE } },
-    { $group: { _id: '$userAgent', n: { $sum: 1 }, vids: { $addToSet: { $concat: ['$owner', '/', '$permlink'] } } } },
-  ]).toArray();
-  const byFamily = {};
-  for (const c of crawlers) {
-    const fam = shortUa(c._id);
-    byFamily[fam] = byFamily[fam] || { n: 0, vids: new Set() };
-    byFamily[fam].n += c.n;
-    c.vids.forEach((v) => byFamily[fam].vids.add(v));
-  }
-  for (const [fam, v] of Object.entries(byFamily)) {
-    if (v.n < T.crawlerMin) continue;
-    out.push({ type: 'crawler_sessions', subject: fam,
-      text: `${v.n} watch sessions from crawler **${fam}** on ${v.vids.size} video(s). Its tracking calls should be answered by nginx, so check how they got through.` });
-  }
 
   // ── per-video session counts (shared by burst / spike / ads_without_watching) ──
   const winPerVideo = await vd.aggregate([
@@ -129,29 +117,16 @@ async function detect(db, now) {
     }
   }
 
-  // ── repeat_ip_views (views.ipHash is salted per video, so this is per video) ──
-  const repeats = await db.collection('views').aggregate([
-    { $match: { _id: winId } },
-    { $group: { _id: { a: '$author', p: '$permlink', ip: '$ipHash' }, n: { $sum: 1 }, ua: { $first: '$userAgent' } } },
-    { $match: { n: { $gte: T.repeatIpMin } } },
-    { $sort: { n: -1 } },
-  ]).toArray();
-  for (const r of repeats) {
-    const key = `${r._id.a}/${r._id.p}`;
-    out.push({ type: 'repeat_ip_views', subject: `${key}#${String(r._id.ip).slice(0, 8)}`, video: key,
-      text: `One address counted **${r.n} views** of this video in ${WINDOW_H}h (${shortUa(r.ua)}).` });
-  }
-
-  // ── ad_impression_spike (per creator) ──
+  // ── ad_impression_spike (per creator, COMPLETED impressions only: the payable ones) ──
   const imps = db.collection('ad_impressions');
   const impWin = await imps.aggregate([
-    { $match: { _id: winId, owner: { $ne: null } } },
-    { $group: { _id: '$owner', n: { $sum: 1 }, done: { $sum: { $cond: ['$completed', 1, 0] } } } },
+    { $match: { _id: winId, owner: { $ne: null }, completed: true } },
+    { $group: { _id: '$owner', n: { $sum: 1 } } },
     { $match: { n: { $gte: T.impSpikeMin } } },
   ]).toArray();
   if (impWin.length) {
     const base = await imps.aggregate([
-      { $match: { _id: baseId, owner: { $in: impWin.map((r) => r._id) } } },
+      { $match: { _id: baseId, owner: { $in: impWin.map((r) => r._id) }, completed: true } },
       { $group: { _id: '$owner', n: { $sum: 1 } } },
     ]).toArray();
     const baseOf = new Map(base.map((r) => [r._id, r.n / buckets]));
@@ -160,7 +135,7 @@ async function detect(db, now) {
       const ratio = r.n / Math.max(1, usual);
       if (ratio < T.impSpikeRatio) continue;
       out.push({ type: 'ad_impression_spike', subject: r._id,
-        text: `@${r._id}: **${r.n} ad impressions** in ${WINDOW_H}h (${r.done} completed), usually ~${usual.toFixed(1)} (${ratio.toFixed(0)}x). These are paid from the creator pool.` });
+        text: `@${r._id}: **${r.n} completed ad impressions** in ${WINDOW_H}h, usually ~${usual.toFixed(1)} (${ratio.toFixed(0)}x). These are paid from the creator pool.` });
     }
   }
 
@@ -249,10 +224,8 @@ async function linksFor(db, findings) {
 }
 
 const LABEL = {
-  crawler_sessions: '🤖 Crawler sessions',
   ua_country_burst: '🎯 One browser dominates a video',
   video_view_spike: '📈 View spike',
-  repeat_ip_views: '🔁 Same address replaying',
   ad_impression_spike: '💸 Ad impression spike',
   ads_without_watching: '👻 Ads without watching',
   self_view_ads: '🪞 Ads on own videos',

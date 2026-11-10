@@ -46,16 +46,14 @@ const session = (extra = {}) => ({ _id: inWindow(), owner: 'alice', permlink: 'v
 const types = (findings) => findings.map((f) => f.type).sort();
 
 describe('the detectors', () => {
-  test('crawler_sessions: a crawler family with 3+ sessions, grouped across UA versions', async () => {
-    await db().collection('view-durations').insertMany([
-      session({ userAgent: GOOGLEBOT }),
-      session({ userAgent: GOOGLEBOT.replace('2.1', '2.2'), permlink: 'v2' }),
-      session({ userAgent: GOOGLEBOT }),
-      session({ userAgent: 'Mozilla/5.0 bingbot/2.0' }),           // only 1: quiet
-    ]);
-    const findings = await detect(db(), NOW);
-    expect(findings).toEqual([expect.objectContaining({ type: 'crawler_sessions', subject: 'Googlebot' })]);
-    expect(findings[0].text).toMatch(/3 watch sessions .* on 2 video\(s\)/);
+  test('retired: crawler sessions and one address replaying a video are not reported', async () => {
+    // Owner 2026-11-10: neither moves money. Crawler tracking calls are already
+    // answered by nginx, and repeat views only bump the old `views` counter.
+    await db().collection('view-durations').insertMany(many(10, () => session({ userAgent: GOOGLEBOT })));
+    await db().collection('views').insertMany(
+      many(50, () => ({ _id: inWindow(), author: 'alice', permlink: 'v1', ipHash: 'abcdef1234567890', userAgent: FIREFOX })),
+    );
+    expect(await detect(db(), NOW)).toEqual([]);
   });
 
   test('ua_country_burst: one browser + country making most of a video\'s sessions', async () => {
@@ -85,21 +83,12 @@ describe('the detectors', () => {
     expect(spikes[0].text).toMatch(/25 sessions in 2h, usually ~0\.0 \(25x\)/);
   });
 
-  test('repeat_ip_views: one address replaying one video 10+ times', async () => {
-    await db().collection('views').insertMany([
-      ...many(T.repeatIpMin, () => ({ _id: inWindow(), author: 'alice', permlink: 'v1', ipHash: 'abcdef1234567890', userAgent: FIREFOX })),
-      ...many(T.repeatIpMin - 1, () => ({ _id: inWindow(), author: 'alice', permlink: 'v2', ipHash: 'ffff', userAgent: FIREFOX })),
-    ]);
-    const found = (await detect(db(), NOW)).filter((f) => f.type === 'repeat_ip_views');
-    expect(found).toEqual([expect.objectContaining({ subject: 'alice/v1#abcdef12', text: expect.stringContaining('10 views') })]);
-  });
-
   test('ad_impression_spike and ads_without_watching: a creator\'s ads far above normal, with no one watching', async () => {
     await db().collection('ad_impressions').insertMany([
-      ...many(T.impSpikeMin, (i) => ({ _id: inWindow(), owner: 'farmer', permlink: 'v1', completed: i < 10 })),
+      ...many(T.impSpikeMin + 5, (i) => ({ _id: inWindow(), owner: 'farmer', permlink: 'v1', completed: i < T.impSpikeMin })),
       // A big creator at their usual rate: 30 now, ~30 per window all week.
-      ...many(30, () => ({ _id: inWindow(), owner: 'big', permlink: 'b1' })),
-      ...many(30 * 84, (i) => ({ _id: inBaseline(i), owner: 'big', permlink: 'b1' })),
+      ...many(30, () => ({ _id: inWindow(), owner: 'big', permlink: 'b1', completed: true })),
+      ...many(30 * 84, (i) => ({ _id: inBaseline(i), owner: 'big', permlink: 'b1', completed: true })),
     ]);
     // big/b1 was watched enough for its ads; farmer/v1 had one session.
     await db().collection('view-durations').insertMany([
@@ -108,8 +97,18 @@ describe('the detectors', () => {
     ]);
     const findings = await detect(db(), NOW);
     expect(findings.filter((f) => f.type === 'ad_impression_spike').map((f) => f.subject)).toEqual(['farmer']);
-    expect(findings.find((f) => f.type === 'ad_impression_spike').text).toMatch(/30 ad impressions.*\(10 completed\)/);
+    expect(findings.find((f) => f.type === 'ad_impression_spike').text).toMatch(/\*\*30 completed ad impressions\*\* in 2h, usually ~0\.0 \(30x\)/);
     expect(findings.filter((f) => f.type === 'ads_without_watching').map((f) => f.subject)).toEqual(['farmer/v1']);
+  });
+
+  test('ad_impression_spike counts only completed impressions: started-only polling pays nothing', async () => {
+    // taskmaster4450, 2026-11-10: a datacenter range opened 33 sessions on ~30 videos
+    // and never played one ad. Nothing payable, so nothing to alert.
+    await db().collection('ad_impressions').insertMany([
+      ...many(60, (i) => ({ _id: inWindow(), owner: 'polled', permlink: `v${i}`, started: true })),
+      ...many(T.impSpikeMin - 1, (i) => ({ _id: inWindow(), owner: 'almost', permlink: `v${i}`, completed: true })),
+    ]);
+    expect((await detect(db(), NOW)).filter((f) => f.type === 'ad_impression_spike')).toEqual([]);
   });
 
   test('self_view_ads: ads on the viewer\'s own video, except the pre-upload gate', async () => {
@@ -144,7 +143,7 @@ describe('the detectors', () => {
   });
 
   test('rows older than the window are not counted as current activity', async () => {
-    await db().collection('view-durations').insertMany(many(5, () => ({ ...session({ userAgent: GOOGLEBOT }), _id: idAgo(3 * HOUR) })));
+    await db().collection('ad_sessions').insertMany(many(5, () => ({ _id: idAgo(3 * HOUR), viewer: 'alice', owner: 'alice', surface: 'watch' })));
     expect(await detect(db(), NOW)).toEqual([]);
   });
 });
@@ -189,11 +188,11 @@ describe('the webhook message', () => {
   });
 
   test('amber for view-only findings, singular title for one', async () => {
-    await sendWebhook([{ type: 'crawler_sessions', subject: 'Googlebot', text: 'x' }], new Map(), NOW);
+    await sendWebhook([{ type: 'video_view_spike', subject: 'a/v1', video: 'a/v1', text: 'x' }], new Map([['a/v1', 'https://link/a/v1']]), NOW);
     const { embeds: [embed] } = JSON.parse(global.fetch.calls[0].init.body);
     expect(embed.title).toBe('Suspicious activity: 1 new finding');
     expect(embed.color).toBe(0xf0a020);
-    expect(embed.fields).toEqual([{ name: '🤖 Crawler sessions', value: 'x' }]);
+    expect(embed.fields).toEqual([{ name: '📈 View spike: a/v1', value: 'x\nhttps://link/a/v1' }]);
   });
 
   test('a webhook error status is thrown to the caller', async () => {
@@ -203,37 +202,37 @@ describe('the webhook message', () => {
 });
 
 describe('a scan run', () => {
-  const seedCrawler = () => db().collection('view-durations').insertMany(many(3, () => session({ userAgent: GOOGLEBOT })));
+  const seedSelfView = () => db().collection('ad_sessions').insertMany(many(T.selfViewMin, () => ({ _id: inWindow(), viewer: 'alice', owner: 'alice', permlink: 'v1', surface: 'watch' })));
 
   test('alerts a new finding once, remembers it for the day, and does not repeat it', async () => {
-    await seedCrawler();
+    await seedSelfView();
 
     const first = await runOnce();
-    expect(types(first)).toEqual(['crawler_sessions']);
+    expect(types(first)).toEqual(['self_view_ads']);
     expect(global.fetch).toHaveBeenCalledTimes(1);
-    expect(await db().collection('sus_alerts').findOne({ _id: 'crawler_sessions|Googlebot|2026-11-01' }))
-      .toMatchObject({ type: 'crawler_sessions', at: NOW });
+    expect(await db().collection('sus_alerts').findOne({ _id: 'self_view_ads|alice|2026-11-01' }))
+      .toMatchObject({ type: 'self_view_ads', at: NOW });
 
     jest.setSystemTime(new Date(NOW.getTime() + 10 * MINUTE));
     expect(await runOnce()).toEqual([]);
     expect(global.fetch).toHaveBeenCalledTimes(1);
-    const alert = await db().collection('sus_alerts').findOne({ _id: 'crawler_sessions|Googlebot|2026-11-01' });
+    const alert = await db().collection('sus_alerts').findOne({ _id: 'self_view_ads|alice|2026-11-01' });
     expect(alert.lastAt).toEqual(new Date(NOW.getTime() + 10 * MINUTE));
     expect(await db().collection('sus_alerts').countDocuments()).toBe(1);
   });
 
   test('the same pattern is alerted again on the next UTC day', async () => {
-    await seedCrawler();
+    await seedSelfView();
     await runOnce();
     jest.setSystemTime(new Date('2026-11-02T00:10:00Z'));
-    await seedCrawler();                             // the crawler is back in the new window
-    expect(types(await runOnce())).toEqual(['crawler_sessions']);
+    await seedSelfView();                             // the pattern is back in the new window
+    expect(types(await runOnce())).toEqual(['self_view_ads']);
     expect(await db().collection('sus_alerts').countDocuments()).toBe(2);
   });
 
   test('a dry run reports findings without remembering or sending them', async () => {
-    await seedCrawler();
-    expect(types(await runOnce({ dryRun: true }))).toEqual(['crawler_sessions']);
+    await seedSelfView();
+    expect(types(await runOnce({ dryRun: true }))).toEqual(['self_view_ads']);
     expect(await db().collection('sus_alerts').countDocuments()).toBe(0);
     expect(global.fetch).not.toHaveBeenCalled();
   });
@@ -244,16 +243,16 @@ describe('a scan run', () => {
   });
 
   test('the scan never changes the data it reads', async () => {
-    await seedCrawler();
-    const before = await db().collection('view-durations').find().toArray();
+    await seedSelfView();
+    const before = await db().collection('ad_sessions').find().toArray();
     await runOnce();
-    expect(await db().collection('view-durations').find().toArray()).toEqual(before);
+    expect(await db().collection('ad_sessions').find().toArray()).toEqual(before);
   });
 
   test('a failed webhook is logged and the run resolves empty', async () => {
     jest.spyOn(console, 'error').mockImplementation(() => {});
     global.fetch = fakeFetch([['http://127.0.0.1:9/sus-hook', () => ({ status: 500, body: '' })]]);
-    await seedCrawler();
+    await seedSelfView();
     await expect(runOnce()).resolves.toEqual([]);
     expect(console.error).toHaveBeenCalledWith('[susScan] run failed:', 'webhook 500');
   });
@@ -264,13 +263,13 @@ describe('a scan run', () => {
     // today", so every later run that day filtered it out and nobody was ever told.
     global.fetch = fakeFetch([['http://127.0.0.1:9/sus-hook', () => ({ status: 503, body: '' })]]);
     jest.spyOn(console, 'error').mockImplementation(() => {});
-    await seedCrawler();
+    await seedSelfView();
     await runOnce();
 
     expect(await db().collection('sus_alerts').countDocuments()).toBe(0);
 
     global.fetch = fakeFetch([['http://127.0.0.1:9/sus-hook', () => ({ status: 204, body: '' })]]);
-    expect(types(await runOnce())).toEqual(['crawler_sessions']);
+    expect(types(await runOnce())).toEqual(['self_view_ads']);
     expect(await db().collection('sus_alerts').countDocuments()).toBe(1);
   });
 
@@ -279,7 +278,7 @@ describe('a scan run', () => {
     global.fetch = fakeFetch([['http://127.0.0.1:9/sus-hook', () => ({ status: 503, body: '' })]]);
     jest.spyOn(console, 'error').mockImplementation(() => {});
     jest.spyOn(Collection.prototype, 'deleteMany').mockRejectedValue(new Error('primary stepped down'));
-    await seedCrawler();
+    await seedSelfView();
     await expect(runOnce()).resolves.toEqual([]);
     expect(console.error).toHaveBeenCalledWith('[susScan] could not forget undelivered alerts:', 'primary stepped down');
     expect(console.error).toHaveBeenCalledWith('[susScan] run failed:', 'webhook 503');
