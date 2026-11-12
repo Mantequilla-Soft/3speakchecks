@@ -175,7 +175,12 @@ router.get('/interests', async (req, res) => {
  *    missing-field case, and a creator advertising "1 new video" that appears in
  *    no feed would be a dead end.
  *
- * Query: ?currentuser=<viewer>&days&limit&nsfw
+ *  - `since` (ISO time, optional): only uploads after it count. The frontend's
+ *    "Mark all as seen" stores the moment it was clicked and sends it, so the
+ *    rail comes back with just what was posted after that. Never earlier than
+ *    the `days` window; an unreadable or future value is ignored.
+ *
+ * Query: ?currentuser=<viewer>&days&limit&nsfw&since
  */
 router.get('/new-from-following', async (req, res) => {
     try {
@@ -194,7 +199,11 @@ router.get('/new-from-following', async (req, res) => {
             return res.json({ creators: [], days, total_creators: 0, total_items: 0 });
         }
 
-        const since = new Date(Date.now() - days * 86400000);
+        const windowStart = new Date(Date.now() - days * 86400000);
+        const seenUntil = req.query.since ? new Date(String(req.query.since)) : null;
+        const since = seenUntil && !Number.isNaN(seenUntil.getTime()) && seenUntil > windowStart && seenUntil <= new Date()
+            ? seenUntil
+            : windowStart;
         const hidden = hiddenListSync();
 
         // ~320 uploads platform-wide in a 7-day window, so this cap sits far above

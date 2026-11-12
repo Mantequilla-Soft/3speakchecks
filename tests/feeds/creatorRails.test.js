@@ -57,6 +57,27 @@ describe('/feeds/new-from-following', () => {
     ]);
   });
 
+  test('since: only uploads after the "Mark all as seen" moment count; a bad or future value is ignored', async () => {
+    hive.__state.following.set('fan', ['vid', 'shorty']);
+    await embeds().insertMany([
+      F.embedVideo({ owner: 'vid', permlink: 'before', createdAt: F.daysAgo(2) }),
+      F.embedVideo({ owner: 'vid', permlink: 'after', createdAt: F.hoursAgo(2) }),
+      { ...F.shortVideo({ owner: 'shorty', permlink: 's-before', createdAt: F.daysAgo(3) }), hive_permlink: 'snap-before' },
+    ]);
+    const since = F.daysAgo(1).toISOString();
+
+    const res = await get('new-from-following', { currentuser: 'fan', since }).expect(200);
+    expect(res.body).toMatchObject({ total_creators: 1, total_items: 1 });
+    expect(res.body.creators).toEqual([
+      { username: 'vid', shorts: 0, videos: 1, total: 1, latest_at: F.hoursAgo(2).toISOString() },
+    ]);
+
+    for (const bad of ['nonsense', F.hoursAgo(-5).toISOString()]) {
+      const all = await get('new-from-following', { currentuser: 'fan', since: bad }).expect(200);
+      expect(all.body.total_items).toBe(3);
+    }
+  });
+
   test('visibility follows the feeds: shorts need listed != false, videos need listed == true', async () => {
     hive.__state.following.set('fan', ['maker']);
     await embeds().insertMany([
