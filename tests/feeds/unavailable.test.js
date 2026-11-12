@@ -78,6 +78,62 @@ describe('verifyGone', () => {
   });
 });
 
+describe('verifyGone with the S3 archive', () => {
+  const S3 = 'https://buttercloud.b-cdn.net/vids/QmX/manifest.m3u8';
+
+  test('an archived video gone from every IPFS gateway is alive in its bucket', async () => {
+    const urls = stubGateways({ 'buttercloud.b-cdn.net': 200 });
+    const out = await verifyGone('QmX', { storage_state: 'archived', s3_url: S3 });
+    expect(out.gone).toBe(false);
+    expect(out.results).toEqual([{ host: 'https://buttercloud.b-cdn.net', verdict: 'alive' }]);
+    expect(urls).toEqual([S3]);   // the zone first, and nothing after a hit
+  });
+
+  test('the zone down, s3.3speak.tv still serving: alive', async () => {
+    stubGateways({ 'buttercloud.b-cdn.net': 'throw', 's3.3speak.tv': 200 });
+    expect((await verifyGone('QmX', { storage_state: 'archived', s3_url: S3 })).gone).toBe(false);
+  });
+
+  test('gone only when both S3 hosts AND every IPFS gateway 404', async () => {
+    const urls = stubGateways();
+    const out = await verifyGone('QmX', { storage_state: 'archived', s3_url: S3 });
+    expect(out.gone).toBe(true);
+    expect(out.results.map((r) => r.host)).toEqual([
+      'https://buttercloud.b-cdn.net', 'https://s3.3speak.tv', ...GATEWAYS,
+    ]);
+    expect(urls).toContain('https://s3.3speak.tv/vids/QmX/480p/index.m3u8');
+  });
+
+  test.each([
+    ['no s3_url', undefined],
+    ['an s3_url off our hosts', 'https://evil.example/vids/QmX/manifest.m3u8'],
+    ['an s3_url for another CID', 'https://buttercloud.b-cdn.net/vids/QmOther/manifest.m3u8'],
+  ])('archived with %s is never confirmed gone, and nothing is fetched', async (_label, s3Url) => {
+    const urls = stubGateways();
+    const out = await verifyGone('QmX', { storage_state: 'promoting', s3_url: s3Url });
+    expect(out.gone).toBe(false);
+    expect(out.results[0]).toMatchObject({ host: 's3', verdict: 'unknown' });
+    expect(urls).toEqual([]);
+  });
+
+  test('a hot video with no S3 copy is checked on IPFS only, as before', async () => {
+    const urls = stubGateways();
+    expect((await verifyGone('QmX', { storage_state: 'hot' })).gone).toBe(true);
+    expect(urls).toHaveLength(GATEWAYS.length * 2);
+  });
+
+  test('confirmAndBan reads the S3 fields off the doc and leaves an archived video alone', async () => {
+    stubGateways({ 'buttercloud.b-cdn.net': 200 });
+    await db().collection('embed-video').insertOne(F.embedVideo({
+      owner: 'arch', permlink: 'asset-a', manifest_cid: 'QmX', storage_state: 'archived', s3_url: S3,
+    }));
+    const out = await confirmAndBan(db(), { owner: 'arch', permlink: 'asset-a' });
+    expect(out).toMatchObject({ banned: false, reason: 'still-reachable' });
+    const doc = await db().collection('embed-video').findOne({ owner: 'arch' });
+    expect(doc.unavailable).toBeUndefined();
+  });
+});
+
 describe('POST /video/report-unavailable', () => {
   test('needs author and permlink', async () => {
     expect((await report({ author: 'a' }).expect(400)).body).toEqual({ success: false, error: 'author and permlink are required' });

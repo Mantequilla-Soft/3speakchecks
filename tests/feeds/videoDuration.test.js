@@ -60,6 +60,26 @@ describe('durationFromManifest', () => {
     expect(await durationFromManifest(null)).toBeNull();
   });
 
+  test('an archived video is read from its S3 copy, the zone first, before any gateway', async () => {
+    const seen = stubFetch({
+      'https://buttercloud.b-cdn.net/vids/QmS/manifest.m3u8': MASTER,
+      'https://buttercloud.b-cdn.net/vids/QmS/480p/index.m3u8': MEDIA,
+    });
+    const doc = { storage_state: 'archived', s3_url: 'https://buttercloud.b-cdn.net/vids/QmS/manifest.m3u8' };
+    expect(await durationFromManifest('QmS', doc)).toBe(15);
+    expect(seen.every((u) => u.startsWith('https://buttercloud.b-cdn.net/'))).toBe(true);
+  });
+
+  test('an S3 copy that does not answer falls through to s3.3speak.tv, then the gateways', async () => {
+    const seen = stubFetch({ [`${first}/QmS/manifest.m3u8`]: MEDIA });
+    const doc = { storage_state: 'archived', s3_url: 'https://buttercloud.b-cdn.net/vids/QmS/manifest.m3u8' };
+    expect(await durationFromManifest('QmS', doc)).toBe(15);
+    expect(seen.slice(0, 2)).toEqual([
+      'https://buttercloud.b-cdn.net/vids/QmS/manifest.m3u8',
+      'https://s3.3speak.tv/vids/QmS/manifest.m3u8',
+    ]);
+  });
+
   test('a media playlist at the manifest URL sums directly', async () => {
     stubFetch({ [`${first}/QmA/manifest.m3u8`]: MEDIA });
     expect(await durationFromManifest('QmA')).toBe(15);

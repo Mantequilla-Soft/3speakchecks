@@ -166,7 +166,8 @@ describe('legacy videos', () => {
 
     expect(await syncLegacyDurations()).toEqual({ scanned: 1, updated: 1, unreadable: 0 });
     expect(await legacy().findOne({ _id: 'a' })).toMatchObject({ duration: 181.649705, duration_source: 'manifest' });
-    expect(vd.durationFromManifest).toHaveBeenCalledWith('Qma');
+    // The doc rides along so an archived video is read from its S3 copy.
+    expect(vd.durationFromManifest).toHaveBeenCalledWith('Qma', expect.objectContaining({ video_v2: 'ipfs://Qma/manifest.m3u8' }));
   });
 
   test('skips rows whose video_v2 is not an IPFS manifest, and stamps unreadable ones', async () => {

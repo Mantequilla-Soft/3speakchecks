@@ -33,6 +33,7 @@ const execFileP = require('util').promisify(require('child_process').execFile);
 const { GATEWAY_HOSTS } = require('./adGateways');
 
 const GATEWAYS = GATEWAY_HOSTS.map((h) => `https://${h}/ipfs`);
+const { s3CopyOf, S3_HOSTS } = require('./s3Storage');
 const FETCH_TIMEOUT_MS = 15000;
 // A manifest that sums to more than this is a parse gone wrong, not a long video.
 // Written onto the doc it would quietly break every length-targeted ad campaign and
@@ -64,10 +65,15 @@ function sumExtinf(text) {
 /**
  * Seconds, or null if no gateway could give us a manifest we can read.
  * master playlist → variant playlist → Σ EXTINF.
+ *
+ * `doc` (optional, its `storage_state` + `s3_url`) adds the video's S3 copy, read
+ * first: an archived video may be gone from IPFS (utils/s3Storage.js).
  */
-async function durationFromManifest(manifestCid) {
+async function durationFromManifest(manifestCid, doc = null) {
     if (!manifestCid) return null;
-    for (const base of GATEWAYS) {
+    const copy = s3CopyOf(doc, manifestCid);
+    const bases = copy ? [...S3_HOSTS.map((h) => `https://${h}/${copy.bucket}`), ...GATEWAYS] : GATEWAYS;
+    for (const base of bases) {
         const master = await fetchText(`${base}/${manifestCid}/manifest.m3u8`);
         if (!master) continue;
 

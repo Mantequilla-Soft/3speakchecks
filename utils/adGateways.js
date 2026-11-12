@@ -99,6 +99,12 @@ const healthFirst = (hosts) => [
   ...hosts.filter((h) => !isGatewayDown(h)),
   ...hosts.filter((h) => isGatewayDown(h)),
 ];
+// The S3 archive (utils/s3Storage.js): both hosts answer `Access-Control-Allow-Origin: *`,
+// `Origin: null` included (checked 2026-11-12), so a browser may read and be
+// redirected to them. Kept out of GATEWAY_HOSTS: their paths are /<bucket>/<cid>,
+// not /ipfs/<cid>, so they are never an IPFS sibling of anything.
+const { S3_HOSTS, sameS3Folder } = require('./s3Storage');
+
 const hostOf = (url) => { try { return new URL(url).hostname; } catch (_) { return ''; } };
 /** Same list of urls, the ones on a host marked down moved to the back. */
 const urlsHealthFirst = (urls) => [
@@ -142,7 +148,7 @@ function startGatewayProbe() {
 
 /** May a page on `origin` read this host? */
 function corsAllows(host, origin) {
-  if (CORS_HOSTS.includes(host)) return true;
+  if (CORS_HOSTS.includes(host) || S3_HOSTS.includes(host)) return true;
   const allowed = ORIGIN_CORS_HOSTS[host];
   return !!(allowed && origin && allowed.includes(origin));
 }
@@ -225,7 +231,7 @@ const isBrowserSafe = (url, origin = null) => corsAllows(hostOf(url), origin);
  * a cross-origin redirect the browser sends `Origin: null`, which only the hosts that
  * answer everyone accept.
  */
-const isRedirectSafe = (url) => CORS_HOSTS.includes(hostOf(url));
+const isRedirectSafe = (url) => CORS_HOSTS.includes(hostOf(url)) || S3_HOSTS.includes(hostOf(url));
 
 /**
  * The same object, on a host we would choose ourselves. Non-gateway urls (an
@@ -275,6 +281,8 @@ function sameContentScope(a, b) {
     const x = new URL(a);
     const y = new URL(b);
     if (x.origin === y.origin) return true;
+    // The S3 zone and s3.3speak.tv serve one bucket: interchangeable within it.
+    if (sameS3Folder(a, b)) return true;
     return GATEWAY_HOSTS.includes(x.hostname) && GATEWAY_HOSTS.includes(y.hostname);
   } catch (_) {
     return false;
