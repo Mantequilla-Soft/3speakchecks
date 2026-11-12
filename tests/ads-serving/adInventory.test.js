@@ -67,6 +67,20 @@ async function seedAudioAndUploads() {
   ]);
 }
 
+describe('computeSnapshot: reward-blocked creators', () => {
+  test('carry no ads, so they are removed with the opted-out accounts, once each', async () => {
+    await seedWorld();
+    await db().collection('contentcreators').insertMany([
+      { username: 'alice', adRewardDisabled: true },
+      { username: 'bob', adRewardDisabled: true },
+      { username: 'carol', adRewardDisabled: false },
+    ]);
+    const snap = await inventory.computeSnapshot();
+    expect(snap.excluded.optedOutAccounts.sort()).toEqual(['alice', 'bob']);
+    expect(snap.sellable.videos).toBe(2);
+  });
+});
+
 describe('computeSnapshot: the video audience', () => {
   let snap;
   beforeEach(async () => {

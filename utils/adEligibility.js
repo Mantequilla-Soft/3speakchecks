@@ -16,6 +16,9 @@
  *   • The CREATOR turned ads off. Their videos carry none, and the forecast drops
  *     them too, so nothing is sold that we have promised not to use.
  *   • The creator turned ads off on THIS video only (utils/videoAdOptOut.js).
+ *   • Nobody may earn from the content (utils/rewardRefusal.js): an admin blocked the
+ *     creator's ad rewards, or the Hive post declines payout. No ads at all then,
+ *     whatever the creator's own switches say.
  *
  * A creator can also keep the overlays and refuse only the ROLLS (banners and
  * tickers yes, a spot that interrupts the video no), for the account or for one
@@ -36,6 +39,7 @@
 const { getDb } = require('./db');
 const { videoAdMode } = require('./videoAdOptOut');
 const { audioAdChoice } = require('./audioAdChoice');
+const { creatorRewardBlocked, contentDeclinesRewards } = require('./rewardRefusal');
 const { PREMIUM_USERS_COLLECTION, AD_CREATOR_PREFS_COLLECTION, ADS_ALLOWED_OWNERS, AD_PREMIUM_OVERRIDE_ACCOUNTS , AD_SELF_VIEW_ALLOWED_ACCOUNTS } = require('./config');
 
 const TTL_MS = parseInt(process.env.AD_ELIGIBILITY_TTL_MS, 10) || 60 * 1000;
@@ -164,12 +168,16 @@ async function adDecision({ viewer, owner, permlink }) {
   if (premium === null) return { ads: false, reason: 'unknown_premium_state' };
   if (premium) return { ads: false, reason: 'premium_viewer' };
 
-  // Both reads at once: they are independent point reads, and the second must not
-  // add a Mongo round trip to every playback.
-  const [creatorMode, videoMode] = await Promise.all([
+  // All reads at once: they are independent point reads, and none of them may add a
+  // round trip to every playback (the decline read is cached, see rewardRefusal.js).
+  const [creatorMode, videoMode, blocked, declined] = await Promise.all([
     creatorAdMode(owner),
     videoAdMode(owner, permlink),
+    creatorRewardBlocked(owner),
+    contentDeclinesRewards({ kind: 'video', owner, permlink }),
   ]);
+  if (blocked) return { ads: false, reason: 'creator_reward_blocked' };
+  if (declined) return { ads: false, reason: 'rewards_declined' };
   if (creatorMode === 'off') return { ads: false, reason: 'creator_opted_out' };
   if (videoMode === 'off') return { ads: false, reason: 'video_opted_out' };
   // The stricter of the two wins: either switch saying "no rolls" is enough.
@@ -197,8 +205,8 @@ function audioEnabledOf(doc) {
 /**
  * Should this AUDIO playback carry a spoken spot? `{ ads, reason }`.
  *
- * The viewer-side gates are adDecision's (trial owners, own audio, premium). Then the
- * track's own choice from the uploader, which overrides the account in EITHER
+ * The viewer-side gates are adDecision's (trial owners, own audio, premium), then the
+ * reward refusals (blocked creator, declined post). Then the track's own choice from the uploader, which overrides the account in EITHER
  * direction, and only without one the account's setting (audioEnabledOf).
  */
 async function audioAdDecision({ viewer, owner, permlink }) {
@@ -214,13 +222,19 @@ async function audioAdDecision({ viewer, owner, permlink }) {
   if (premium === null) return { ads: false, reason: 'unknown_premium_state' };
   if (premium) return { ads: false, reason: 'premium_viewer' };
 
-  const [track, doc] = await Promise.all([
+  const [track, doc, blocked, declined] = await Promise.all([
     audioAdChoice(owner, permlink),
     getDb().collection(AD_CREATOR_PREFS_COLLECTION).findOne(
       { _id: norm(owner) },
       { projection: { adsEnabled: 1, rollsEnabled: 1, audioEnabled: 1 } },
     ),
+    creatorRewardBlocked(owner),
+    contentDeclinesRewards({ kind: 'audio', owner, permlink }),
   ]);
+  // Before the track's own switch: an explicit "ads on this audio" cannot overrule
+  // content nobody may earn from.
+  if (blocked) return { ads: false, reason: 'creator_reward_blocked' };
+  if (declined) return { ads: false, reason: 'rewards_declined' };
   if (track === false) return { ads: false, reason: 'audio_opted_out' };
   if (track === true) return { ads: true, reason: null };
   return audioEnabledOf(doc) ? { ads: true, reason: null } : { ads: false, reason: 'creator_audio_off' };
