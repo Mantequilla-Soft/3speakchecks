@@ -24,6 +24,7 @@
  */
 const { getDb } = require('./db');
 const { ENABLE_MONGO_WRITES } = require('./config');
+const { s3CopyOf, s3UrlsFor, isOffHotnode } = require('./s3Storage');
 
 const UNAVAILABLE_COLLECTION = 'video-unavailable';
 
@@ -87,15 +88,35 @@ async function probe(url) {
  * Verify across every gateway. Bans only on unanimous, definite 404s.
  * Checks the master manifest AND the 480p rendition: some old uploads only ever had
  * renditions, so a missing master alone isn't proof.
+ *
+ * `doc` (optional) brings in the S3 archive: a video with an S3 copy is checked
+ * there first, because an `archived` one is MEANT to be gone from IPFS, and a
+ * unanimous IPFS 404 would otherwise ban a perfectly playable video. A doc that
+ * says it left the hotnode but has no S3 copy we can check is never confirmed
+ * gone: where it lives cannot be verified, which is not evidence of absence.
  */
-async function verifyGone(cid) {
-  const paths = [`/ipfs/${cid}/manifest.m3u8`, `/ipfs/${cid}/480p/index.m3u8`];
+async function verifyGone(cid, doc = null) {
+  const files = ['manifest.m3u8', '480p/index.m3u8'];
   const results = [];
 
-  for (const host of GATEWAYS) {
+  const copy = s3CopyOf(doc, cid);
+  if (!copy && isOffHotnode(doc)) {
+    results.push({ host: 's3', verdict: 'unknown', note: `storage_state ${doc.storage_state} without a usable s3_url` });
+    return { gone: false, results };
+  }
+
+  // Each source with its own address for every file: the S3 hosts (zone first),
+  // then the IPFS gateways.
+  const s3Hosts = copy ? s3UrlsFor(copy).map((u) => new URL(u).origin) : [];
+  const sources = [
+    ...s3Hosts.map((host, i) => ({ host, urls: files.map((f) => s3UrlsFor(copy, f)[i]) })),
+    ...GATEWAYS.map((host) => ({ host, urls: files.map((f) => `${host}/ipfs/${cid}/${f}`) })),
+  ];
+
+  for (const { host, urls } of sources) {
     let hostVerdict = 'gone';
-    for (const p of paths) {
-      const v = await probe(`${host}${p}`);
+    for (const url of urls) {
+      const v = await probe(url);
       if (v === 'alive') { hostVerdict = 'alive'; break; }          // one live path is enough
       if (v === 'unknown') hostVerdict = 'unknown';                 // inconclusive, keep looking
     }
@@ -148,7 +169,7 @@ async function confirmAndBan(db, { owner, permlink, reportedBy, reportedUrl }) {
     return { banned: true, reason: 'no-stream' };
   }
 
-  const { gone, results } = await verifyGone(cid);
+  const { gone, results } = await verifyGone(cid, doc);
   if (!gone) return { banned: false, reason: 'still-reachable', results };
 
   if (!ENABLE_MONGO_WRITES) return { banned: false, reason: 'writes-disabled', results };

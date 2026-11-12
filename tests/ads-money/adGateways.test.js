@@ -110,6 +110,9 @@ describe('what a browser can read', () => {
     ['https://ipfs.3speak.tv/a', 'https://www.3speak.tv', false, false],
     ['https://ipfs.3speak.tv/a', null, false, false],
     ['https://images.example.com/a', null, false, false],
+    // The S3 archive answers `Access-Control-Allow-Origin: *`, Origin: null included.
+    ['https://buttercloud.b-cdn.net/vids/QmA/manifest.m3u8', null, true, true],
+    ['https://s3.3speak.tv/vids/QmA/480p/0.ts', 'https://www.3speak.tv', true, true],
   ])('%s from %s: readable %p, safe to redirect to %p', (url, origin, readable, redirectable) => {
     expect(G.isBrowserSafe(url, origin)).toBe(readable);
     expect(G.isRedirectSafe(url)).toBe(redirectable);
@@ -152,6 +155,9 @@ describe('what a browser can read', () => {
     ['the same origin', 'https://a.example/x', 'https://a.example/y', true],
     ['two of our gateways', 'https://ipfs.3speak.tv/x', 'https://ipfs-3speak.b-cdn.net/y', true],
     ['one of ours and a stranger', 'https://ipfs.3speak.tv/x', 'https://evil.example/y', false],
+    ['one CID folder on both S3 hosts', 'https://buttercloud.b-cdn.net/vids/QmA/manifest.m3u8', 'https://s3.3speak.tv/vids/QmA/480p/index.m3u8', true],
+    ['another CID on the other S3 host', 'https://buttercloud.b-cdn.net/vids/QmA/manifest.m3u8', 'https://s3.3speak.tv/vids/QmB/480p/index.m3u8', false],
+    ['an S3 copy and an IPFS gateway', 'https://buttercloud.b-cdn.net/vids/QmA/manifest.m3u8', 'https://ipfs.3speak.tv/ipfs/QmA/480p/index.m3u8', false],
     ['a non-url', 'nope', 'https://ipfs.3speak.tv/y', false],
   ])('sameContentScope: %s', (_label, a, b, want) => {
     expect(G.sameContentScope(a, b)).toBe(want);

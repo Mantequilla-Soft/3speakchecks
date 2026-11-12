@@ -64,7 +64,7 @@ async function syncDurations() {
             },
         ],
     })
-        .project({ owner: 1, permlink: 1, manifest_cid: 1 })
+        .project({ owner: 1, permlink: 1, manifest_cid: 1, storage_state: 1, s3_url: 1 })
         .sort({ createdAt: -1 })   // newest first: a just-published video gets its length soonest
         .limit(DURATION_SYNC_BATCH)
         .toArray();
@@ -72,7 +72,7 @@ async function syncDurations() {
     if (docs.length === 0) return { scanned: 0, updated: 0, unreadable: 0 };
 
     const seconds = await pooled(docs, DURATION_SYNC_CONCURRENCY,
-        (d) => durationFromManifest(d.manifest_cid).catch(() => null));
+        (d) => durationFromManifest(d.manifest_cid, d).catch(() => null));
 
     // Fills and misses are written separately so each modifiedCount means exactly
     // one thing — a combined bulkWrite would report the "checked" stamps as repairs.
@@ -165,7 +165,7 @@ async function syncLegacyDurations() {
             },
         ],
     })
-        .project({ video_v2: 1 })
+        .project({ video_v2: 1, storage_state: 1, s3_url: 1 })
         .sort({ created: -1 })
         .limit(DURATION_SYNC_BATCH)
         .toArray();
@@ -173,7 +173,7 @@ async function syncLegacyDurations() {
     if (docs.length === 0) return { scanned: 0, updated: 0, unreadable: 0 };
 
     const seconds = await pooled(docs, DURATION_SYNC_CONCURRENCY,
-        (d) => durationFromManifest(String(d.video_v2).match(LEGACY_MANIFEST)[1]).catch(() => null));
+        (d) => durationFromManifest(String(d.video_v2).match(LEGACY_MANIFEST)[1], d).catch(() => null));
 
     const fillOps = [];
     const stampOps = [];

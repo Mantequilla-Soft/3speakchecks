@@ -1,6 +1,7 @@
 const { getDb } = require('../utils/db');
 const { hiveRpcBatch } = require('../utils/hive');
 const { GATEWAY_HOSTS } = require('../utils/adGateways');
+const { s3CopyOf, s3UrlsFor } = require('../utils/s3Storage');
 const { grabFrame, ffmpegAvailable, uploadImage } = require('../utils/videoFrame');
 const { pickThumbnail } = require('./thumbnailSync');
 const {
@@ -41,9 +42,13 @@ let ffmpegChecked = null;   // memoised: true / false once probed
  * tried only when ffmpeg ran to the end and found nothing at 1 s (a clip shorter
  * than that); a gateway that stalled is simply passed over.
  */
-async function frameFor(manifestCid) {
-    for (const host of GATEWAY_HOSTS) {
-        const url = `https://${host}/ipfs/${manifestCid}/manifest.m3u8`;
+async function frameFor(manifestCid, doc = null) {
+    // The S3 copy first when there is one: an archived video may be gone from IPFS.
+    const urls = [
+        ...s3UrlsFor(s3CopyOf(doc, manifestCid)),
+        ...GATEWAY_HOSTS.map((host) => `https://${host}/ipfs/${manifestCid}/manifest.m3u8`),
+    ];
+    for (const url of urls) {
         const first = await grabFrame(url, 1);
         if (first.frame) return first.frame;
         if (first.timedOut) continue;
@@ -95,7 +100,7 @@ async function generateFrameThumbnails() {
                 { thumbnail_frame_attempts: { $lt: THUMBNAIL_FRAME_MAX_ATTEMPTS }, thumbnail_frame_failed_at: { $lt: retryBefore } }] },
         ],
     })
-        .project({ _id: 1, hive_author: 1, hive_permlink: 1, manifest_cid: 1 })
+        .project({ _id: 1, hive_author: 1, hive_permlink: 1, manifest_cid: 1, storage_state: 1, s3_url: 1 })
         .sort({ createdAt: -1 })   // newest first: what is on the feeds right now
         .limit(THUMBNAIL_FRAME_BATCH)
         .toArray();
@@ -129,7 +134,7 @@ async function generateFrameThumbnails() {
         let url = null;
         let reason = 'no frame';
         if (CID_RE.test(d.manifest_cid)) {
-            const frame = await frameFor(d.manifest_cid);
+            const frame = await frameFor(d.manifest_cid, d);
             if (frame) {
                 try {
                     url = await uploadImage(frame, { url: IMAGE_UPLOAD_URL, key: IMAGE_UPLOAD_KEY });

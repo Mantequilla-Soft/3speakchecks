@@ -449,6 +449,7 @@ const {
   markGatewayDown, urlsHealthFirst, startGatewayProbe, openCorsSiblings,
 } = require('../utils/adGateways');
 const { relayedSegment } = require('../services/adSegmentRelay');
+const { s3Siblings } = require('../utils/s3Storage');
 
 // Only the serving process watches the Bunny zones; scripts that require the
 // gateway module do not start a timer.
@@ -473,7 +474,8 @@ async function fetchOnce(url) {
 
 async function fetchText(url) {
   let firstErr = null;
-  for (const candidate of urlsHealthFirst([url, ...gatewaySiblings(url)])) {
+  // An archived video's manifest is in the S3 bucket: its sibling is the other S3 host.
+  for (const candidate of urlsHealthFirst([url, ...gatewaySiblings(url), ...s3Siblings(url)])) {
     try {
       return await fetchOnce(candidate);
     } catch (err) {
