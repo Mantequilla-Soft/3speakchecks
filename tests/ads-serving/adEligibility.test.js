@@ -17,9 +17,18 @@ const db = testDb.use();
 fx.freezeTime();
 beforeEach(() => jest.setSystemTime(fx.NOW));
 
+// The chain, for the payout a post declines or accepts (utils/rewardRefusal.js).
+// Every post accepts unless a test lists it in `declined`.
+let declined;
+beforeEach(() => { declined = new Set(); });
+const hiveRpcBatch = async ([call]) => [{ id: 1, result: {
+  author: call.params[0],
+  max_accepted_payout: declined.has(call.params.join('/')) ? '0.000 HBD' : '1000000.000 HBD',
+} }];
 const load = (env = {}, getDb = () => db()) => fx.loadIsolated('../../utils/adEligibility', {
-  env, mocks: { '../../utils/db': () => ({ getDb }) },
+  env, mocks: { '../../utils/db': () => ({ getDb }), '../../utils/hive': () => ({ hiveRpcBatch }) },
 });
+const blockRewards = (username) => db().collection('contentcreators').insertOne({ username, adRewardDisabled: true });
 
 const premium = (username, expires = null) => db().collection(PREMIUM_USERS_COLLECTION)
   .insertOne({ username, premium: true, premium_expires_at: expires });
@@ -92,6 +101,35 @@ describe('adDecision: should this video playback carry an ad', () => {
     if (account) await prefs('creator1', account);
     if (video) await videoMode('creator1', 'vid-1', video === 'legacy' ? null : video);
     await expect(load().adDecision(watch)).resolves.toMatchObject(want);
+  });
+
+  test('a reward-blocked creator carries no ads, whatever their own switches say', async () => {
+    await blockRewards('creator1');
+    await prefs('creator1', { adsEnabled: true });
+    await expect(load().adDecision(watch)).resolves.toEqual({ ads: false, reason: 'creator_reward_blocked' });
+    await expect(load().adDecision({ ...watch, owner: 'creator2' })).resolves.toMatchObject({ ads: true });
+  });
+
+  test('a video whose Hive post declines rewards carries no ads; its sibling does', async () => {
+    await db().collection('embed-video').insertMany([
+      { owner: 'creator1', permlink: 'vid-1', hive_author: 'creator1', hive_permlink: 'post-1' },
+      { owner: 'creator1', permlink: 'vid-2', hive_author: 'creator1', hive_permlink: 'post-2' },
+    ]);
+    declined.add('creator1/post-1');
+    const { adDecision } = load();
+    await expect(adDecision(watch)).resolves.toEqual({ ads: false, reason: 'rewards_declined' });
+    await expect(adDecision({ ...watch, permlink: 'vid-2' })).resolves.toMatchObject({ ads: true });
+  });
+
+  test('a live stream announced with rewards declined carries no ads (room = post permlink)', async () => {
+    declined.add('creator1/room-1');
+    await expect(load().adDecision({ ...watch, permlink: 'room-1' })).resolves.toMatchObject({ reason: 'rewards_declined' });
+  });
+
+  test('a Pro subscriber still reads as premium on declined content, so the player can flag the session', async () => {
+    await premium('viewer1');
+    declined.add('creator1/vid-1');
+    await expect(load().adDecision(watch)).resolves.toEqual({ ads: false, reason: 'premium_viewer' });
   });
 
   test('an anonymous viewer is never a subscriber and still gets the creator\'s rules', async () => {
@@ -181,6 +219,16 @@ describe('audioAdDecision: should this audio playback carry a spoken spot', () =
     jest.spyOn(console, 'error').mockImplementation(() => {});
     const broken = () => ({ collection: () => ({ find: () => ({ toArray: async () => { throw new Error('down'); } }) }) });
     await expect(load({}, broken).audioAdDecision(listen)).resolves.toEqual({ ads: false, reason: 'unknown_premium_state' });
+  });
+
+  test('a reward-blocked creator or a declined episode gets none, even with the track switched on', async () => {
+    await trackChoice('creator1', 'track-1', true);
+    await blockRewards('creator1');
+    await expect(load().audioAdDecision(listen)).resolves.toEqual({ ads: false, reason: 'creator_reward_blocked' });
+    await db().collection('contentcreators').deleteMany({});
+    await db().collection('embed-audio').insertOne({ owner: 'creator1', permlink: 'track-1', post_permlink: 'ep-1' });
+    declined.add('creator1/ep-1');
+    await expect(load().audioAdDecision(listen)).resolves.toEqual({ ads: false, reason: 'rewards_declined' });
   });
 
   test.each([

@@ -610,11 +610,12 @@ async function resolveCommunities(db, pairs) {
  *   - AD_EXCLUDED_ACCOUNTS, the platform's own accounts (badadib), from config.
  *   - `contentcreators.adRewardDisabled: true`, set per account by an admin.
  *
- * 🚨 BLOCKED IS NOT OPTED OUT. A blocked account's videos still carry ads and still
- * earn the advertiser their impressions; we simply do not send the money on. Opting
- * OUT of ads is a different switch entirely (ad_creator_prefs), it is the creator's to
- * set, and it removes their videos from what we sell. Never collapse the two: one is
- * our decision about a transfer, the other is theirs about their videos.
+ * Since 2026-11-12 a blocked creator's content carries NO ads at all
+ * (utils/rewardRefusal.js, read by utils/adEligibility.js), so this mostly catches
+ * impressions recorded before the flag was set, or within the serve path's cache.
+ * It stays the authoritative check for MONEY: whatever reached the impressions, a
+ * blocked account is not paid. Opting OUT of ads (ad_creator_prefs) is still a
+ * different switch: it is the creator's to set, this one is ours.
  *
  * Batched deliberately. A settlement can hold thousands of impressions over a few
  * hundred accounts, and a per-row lookup would be a round trip each.

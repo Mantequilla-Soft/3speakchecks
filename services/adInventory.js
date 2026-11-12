@@ -39,7 +39,9 @@
  * the forecast as well as from serving — otherwise we would sell inventory we
  * have promised not to use. An account with rollsEnabled:false takes banners and
  * tickers but no rolls, so it stays in `slots` and is dropped from `rollSlots`,
- * the figures a roll booking is quoted from.
+ * the figures a roll booking is quoted from. A creator whose ad rewards an admin
+ * blocked (AD_REWARD_FLAG_COLLECTION adRewardDisabled:true) carries no ads either
+ * (utils/rewardRefusal.js), so they are dropped with the opted-out accounts.
  *
  * Writes ONE document (_id: 'current') into AD_INVENTORY_COLLECTION. Nothing
  * here reads or writes personal data: view-durations carries no IP and no
@@ -50,6 +52,7 @@ const {
   ENABLE_MONGO_WRITES,
   AD_INVENTORY_COLLECTION,
   AD_CREATOR_PREFS_COLLECTION,
+  AD_REWARD_FLAG_COLLECTION,
   AD_INVENTORY_WINDOW_DAYS,
   AD_MIN_ENGAGED_SECONDS,
   AD_SLOT_PERCENTS,
@@ -100,11 +103,17 @@ async function findSuspectAccounts(db, since) {
   }));
 }
 
-/** Accounts that have turned ads off. Network-wide default is ON. */
+/** Accounts whose videos carry no ads: turned off by them, or reward-blocked by an admin. */
 async function findOptedOutAccounts(db) {
-  const rows = await db.collection(AD_CREATOR_PREFS_COLLECTION)
-    .find({ adsEnabled: false }, { projection: { _id: 1 } }).toArray();
-  return rows.map((r) => r._id);
+  const [rows, blocked] = await Promise.all([
+    db.collection(AD_CREATOR_PREFS_COLLECTION)
+      .find({ adsEnabled: false }, { projection: { _id: 1 } }).toArray(),
+    db.collection(AD_REWARD_FLAG_COLLECTION)
+      .find({ adRewardDisabled: true }, { projection: { username: 1 } }).toArray(),
+  ]);
+  const names = rows.map((r) => r._id)
+    .concat(blocked.map((r) => String(r.username || '').trim().toLowerCase()).filter(Boolean));
+  return Array.from(new Set(names));
 }
 
 /** Accounts that take banners and tickers but no rolls. */
