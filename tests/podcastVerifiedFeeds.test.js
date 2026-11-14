@@ -3,7 +3,13 @@
  * `rss` social link), for the podcast import. Real Mongo; the feed worker is a
  * stand-in, so nothing is fetched.
  */
+jest.mock('../utils/safeFetch', () => {
+  const actual = jest.requireActual('../utils/safeFetch');
+  return { ...actual, safeStream: jest.fn() };
+});
+const { Readable } = require('stream');
 const request = require('supertest');
+const { safeStream } = require('../utils/safeFetch');
 const { ObjectId } = require('mongodb');
 const testDb = require('./helpers/db');
 const { buildApp } = require('./helpers/app');
@@ -123,5 +129,53 @@ describe('clean-up keeps a show in use by the import', () => {
     expect(left).not.toContain(idle.toHexString());
     expect(left).not.toContain(plain.toHexString());
     expect(await db().collection(EPISODES).countDocuments({ feed_id: used })).toBe(1);
+  });
+});
+
+describe('GET /podcasts/verified/:user/episode/:id/download', () => {
+  const epId = (feed) => `${feed.toHexString()}:abcdefghijklmnop`;
+  const episode = (feed, over = {}) => db().collection(EPISODES).insertOne({ _id: epId(feed), feed_id: feed, title: 'Ep 1', audio_url: 'https://cdn.example.com/1.mp3', mime: 'audio/mpeg', ...over });
+  const audio = () => safeStream.mockResolvedValue({
+    status: 200, url: 'https://cdn.example.com/1.mp3', headers: { 'content-type': 'audio/mpeg', 'content-length': '5' },
+    stream: Readable.from([Buffer.from('ID3xx')]), abort: jest.fn(),
+  });
+  const dl = (user, id) => request(app).get(`/podcasts/verified/${user}/episode/${encodeURIComponent(id)}/download`);
+  beforeEach(() => safeStream.mockReset());
+
+  test('streams the audio of an episode of the user\'s verified show', async () => {
+    await link();
+    const feed = await feedRow();
+    await episode(feed);
+    audio();
+    const res = await dl('alice', epId(feed)).buffer(true).parse((r, cb) => { const b = []; r.on('data', (c) => b.push(c)); r.on('end', () => cb(null, Buffer.concat(b))); }).expect(200);
+    expect(res.headers['content-type']).toBe('audio/mpeg');
+    expect(res.body.toString()).toBe('ID3xx');
+    expect(safeStream).toHaveBeenCalledWith('https://cdn.example.com/1.mp3', expect.any(Object));
+  });
+
+  test('a show found under an older address (alt_keys) still counts', async () => {
+    await link({ platform_username: 'https://old.example.com/feed' });
+    const feed = await feedRow({ alt_keys: ['old.example.com/feed'] });
+    await episode(feed);
+    audio();
+    await dl('alice', epId(feed)).expect(200);
+  });
+
+  test('someone else\'s show, an unverified link and a private episode are 404, nothing fetched', async () => {
+    await link({ hive_username: 'bob' });
+    await link({ verified: false });
+    const feed = await feedRow();
+    await episode(feed);
+    await dl('alice', epId(feed)).expect(404);
+    const priv = await feedRow({ url_key: 'example.com/p' });
+    await link({ platform_username: 'https://example.com/p' });
+    await episode(priv, { _id: epId(priv), private: true });
+    await dl('alice', epId(priv)).expect(404);
+    expect(safeStream).not.toHaveBeenCalled();
+  });
+
+  test('bad ids are refused', async () => {
+    await dl('alice', 'nope').expect(400);
+    await dl('a b', `${new ObjectId().toHexString()}:abcdefghijklmnop`).expect(400);
   });
 });

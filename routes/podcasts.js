@@ -26,7 +26,8 @@
  *                           and their episodes merged by date (utils/playlistFeeds.js)
  *   GET  /podcasts/verified?user=                  the shows a Hive user proved they publish
  *                           (a verified `rss` link, routes/verify.js): the podcast import
- *                           reads their episodes and audio through the reads above
+ *                           reads their episodes through the reads above
+ *   GET  /podcasts/verified/:user/episode/:id/download   the audio of one of them, for the import
  *
  * Writes, signed:
  *   POST /podcasts/subscribe   { user, urls: [..], titles?: [..], private?: [..], signature, timestamp }
@@ -634,6 +635,11 @@ function downloadName(url, title) {
 router.get('/episode/:id/download', downloadStarts, downloadRanges, async (req, res) => {
   const ep = await readableEpisode(req, res, { audio_url: 1, mime: 1, title: 1 });
   if (!ep) return;
+  await sendEpisodeAudio(req, res, ep);
+});
+
+/** Passes an episode's audio through (the download above, and the import's below). */
+async function sendEpisodeAudio(req, res, ep) {
   if (downloadsOpen >= DOWNLOADS_AT_ONCE) return res.status(503).json({ success: false, error: 'busy, try again in a minute', code: 'busy' });
   downloadsOpen += 1;
   let released = false;
@@ -689,7 +695,7 @@ router.get('/episode/:id/download', downloadStarts, downloadRanges, async (req, 
     if (err) up.abort();
     release();
   });
-});
+}
 
 
 // ─── Search and trending (Podcast Index) ──────────────────────────────────────
@@ -1291,6 +1297,46 @@ router.get('/verified', verifiedLimiter, async (req, res) => {
   } catch (err) {
     console.error('[podcasts] verified:', err.message);
     res.status(500).json({ success: false, error: 'could not load the verified shows' });
+  }
+});
+
+/** url_keys of the feeds a Hive user has a verified `rss` link for. */
+async function verifiedFeedKeys(user) {
+  const links = await getLinksCollection()
+    .find({ hive_username: user, platform: 'rss', verified: true }, { projection: { platform_username: 1 } })
+    .limit(MAX_VERIFIED_FEEDS).toArray();
+  return links.map((l) => urlKey(String(l.platform_username || ''))).filter(Boolean);
+}
+
+/**
+ * GET /podcasts/verified/:user/episode/:id/download: an episode's audio for the
+ * podcast import, only when the episode's show is one the user verified. The
+ * public download allows a dozen starts an hour per address, and every import
+ * comes from the 3Speak server's one address, so this has its own limit per
+ * creator (and address). Everything else is the public download's.
+ */
+const importDownloads = rateLimit({
+  keyGenerator: (req) => `${userOf(req.params.user)}|${rateLimit.ipKeyGenerator(clientIpOf(req))}`,
+  validate: { xForwardedForHeader: false, ip: false },
+  windowMs: 60 * 60 * 1000, max: 30, skip: continuesDownload, standardHeaders: false, legacyHeaders: false,
+  message: { success: false, error: 'Too many downloads, try again later' },
+});
+
+router.get('/verified/:user/episode/:id/download', importDownloads, async (req, res) => {
+  const user = userOf(req.params.user);
+  const id = String(req.params.id);
+  if (!USER_RE.test(user) || !EPISODE_RE.test(id)) return res.status(400).json({ success: false, error: 'invalid user or episode' });
+  try {
+    const db = getDb();
+    const ep = await db.collection(EPISODES).findOne({ _id: id }, { projection: { audio_url: 1, mime: 1, title: 1, feed_id: 1, private: 1 } });
+    const feed = ep && !ep.private ? await db.collection(FEEDS).findOne({ _id: ep.feed_id }, { projection: { url_key: 1, alt_keys: 1, private: 1 } }) : null;
+    const keys = feed && !feed.private ? await verifiedFeedKeys(user) : [];
+    const own = feed && [feed.url_key, ...(feed.alt_keys || [])].some((k) => keys.includes(k));
+    if (!own) return res.status(404).json({ success: false, error: 'not found' });
+    await sendEpisodeAudio(req, res, ep);
+  } catch (err) {
+    console.error('[podcasts] verified download:', err.message);
+    if (!res.headersSent) res.status(500).json({ success: false, error: 'could not load the episode' });
   }
 });
 
