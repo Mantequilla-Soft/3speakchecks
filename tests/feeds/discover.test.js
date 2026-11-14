@@ -241,6 +241,26 @@ describe('ordering and pagination', () => {
     expect(F.permlinks(again.videos)).toEqual(F.permlinks(pages[1].videos));
   });
 
+  test('one creator gets at most 2 of any 12 slots, the extras move down but stay in the feed', async () => {
+    // busy has the 6 highest scores; 24 others fill the rest.
+    await seedMany(30, (i) => (i < 6
+      ? { owner: 'busy', entry: { base: 10 } }
+      : { entry: { base: 1 } }));
+    const res = await discover({ limit: 30 }).expect(200);
+    const owners = res.body.videos.map((v) => v.owner);
+    expect(owners).toHaveLength(30);
+    expect(owners.filter((o) => o === 'busy')).toHaveLength(6);
+    for (let i = 0; i + 12 <= owners.length; i += 1) {
+      expect(owners.slice(i, i + 12).filter((o) => o === 'busy').length).toBeLessThanOrEqual(2);
+    }
+  });
+
+  test('chrono=1 does not spread creators', async () => {
+    await seedMany(4, () => ({ owner: 'busy' }));
+    const res = await discover({ chrono: 1 }).expect(200);
+    expect(F.permlinks(res.body.videos)).toEqual(['hive-v0', 'hive-v1', 'hive-v2', 'hive-v3']);
+  });
+
   test('a page past the end is empty but still reports the real total', async () => {
     await seedMany(2);
     const res = await discover({ page: 5, limit: 10 }).expect(200);

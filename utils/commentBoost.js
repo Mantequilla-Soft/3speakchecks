@@ -5,10 +5,11 @@
  * live only on Hive. A background sync (services/commentCounts.js) fetches them for
  * recent videos and stamps them into `video-comment-counts` (_id = author/permlink):
  *
- *   { comments, native3Speak, effective }
+ *   { comments, native3Speak, commenters, nativeCommenters, effective }
  *
- * where `effective = comments + (NATIVE_MULT − 1)·native3Speak` — comments posted
- * through the 3Speak frontend count NATIVE_MULT× (default 1.5).
+ * where `effective = commenters + (NATIVE_MULT − 1)·nativeCommenters`: DISTINCT
+ * accounts other than the creator, so one viewer's 30 live-chat messages count once,
+ * and people commenting through the 3Speak frontend count NATIVE_MULT× (default 1.5).
  *
  * The feeds turn that into a modest, log-damped, capped multiplier:
  *

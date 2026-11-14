@@ -437,6 +437,12 @@ module.exports = {
     // AGE_BAND_TILT_SHARE). 0 = off (every page carries the same mix again).
     DISCOVER_FRONT_TILT: parseFloat(process.env.DISCOVER_FRONT_TILT ?? '4'),
     DISCOVER_FRONT_HALFLIFE_SLOTS: parseFloat(process.env.DISCOVER_FRONT_HALFLIFE_SLOTS ?? '90'),
+    // Creator spread: at most CREATOR_MAX videos by one creator in any CREATOR_WINDOW
+    // consecutive slots of discover / interests. Nothing is dropped, the extra videos
+    // move down. Added 2026-11-14 after one creator posting 8 videos in 15 hours took
+    // 2 to 3 of the first 5 slots on most seeds. 0 for either = off.
+    DISCOVER_CREATOR_MAX: parseInt(process.env.DISCOVER_CREATOR_MAX ?? '2'),
+    DISCOVER_CREATOR_WINDOW: parseInt(process.env.DISCOVER_CREATOR_WINDOW ?? '12'),
 
     // ─── Curation signals: the MANUAL votes (utils/curation.js) ───────────────
     // Three deliberate human acts, as opposed to the passive signals (views, watch

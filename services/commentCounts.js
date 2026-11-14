@@ -2,7 +2,8 @@
  * Comment-count background sync.
  *
  * Comment counts exist only on Hive. This job fetches the top-level comment count
- * (and how many of those were posted through the 3Speak frontend) for every published
+ * and the number of DISTINCT commenters (and how many of each came through the
+ * 3Speak frontend) for every published
  * video younger than COMMENT_SYNC_MAX_AGE_DAYS — bounding the fetch to a few thousand
  * recent videos — and writes them into `video-comment-counts` for the feeds to read
  * cheaply. It runs IN-PROCESS (not a worker thread): the work is Hive network I/O, not
@@ -83,13 +84,15 @@ async function syncCommentCounts() {
       if (!c) continue;                                    // transient fetch miss → leave as-is
       refreshed.add(`${ap.author}/${ap.permlink}`);
       if (c.comments > 0) withComments += 1;
-      const effective = c.comments + (COMMENT_NATIVE_MULT - 1) * c.native3Speak;
+      // Distinct commenters, not raw comments: stream chat is one reply per message.
+      const effective = c.commenters + (COMMENT_NATIVE_MULT - 1) * c.nativeCommenters;
       ops.push({
         updateOne: {
           filter: { _id: `${ap.author}/${ap.permlink}` },
           update: { $set: {
             author: ap.author, permlink: ap.permlink,
             comments: c.comments, native3Speak: c.native3Speak,
+            commenters: c.commenters, nativeCommenters: c.nativeCommenters,
             effective: Math.round(effective * 100) / 100,
             updatedAt: runAt,
           } },
