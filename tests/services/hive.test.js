@@ -390,10 +390,24 @@ describe('fetchCommentReplyCounts', () => {
       { author: 'a', permlink: 'p0' }, { author: 'a', permlink: 'p1' }, { author: 'a', permlink: 'p2' },
     ], { batchSize: 2 });
     expect(Object.fromEntries(map)).toEqual({
-      'a/p0': { comments: 3, native3Speak: 2 },
-      'a/p1': { comments: 0, native3Speak: 0 },
-      'a/p2': { comments: 1, native3Speak: 0 },
+      'a/p0': { comments: 3, native3Speak: 2, commenters: 0, nativeCommenters: 0 },
+      'a/p1': { comments: 0, native3Speak: 0, commenters: 0, nativeCommenters: 0 },
+      'a/p2': { comments: 1, native3Speak: 0, commenters: 0, nativeCommenters: 0 },
     });
+  });
+
+  test('commenters are distinct accounts other than the post author', async () => {
+    const by = (author, app) => ({ author, json_metadata: JSON.stringify({ app }) });
+    methods['condenser_api.get_content_replies'] = () => [
+      // One viewer's live chat: many top-level replies, one person.
+      ...Array.from({ length: 30 }, () => by('viewer', '3speak/new-version')),
+      by('Viewer', 'peakd/1.0'),                 // same account, other case + app
+      by('other', 'ecency'),
+      by('streamer', '3speak/new-version'),      // the creator answering in chat
+      by('', 'peakd/1.0'),                       // no author: not a commenter
+    ];
+    const map = await hive.fetchCommentReplyCounts([{ author: 'Streamer', permlink: 'vod' }]);
+    expect(map.get('Streamer/vod')).toEqual({ comments: 34, native3Speak: 31, commenters: 2, nativeCommenters: 1 });
   });
 
   test('an error entry or a dropped entry leaves that post absent', async () => {

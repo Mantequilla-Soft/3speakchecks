@@ -453,12 +453,19 @@ only on Hive. So a background job stamps them into Mongo for the feeds to read c
   and the age-out prune only runs when the fetch wrote something — a total Hive outage
   can't wipe the collection.
 
-**Native 3Speak comments count more.** A comment posted through the 3Speak frontend sets
-`json_metadata.app` to `3speak/…` (e.g. `3speak/new-version`). Those count
-`COMMENT_NATIVE_MULT`× (1.5) toward an **effective** total:
+**People, not messages.** The boost counts **distinct commenters**, leaving out the
+creator's own replies. Live stream chat is posted as top-level replies (one per
+message), so before 2026-11-14 one viewer chatting through a 25-minute stream counted as
+34 comments and put that recording at ×1.79, next to the cap. Now that is 1 commenter
+(×1.14). The raw `comments` / `native3Speak` counts are still stored next to
+`commenters` / `nativeCommenters`.
+
+**Native 3Speak commenters count more.** A comment posted through the 3Speak frontend sets
+`json_metadata.app` to `3speak/…` (e.g. `3speak/new-version`). Accounts that commented
+that way count `COMMENT_NATIVE_MULT`× (1.5) toward an **effective** total:
 
 ```
-effective    = comments + (NATIVE_MULT − 1)·native3Speak
+effective    = commenters + (NATIVE_MULT − 1)·nativeCommenters
 commentBoost = min(CAP, 1 + W·ln(1 + effective))      (W=0.2, CAP=1.8)
 ```
 
@@ -885,7 +892,7 @@ Live: **~0.12s** vs trendingSorted's ~1.5s.
 
 `?debug=1` preserves `discover_score`, `base`, `age_hours`, `freshness`,
 `new_boost`, `recency_boost`, `curation_boost`, `reshares`, `saves`, `viewer_tags`, `comment_boost`,
-`comments`, `native_comments`, `follow_match`,
+`comments`, `native_comments`, `commenters`, `follow_match`,
 `retention_mult`, `retention_relq`, `retention_viewers`, `interest_match` and
 `pool_src` in the response (stripped otherwise).
 

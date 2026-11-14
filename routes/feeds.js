@@ -502,6 +502,7 @@ router.get('/discover', async (req, res) => {
                 v.comment_boost = p.commentBoost;
                 v.comments = p.comments;
                 v.native_comments = p.native3Speak;
+                v.commenters = p.commenters;
                 v.follow_match = !!p.follow_match;
                 v.engagement_match = !!p.engagement_match;
                 v.engagement_boost = p.engagement_boost;

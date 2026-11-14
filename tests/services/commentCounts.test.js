@@ -78,23 +78,34 @@ describe('which videos are counted', () => {
 });
 
 describe('what is stored', () => {
-  test('raw and 3Speak-native counts, plus the native-weighted effective count', async () => {
+  test('raw and 3Speak-native counts, plus the native-weighted effective count of COMMENTERS', async () => {
     await db().collection('videos').insertMany([legacy('alice', 'v1'), legacy('alice', 'quiet')]);
-    hiveReturns({ 'alice/v1': { comments: 4, native3Speak: 3 }, 'alice/quiet': { comments: 0, native3Speak: 0 } });
+    hiveReturns({
+      'alice/v1': { comments: 4, native3Speak: 3, commenters: 2, nativeCommenters: 1 },
+      'alice/quiet': { comments: 0, native3Speak: 0, commenters: 0, nativeCommenters: 0 },
+    });
 
     const run = await syncCommentCounts();
 
     expect(run).toMatchObject({ videos: 2, written: 2, withComments: 1, removed: 0 });
     expect(await counts().findOne({ _id: 'alice/v1' })).toEqual({
       _id: 'alice/v1', author: 'alice', permlink: 'v1', comments: 4, native3Speak: 3,
-      effective: 5.5,                                       // 4 + (1.5 - 1) * 3
+      commenters: 2, nativeCommenters: 1,
+      effective: 2.5,                                       // 2 + (1.5 - 1) * 1
       updatedAt: NOW,
     });
   });
 
+  test('a stream chat of 34 messages from one viewer counts as one commenter', async () => {
+    await db().collection('videos').insertOne(legacy('streamer', 'vod'));
+    hiveReturns({ 'streamer/vod': { comments: 34, native3Speak: 34, commenters: 1, nativeCommenters: 1 } });
+    await syncCommentCounts();
+    expect(await counts().findOne({ _id: 'streamer/vod' })).toMatchObject({ comments: 34, effective: 1.5 });
+  });
+
   test('running twice with the same Hive answers leaves the same rows', async () => {
     await db().collection('videos').insertOne(legacy('alice', 'v1'));
-    hiveReturns({ 'alice/v1': { comments: 2, native3Speak: 0 } });
+    hiveReturns({ 'alice/v1': { comments: 2, native3Speak: 0, commenters: 2, nativeCommenters: 0 } });
     await syncCommentCounts();
     const first = await counts().find().toArray();
     await syncCommentCounts();
@@ -104,7 +115,7 @@ describe('what is stored', () => {
   test('a row for a video that left the window is pruned once a run writes fresh rows', async () => {
     await counts().insertOne({ _id: 'alice/aged', comments: 9, updatedAt: ago(DAY) });
     await db().collection('videos').insertOne(legacy('alice', 'v1'));
-    hiveReturns({ 'alice/v1': { comments: 1, native3Speak: 0 } });
+    hiveReturns({ 'alice/v1': { comments: 1, native3Speak: 0, commenters: 1, nativeCommenters: 0 } });
 
     const run = await syncCommentCounts();
 
@@ -121,7 +132,7 @@ describe('Hive failures never corrupt the counts', () => {
     // successful run.
     await counts().insertOne({ _id: 'alice/missed', author: 'alice', permlink: 'missed', comments: 7, native3Speak: 1, effective: 7.5, updatedAt: ago(DAY) });
     await db().collection('videos').insertMany([legacy('alice', 'missed'), legacy('alice', 'ok')]);
-    hiveReturns({ 'alice/ok': { comments: 1, native3Speak: 0 } });
+    hiveReturns({ 'alice/ok': { comments: 1, native3Speak: 0, commenters: 1, nativeCommenters: 0 } });
 
     await syncCommentCounts();
 
@@ -146,7 +157,7 @@ describe('Hive failures never corrupt the counts', () => {
 
     expect(await syncCommentCounts()).toEqual({ error: 'rpc exploded' });
 
-    hiveReturns({ 'alice/v1': { comments: 1, native3Speak: 1 } });
+    hiveReturns({ 'alice/v1': { comments: 1, native3Speak: 1, commenters: 1, nativeCommenters: 1 } });
     expect(await syncCommentCounts()).toMatchObject({ written: 1 });
   });
 
@@ -187,7 +198,7 @@ describe('scheduling', () => {
     scheduleCommentCounts();
     timeout.mockRestore();
     await db().collection('videos').insertOne(legacy('alice', 'v1'));
-    hiveReturns({ 'alice/v1': { comments: 2, native3Speak: 0 } });
+    hiveReturns({ 'alice/v1': { comments: 2, native3Speak: 0, commenters: 2, nativeCommenters: 0 } });
     const logged = new Promise((r) => jest.spyOn(console, 'log').mockImplementation((tag) => { if (tag === '[commentCounts]') r(); }));
     interval.mock.calls[0][0]();
     await logged;                                    // the callback logs once its sync finished
