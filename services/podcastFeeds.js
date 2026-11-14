@@ -233,6 +233,9 @@ async function gc() {
   const candidates = await db.collection(FEEDS).find({
     subscribers: { $lte: 0 },
     playlist_refs: { $not: { $gt: 0 } },
+    // A show its publisher verified and imports from (GET /podcasts/verified) stays
+    // while they use it, so its episode ids do not change in the middle of a batch.
+    verified_seen_at: { $not: { $gt: new Date(now - ORPHAN_GRACE_MS) } },
     $or: [
       { orphaned_at: { $lt: new Date(now - ORPHAN_GRACE_MS) } },
       // Rows a failed probe or an abandoned import left behind.

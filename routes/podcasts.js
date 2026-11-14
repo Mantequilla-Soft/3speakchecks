@@ -24,6 +24,9 @@
  *   POST /podcasts/progress                        save that (session vouch, below)
  *   POST /podcasts/bundle   { urls, cursor?, limit? }   the shows a 3Speak playlist names
  *                           and their episodes merged by date (utils/playlistFeeds.js)
+ *   GET  /podcasts/verified?user=                  the shows a Hive user proved they publish
+ *                           (a verified `rss` link, routes/verify.js): the podcast import
+ *                           reads their episodes and audio through the reads above
  *
  * Writes, signed:
  *   POST /podcasts/subscribe   { user, urls: [..], titles?: [..], private?: [..], signature, timestamp }
@@ -57,7 +60,7 @@ const crypto = require('crypto');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { ObjectId } = require('mongodb');
-const { getDb } = require('../utils/db');
+const { getDb, getLinksCollection } = require('../utils/db');
 const { verifyHiveAuthority, verifyDelegateVouch } = require('../utils/hiveAuth');
 const { SIGNATURE_TIMESTAMP_TOLERANCE_MS, AD_SIGNING_DELEGATES } = require('../utils/config');
 const { Transform, pipeline } = require('stream');
@@ -1226,6 +1229,68 @@ router.post('/resolve', express.json({ limit: '8kb' }), async (req, res) => {
   } catch (err) {
     console.error('[podcasts] resolve:', err.message);
     res.status(500).json({ success: false, error: 'could not check the show' });
+  }
+});
+
+// ─── Shows their publisher verified (the podcast import) ──────────────────────
+
+/**
+ * The feeds a Hive user has a VERIFIED `rss` social link for (the code was in the
+ * feed, services/platforms/rss.js), each with its row here, so the importer can
+ * page through the episodes (/feed/:id, /feed/:id/older), read the notes and pull
+ * the audio (/episode/:id/download). Public like /verify/links: it only says
+ * which public shows someone publishes. A show we have no row for is fetched now,
+ * exactly that URL (no directory or website lookup: only the verified address
+ * counts), and one nobody follows is re-read when older than VERIFIED_FRESH_MS,
+ * because the worker only polls followed shows. `verified_seen_at` keeps the row
+ * from the clean-up while it is used (services/podcastFeeds.js gc).
+ */
+const VERIFIED_FRESH_MS = 10 * 60 * 1000;
+const MAX_VERIFIED_FEEDS = 10;
+const verifiedLimiter = rateLimit({
+  keyGenerator: (req) => rateLimit.ipKeyGenerator(clientIpOf(req)), validate: { xForwardedForHeader: false, ip: false },
+  windowMs: 60 * 1000, max: 30, standardHeaders: false, legacyHeaders: false,
+  message: { success: false, error: 'Too many requests' },
+});
+
+router.get('/verified', verifiedLimiter, async (req, res) => {
+  if (!podcastFeeds.enabled()) return disabled(res);
+  const user = userOf(req.query.user);
+  if (!USER_RE.test(user)) return res.status(400).json({ success: false, error: 'invalid user' });
+  try {
+    const links = await getLinksCollection()
+      .find({ hive_username: user, platform: 'rss', verified: true }, { projection: { platform_username: 1, verified_at: 1 } })
+      .sort({ verified_at: -1 }).limit(MAX_VERIFIED_FEEDS).toArray();
+    const feeds = getDb().collection(FEEDS);
+    const out = [];
+    for (const link of links) {
+      const url = String(link.platform_username || '');
+      const key = urlKey(url);
+      const entry = { url, verified_at: link.verified_at || null };
+      out.push(entry);
+      if (!key || splitCredentials(url).auth) { entry.code = 'bad_url'; continue; }
+      if (internalOwner(key)) { entry.code = 'internal_feed'; continue; }
+      let feed = await feeds.findOne({ $or: [{ url_key: key }, { alt_keys: key }], private: { $ne: true } });
+      const followed = feed && ((feed.subscribers || 0) > 0 || (feed.playlist_refs || 0) > 0);
+      const stale = feed && Date.now() - new Date(feed.last_fetch_at || feed.last_ok_at || 0).getTime() > VERIFIED_FRESH_MS;
+      if (!feed || !feed.last_ok_at || (!followed && stale)) {
+        const r = await podcastFeeds.ask('probe', { url, fresh_ms: followed ? 0 : VERIFIED_FRESH_MS }, 35000);
+        if (!r.ok) {
+          if (!feed || !feed.last_ok_at) { entry.code = r.code || 'error'; continue; }
+        } else {
+          feed = await feeds.findOne({ _id: new ObjectId(r.feed_id) });
+          if (!feed) { entry.code = 'error'; continue; }
+        }
+      }
+      await feeds.updateOne({ _id: feed._id }, { $set: { verified_seen_at: new Date() } });
+      await fillMissingArt([feed]);
+      entry.feed = presentFeed(feed, { subscribers: feed.subscribers || 0 });
+    }
+    res.set('Cache-Control', 'no-store');
+    res.json({ success: true, user, feeds: out });
+  } catch (err) {
+    console.error('[podcasts] verified:', err.message);
+    res.status(500).json({ success: false, error: 'could not load the verified shows' });
   }
 });
 

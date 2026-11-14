@@ -5,7 +5,8 @@
  * answers messages from services/podcastFeeds.js (main thread):
  *
  *   { id, type: 'tick' }                  poll every feed that is due
- *   { id, type: 'probe', url, private?, owner? }  someone added a URL: fetch it now, store it
+ *   { id, type: 'probe', url, private?, owner?, fresh_ms? }  someone added a URL: fetch it now, store it
+ *                                       (`fresh_ms`: also re-read a known feed last read longer ago)
  *   { id, type: 'notes', feed_id, episode_id }  an episode's full show notes (not stored)
  *
  * and replies { id, ok, ... }. Parsing a big feed is synchronous CPU work, which is
@@ -309,13 +310,22 @@ async function tick() {
  * A user added a URL we did not have: create the row and fetch it right away.
  * `private` (with `owner`, the listener): their own row, see the header.
  */
-async function probe(url, { private: isPrivate = false, owner = '' } = {}) {
+async function probe(url, { private: isPrivate = false, owner = '', freshMs = 0 } = {}) {
   await connect();
   const key = isPrivate ? privateKey(owner, url) : urlKey(url);
   if (!key) return { error: 'bad_url' };
   const col = db.collection(FEEDS);
   let feed = await col.findOne(isPrivate ? { url_key: key } : { $or: [{ url_key: key }, { alt_keys: key }], private: { $ne: true } });
-  if (feed && feed.status !== 'pending' && feed.last_ok_at) return { feed_id: feed._id.toHexString(), existed: true };
+  if (feed && feed.status !== 'pending' && feed.last_ok_at) {
+    // A show nobody follows is not polled: whoever needs its newest episodes (the
+    // podcast import) asks for a fresh read. A failed re-read keeps what we have.
+    const last = feed.last_fetch_at || feed.last_ok_at;
+    if (freshMs > 0 && Date.now() - new Date(last).getTime() > freshMs) {
+      const r = await pollFeed(feed);
+      if (r.merged) return { feed_id: r.merged.toHexString(), existed: true };
+    }
+    return { feed_id: feed._id.toHexString(), existed: true };
+  }
   if (!feed) {
     const doc = { url, url_key: key, alt_keys: [], status: 'pending', subscribers: 0, error_count: 0, created_at: new Date(), next_poll_at: new Date() };
     if (isPrivate) Object.assign(doc, { private: true, owner });
@@ -374,7 +384,7 @@ if (parentPort) parentPort.on('message', async (msg) => {
       ticking = true;
       try { reply({ ok: true, ...(await tick()) }); } finally { ticking = false; }
     } else if (msg.type === 'probe') {
-      const r = await probe(msg.url, { private: msg.private === true, owner: String(msg.owner || '') });
+      const r = await probe(msg.url, { private: msg.private === true, owner: String(msg.owner || ''), freshMs: Math.max(0, Number(msg.fresh_ms) || 0) });
       reply(r.error ? { ok: false, code: r.error } : { ok: true, ...r });
     } else if (msg.type === 'notes') {
       const r = await notes(String(msg.feed_id), String(msg.episode_id));
