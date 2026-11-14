@@ -316,8 +316,51 @@ function interleaveByInterest(ranked, share, isMatch) {
   return out;
 }
 
+/**
+ * Creator spread: no creator gets more than `max` of any `window` consecutive slots.
+ *
+ * Walks the list in order; an item whose creator is already at `max` in the last
+ * `window - 1` slots is held back and placed as soon as it fits again, ahead of
+ * anything later in the list (held-back items keep their relative order). When
+ * nothing fits (only that creator is left) the next held-back item goes anyway, so
+ * every item is emitted exactly once and `total` / pagination stay correct.
+ *
+ * Runs LAST, after the age and interest passes, so it only ever moves an item a few
+ * slots down. Deterministic: no RNG.
+ */
+function spreadCreators(ranked, max, window, creatorOf) {
+  if (!Array.isArray(ranked) || ranked.length < 2) return ranked;
+  if (!(max > 0) || !(window > max)) return ranked;
+
+  const recent = [];                 // creators of the last window-1 emitted slots
+  const inWindow = new Map();        // creator -> count within `recent`
+  const fits = (e) => (inWindow.get(creatorOf(e)) || 0) < max;
+  const emit = (e, out) => {
+    out.push(e);
+    const c = creatorOf(e);
+    recent.push(c);
+    inWindow.set(c, (inWindow.get(c) || 0) + 1);
+    if (recent.length > window - 1) {
+      const gone = recent.shift();
+      inWindow.set(gone, inWindow.get(gone) - 1);
+    }
+  };
+
+  const out = [];
+  const held = [];
+  let next = 0;
+  while (out.length < ranked.length) {
+    const h = held.findIndex(fits);
+    if (h !== -1) { emit(held.splice(h, 1)[0], out); continue; }
+    while (next < ranked.length && !fits(ranked[next])) held.push(ranked[next++]);
+    if (next < ranked.length) emit(ranked[next++], out);
+    else emit(held.shift(), out);
+  }
+  return out;
+}
+
 module.exports = {
   ageHours, freshness, newBoost, recencyBoost, jitter, shuffle, weightedOrder,
-  interleaveExploration, interleaveByAge, interleaveByInterest,
+  interleaveExploration, interleaveByAge, interleaveByInterest, spreadCreators,
   ageBandIndex, AGE_BAND_DAYS, AGE_BAND_TILT_SHARE, clamp,
 };

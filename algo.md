@@ -863,6 +863,19 @@ still resurface a genuinely great old video — into the 4% >2y quota, ranked by
 quality — so the discovery mandate ("keep giving old videos a shot") is preserved
 while their *frequency* is capped.
 
+## Creator spread (`spreadCreators`)
+
+The very last step, after the age and interest passes: no creator gets more than
+`DISCOVER_CREATOR_MAX` (2) of any `DISCOVER_CREATOR_WINDOW` (12) consecutive slots.
+An item over the limit is held back and placed as soon as it fits again, ahead of
+anything later; nothing is dropped, so `total` and pagination stay correct. The same
+rule runs on `/feeds/interests`. Chrono mode skips it.
+
+Why: the score is per video, so a creator who posts 8 videos in a day gets 8 tickets in
+the draw. On 2026-11-14 one creator with 8 uploads in 15 hours (mostly stream
+recordings) held 2 to 3 of the first 5 slots on most seeds. Creator key = the Hive
+author (falls back to the asset owner).
+
 ## Determinism
 
 All randomness comes from `mulberry32(seed)`, where `seed` is `?seed=` or, as a
@@ -926,6 +939,8 @@ Live: **~0.12s** vs trendingSorted's ~1.5s.
 | `DISCOVER_AGE_STRATIFY` | true | compose the page to `DISCOVER_AGE_WEIGHTS`; `false` = legacy explore interleave |
 | `DISCOVER_AGE_WEIGHTS` | `0.16,0.40,0.22,0.11,0.06,0.03,0.02` | page share per band (**\<10h** / 10h–7d / 7–30d / 30d–6mo / 6mo–1y / 1y–2y / >2y) — MUST match `AGE_BAND_DAYS` length |
 | `DISCOVER_EXPLORE_EVERY` | 4 | legacy interleave only — every Nth slot = exploration pick |
+| `DISCOVER_CREATOR_MAX` | 2 | most videos one creator may hold in any `DISCOVER_CREATOR_WINDOW` slots (0 = off) |
+| `DISCOVER_CREATOR_WINDOW` | 12 | the window `DISCOVER_CREATOR_MAX` applies to (must be > MAX, else off) |
 
 ---
 
