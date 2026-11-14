@@ -1253,8 +1253,10 @@ router.post('/resolve', express.json({ limit: '8kb' }), async (req, res) => {
  */
 const VERIFIED_FRESH_MS = 10 * 60 * 1000;
 const MAX_VERIFIED_FEEDS = 10;
+// Per creator (and address): the importer asks from the 3Speak server's one
+// address, for everyone, and its automatic imports ask in the background too.
 const verifiedLimiter = rateLimit({
-  keyGenerator: (req) => rateLimit.ipKeyGenerator(clientIpOf(req)), validate: { xForwardedForHeader: false, ip: false },
+  keyGenerator: (req) => `${userOf(req.query.user)}|${rateLimit.ipKeyGenerator(clientIpOf(req))}`, validate: { xForwardedForHeader: false, ip: false },
   windowMs: 60 * 1000, max: 30, standardHeaders: false, legacyHeaders: false,
   message: { success: false, error: 'Too many requests' },
 });
