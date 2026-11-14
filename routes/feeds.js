@@ -40,11 +40,15 @@ const {
     RELATED_TOPIC_MULT, RELATED_INTEREST_MULT, RELATED_CREATOR_MULT,
     RELATED_CREATOR_POOL, RELATED_JITTER,
 } = require('../utils/config');
-const { jitter, weightedOrder, interleaveExploration, interleaveByAge, interleaveByInterest, freshness, ageHours } = require('../utils/discoverScore');
+const { jitter, weightedOrder, interleaveExploration, interleaveByAge, interleaveByInterest, spreadCreators, freshness, ageHours } = require('../utils/discoverScore');
 const {
     DISCOVER_AGE_STRATIFY, DISCOVER_AGE_WEIGHTS, DISCOVER_INTEREST_SHARE,
     DISCOVER_FRONT_TILT, DISCOVER_FRONT_HALFLIFE_SLOTS, DISCOVER_SAMPLE_POWER,
+    DISCOVER_CREATOR_MAX, DISCOVER_CREATOR_WINDOW,
 } = require('../utils/config');
+// Pool entries carry the HIVE author (who a viewer follows) and the asset owner.
+const poolCreator = (e) => String(e.author || e.owner || '').toLowerCase();
+const spreadByCreator = (list) => spreadCreators(list, DISCOVER_CREATOR_MAX, DISCOVER_CREATOR_WINDOW, poolCreator);
 const { getCurationCounts, curationBoost, keyOf, EMPTY } = require('../utils/curation');
 const { getFollowSetForReq, applyFollowBoost } = require('../utils/followBoost');
 const { getPremiumSet, applyPremiumBoost } = require('../utils/premiumBoost');
@@ -131,8 +135,10 @@ router.get('/interests', async (req, res) => {
             scored.sort((a, b) => b.discover_score - a.discover_score);
         }
 
-        // Dismissals (always) + already-watched (when hidewatched=1).
-        const visible = await filterForUser(db, req, scored);
+        // Dismissals (always) + already-watched (when hidewatched=1), then no creator
+        // takes more than DISCOVER_CREATOR_MAX of any DISCOVER_CREATOR_WINDOW slots.
+        const filtered = await filterForUser(db, req, scored);
+        const visible = chrono ? filtered : spreadByCreator(filtered);
         const pageEntries = visible.slice(skip, skip + limit);
         const videos = await hydrate(db, pageEntries);
         videos.forEach((v) => { delete v._pool; });
@@ -476,9 +482,14 @@ router.get('/discover', async (req, res) => {
         // the first screen. Runs AFTER the age pass, and since each stream keeps
         // its incoming order, the age composition still governs within each.
         // Skipped in chrono mode (algo off) and when the viewer has no interests.
-        const finalEntries = (chrono || !interestTiers.any)
+        const withInterests = (chrono || !interestTiers.any)
             ? composed
             : interleaveByInterest(composed, DISCOVER_INTEREST_SHARE, (e) => e.interest_match);
+
+        // Last: no creator takes more than DISCOVER_CREATOR_MAX of any
+        // DISCOVER_CREATOR_WINDOW slots, so one busy uploader can't fill screen 1.
+        // Nothing is dropped, the extras move a few slots down. Skipped in chrono mode.
+        const finalEntries = chrono ? withInterests : spreadByCreator(withInterests);
 
         const total = finalEntries.length;
         const pageEntries = finalEntries.slice(skip, skip + limit);
@@ -502,6 +513,7 @@ router.get('/discover', async (req, res) => {
                 v.comment_boost = p.commentBoost;
                 v.comments = p.comments;
                 v.native_comments = p.native3Speak;
+                v.commenters = p.commenters;
                 v.follow_match = !!p.follow_match;
                 v.engagement_match = !!p.engagement_match;
                 v.engagement_boost = p.engagement_boost;

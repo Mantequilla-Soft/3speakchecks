@@ -28,6 +28,14 @@ async function creator(user, topics, views = 100) {
 const authors = (list) => list.map((c) => c.author);
 
 describe('getRecentCreatorEngagement', () => {
+  test('comments are counted as distinct commenters once the sync stored them', async () => {
+    await db().collection('embed-video').insertOne(F.embedVideo({ owner: 'streamer', permlink: 's1', views: 1 }));
+    // 34 live-chat messages from one viewer: one commenter.
+    await db().collection('video-comment-counts').insertOne({ _id: 'streamer/hive-s1', comments: 34, commenters: 1 });
+    const map = await getRecentCreatorEngagement(db());
+    expect(map.get('streamer')).toMatchObject({ comments: 1 });
+  });
+
   test('sums views, comments and reshares over each creator\'s last 30 days, keeping the most viewed as a sample', async () => {
     await db().collection('embed-video').insertMany([
       F.embedVideo({ owner: 'alice', permlink: 'a1', views: 10, hive_title: 'Small' }),

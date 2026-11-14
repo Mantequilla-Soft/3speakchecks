@@ -261,7 +261,7 @@ async function run() {
       db.collection(RETENTION_COLLECTION).find({}, { projection: { score: 1, viewers: 1 } }).toArray(),
       db.collection('viewer-tags').find({}, { projection: { author: 1, permlink: 1, 'viewer-tag': 1, weight: 1 } }).toArray(),
       // Comment counts (stamped by services/commentCounts.js, bounded to recent videos).
-      db.collection('video-comment-counts').find({}, { projection: { effective: 1, comments: 1, native3Speak: 1 } }).toArray(),
+      db.collection('video-comment-counts').find({}, { projection: { effective: 1, comments: 1, native3Speak: 1, commenters: 1 } }).toArray(),
     ]);
     // subtitles-tags.tags is a COMMA STRING ("tech,news") in RELEVANCE ORDER.
     const splitOrdered = (raw) => String(raw || '').split(',').map((t) => t.trim().toLowerCase()).filter(Boolean);
@@ -342,8 +342,9 @@ async function run() {
         ? 1
         : retentionMultiplier(ret.score, { ...multOpts, viewers: ret.viewers });
 
-      // Comment boost: lively discussion lifts a video (3Speak-frontend comments count
-      // 1.5×, baked into `effective` by the sync). No record → ×1. Keyed by hive key.
+      // Comment boost: lively discussion lifts a video (distinct commenters, 3Speak-
+      // frontend ones count 1.5×, baked into `effective` by the sync). No record → ×1.
+      // Keyed by hive key.
       const cmt = commentByKey.get(`${hiveAuthor}/${hivePermlink}`);
       const commentEffective = cmt ? (cmt.effective || 0) : 0;
 
@@ -371,6 +372,7 @@ async function run() {
         viewerTags: counts.tags,
         comments: cmt ? (cmt.comments || 0) : 0,
         native3Speak: cmt ? (cmt.native3Speak || 0) : 0,
+        commenters: cmt ? (cmt.commenters || 0) : 0,
         relQ: ret && ret.score != null ? ret.score : null,
         retentionViewers: ret ? (ret.viewers ?? null) : null,
         retentionMult: Math.round(retMult * 1000) / 1000,

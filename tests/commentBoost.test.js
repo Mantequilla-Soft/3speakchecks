@@ -36,9 +36,9 @@ describe('commentBoost', () => {
   });
 });
 
-describe('effective weighting (native comments count NATIVE_MULT×)', () => {
-  // effective = comments + (NATIVE_MULT − 1)·native — the formula the sync stores.
-  const effective = (comments, native) => comments + (COMMENT_NATIVE_MULT - 1) * native;
+describe('effective weighting (native commenters count NATIVE_MULT×)', () => {
+  // effective = commenters + (NATIVE_MULT − 1)·nativeCommenters — the formula the sync stores.
+  const effective = (commenters, native) => commenters + (COMMENT_NATIVE_MULT - 1) * native;
 
   test('a native comment is worth more than a generic one', () => {
     expect(effective(1, 1)).toBeGreaterThan(effective(1, 0));

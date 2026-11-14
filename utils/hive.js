@@ -489,7 +489,13 @@ function isNative3SpeakComment(reply) {
 /**
  * Fetch TOP-LEVEL comment counts for each post via batched
  * condenser_api.get_content_replies (direct replies only — one RPC per post, no
- * recursion). Returns Map "author/permlink" -> { comments, native3Speak }.
+ * recursion). Returns Map "author/permlink" ->
+ *   { comments, native3Speak, commenters, nativeCommenters }
+ *
+ * `comments` / `native3Speak` count replies; `commenters` / `nativeCommenters` count
+ * DISTINCT accounts, leaving out the post's own author. Live stream chat lands as
+ * top-level replies, so one viewer chatting through a stream is dozens of comments
+ * but one commenter, and the boost reads the commenter counts.
  *
  * A post whose batch failed (transient RPC error) is simply ABSENT from the map, so
  * the caller keeps its previous stored value rather than zeroing it. A real post with
@@ -512,9 +518,22 @@ async function fetchCommentReplyCounts(authorPerms, { batchSize = 20 } = {}) {
             const idx = Number(r.id) - i;
             const item = batch[idx];
             if (!item) continue;
+            const owner = String(item.author || '').toLowerCase();
+            const commenters = new Set();
+            const nativeCommenters = new Set();
             let native = 0;
-            for (const rep of r.result) if (isNative3SpeakComment(rep)) native += 1;
-            results.set(`${item.author}/${item.permlink}`, { comments: r.result.length, native3Speak: native });
+            for (const rep of r.result) {
+                const isNative = isNative3SpeakComment(rep);
+                if (isNative) native += 1;
+                const who = String((rep && rep.author) || '').toLowerCase();
+                if (!who || who === owner) continue;
+                commenters.add(who);
+                if (isNative) nativeCommenters.add(who);
+            }
+            results.set(`${item.author}/${item.permlink}`, {
+                comments: r.result.length, native3Speak: native,
+                commenters: commenters.size, nativeCommenters: nativeCommenters.size,
+            });
         }
     }
     return results;

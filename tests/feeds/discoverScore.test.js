@@ -6,7 +6,7 @@
  */
 const {
   ageHours, freshness, newBoost, jitter, shuffle, weightedOrder,
-  interleaveExploration, interleaveByAge, interleaveByInterest, ageBandIndex, clamp, AGE_BAND_DAYS,
+  interleaveExploration, interleaveByAge, interleaveByInterest, spreadCreators, ageBandIndex, clamp, AGE_BAND_DAYS,
 } = require('../../utils/discoverScore');
 const { mulberry32 } = jest.requireActual('../../utils/hive');
 const F = require('./_fixtures');
@@ -138,6 +138,54 @@ describe('interleaveByInterest: a guaranteed share of every prefix', () => {
       const ranked = list(p);
       expect(interleaveByInterest(ranked, 0.5, isMatch)).toBe(ranked);
     }
+  });
+});
+
+describe('spreadCreators: at most `max` per creator in any `window` slots', () => {
+  const by = (e) => e.c;
+  const list = (pattern) => pattern.split('').map((c, i) => ({ id: i, c }));
+  const letters = (out) => out.map((e) => e.c).join('');
+  /** Largest count of one creator in any `window` consecutive slots. */
+  const worstWindow = (out, window) => {
+    let worst = 0;
+    for (let i = 0; i < out.length; i += 1) {
+      const n = new Map();
+      for (const e of out.slice(i, i + window)) n.set(e.c, (n.get(e.c) || 0) + 1);
+      worst = Math.max(worst, ...n.values());
+    }
+    return worst;
+  };
+
+  test('a creator holding the top of the list is spread out, the rest move up', () => {
+    const out = spreadCreators(list('aaaabcdefg'), 2, 4, by);
+    expect(letters(out)).toBe('aabcaadefg');
+    expect(worstWindow(out, 4)).toBe(2);
+  });
+
+  test('held-back items keep their order and come back as soon as they fit', () => {
+    const out = spreadCreators(list('aaabbbcc'), 1, 2, by);
+    expect(letters(out)).toBe('abababcc');
+    expect(out.filter((e) => e.c === 'a').map((e) => e.id)).toEqual([0, 1, 2]);
+  });
+
+  test('every item is emitted exactly once, even when only one creator is left', () => {
+    const out = spreadCreators(list('aaaaab'), 1, 3, by);
+    expect(out).toHaveLength(6);
+    expect(new Set(out.map((e) => e.id)).size).toBe(6);
+    expect(letters(out)).toBe('abaaaa');
+  });
+
+  test('a list that already fits is unchanged', () => {
+    const ranked = list('abcabcabc');
+    expect(spreadCreators(ranked, 2, 4, by)).toEqual(ranked);
+  });
+
+  test.each([
+    ['max 0', 0, 12],
+    ['window not above max', 2, 2],
+  ])('%s turns it off', (_label, max, window) => {
+    const ranked = list('aaab');
+    expect(spreadCreators(ranked, max, window, by)).toBe(ranked);
   });
 });
 

@@ -59,13 +59,15 @@ async function getRecentCreatorEngagement(db, { force = false } = {}) {
       },
       { projection: { owner: 1, author: 1, permlink: 1, views: 1, created: 1, title: 1, thumbnail: 1 } },
     ).toArray(),
-    db.collection('video-comment-counts').find({}, { projection: { comments: 1 } }).toArray(),
+    db.collection('video-comment-counts').find({}, { projection: { comments: 1, commenters: 1 } }).toArray(),
     db.collection('reshares').aggregate([
       { $group: { _id: { a: '$author', p: '$permlink' }, n: { $sum: 1 } } },
     ]).toArray(),
   ]);
 
-  const commentByKey = new Map(commentRows.map((r) => [r._id, r.comments || 0]));      // _id = author/permlink
+  // Distinct commenters (one viewer's stream chat counts once); rows written before
+  // the sync stored them fall back to the raw count until the next run.
+  const commentByKey = new Map(commentRows.map((r) => [r._id, r.commenters ?? r.comments ?? 0]));      // _id = author/permlink
   // Grouped on the raw author, so `Alice/x` and `alice/x` arrive as two rows: add
   // them up under the lowercased key instead of letting the second overwrite the first.
   const reshareByKey = new Map();
