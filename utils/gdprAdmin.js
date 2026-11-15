@@ -35,6 +35,9 @@ const OWNED = [
   { coll: 'ad_listener_listen', field: 'listener' },
   { coll: 'podcastsettings', field: 'owner' },
   { coll: 'scheduled-posts', field: 'owner' },
+  // Premieres: chat messages sent in one, and "Notify me" reminders (services/premieres.js).
+  { coll: 'premiere_chat', field: 'user' },
+  { coll: 'premiere_reminders', field: 'user' },
   { coll: 'audio-listen-log', field: 'username' },
   { coll: 'hiveprofiles', field: 'username' },
   { coll: 'users', field: 'username' },

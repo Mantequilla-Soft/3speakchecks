@@ -50,6 +50,7 @@ const DATA_SCOPE = [
   { key: 'announcement_replies', label: 'Announcement replies', detail: 'What you wrote back to an announcement popup on 3Speak.', onChain: false },
   { key: 'push', label: 'Browser notifications', detail: 'The browsers you turned notifications on in, and which notifications you chose.', onChain: false },
   { key: 'podcasts', label: 'Podcasts', detail: 'Outside podcasts you follow and how far you listened to their episodes.', onChain: false },
+  { key: 'premieres', label: 'Premieres', detail: 'Messages you wrote in a premiere chat and the premieres you asked to be reminded of.', onChain: false },
   { key: 'subscriptions', label: 'Subscription records', detail: 'Your 3Speak Pro subscription and payment records, if any.', onChain: true },
 ];
 

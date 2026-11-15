@@ -17,7 +17,7 @@
 const { Client, PrivateKey } = require('@hiveio/dhive');
 const { ObjectId } = require('mongodb');
 const { getDb } = require('../utils/db');
-const { HIVE_RPC_ENDPOINTS } = require('../utils/config');
+const { HIVE_RPC_ENDPOINTS, PREMIERE_PUBLISH_LEAD_MIN } = require('../utils/config');
 const { hiveRpcBatch } = require('../utils/hive');
 const { applyVideoAdFlag } = require('../utils/videoAdOptOut');
 
@@ -234,10 +234,17 @@ async function claimNextDuePost(coll, skipIds = []) {
     // are due (scheduledOn elapsed), still under the attempt cap, AND have non-empty
     // string owner/permlink. The owner/permlink check is defense-in-depth so a
     // malformed doc can never become a broadcast op.
+    // A premiere goes out PREMIERE_PUBLISH_LEAD_MIN early: its countdown runs to
+    // scheduledOn on the watch page, and the video has to be linked and playable
+    // by then, not up to one cron interval later (services/premieres.js).
+    const premiereDue = new Date(now.getTime() + PREMIERE_PUBLISH_LEAD_MIN * 60 * 1000);
     const res = await coll.findOneAndUpdate(
         {
             status: 'scheduled',
-            scheduledOn: { $lte: now },
+            $or: [
+                { scheduledOn: { $lte: now } },
+                { premiere: true, scheduledOn: { $lte: premiereDue } },
+            ],
             attempts: { $lt: MAX_ATTEMPTS },
             owner: { $type: 'string', $ne: '' },
             permlink: { $type: 'string', $ne: '' },

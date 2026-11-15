@@ -1002,6 +1002,27 @@ module.exports = {
     // deleted with them on opt-out. Listed between MIN and MAX percent watched.
     VIEWER_PROGRESS_COLLECTION: process.env.VIEWER_PROGRESS_COLLECTION || 'viewer_progress',
     VIEWER_PROGRESS_SYNC_MIN: parseInt(process.env.VIEWER_PROGRESS_SYNC_MIN) || 2,
+
+    // Premieres (routes/premieres.js, services/premieres.js): a scheduled post the
+    // creator listed as a premiere. Its countdown page, "Notify me" reminders and a
+    // live chat that runs from the start for the video's length plus a short grace,
+    // then stays as timecoded "Premiere chat" messages.
+    PREMIERE_CHAT_COLLECTION: process.env.PREMIERE_CHAT_COLLECTION || 'premiere_chat',
+    PREMIERE_REMINDERS_COLLECTION: process.env.PREMIERE_REMINDERS_COLLECTION || 'premiere_reminders',
+    // Minutes the chat stays open after the video's own end.
+    PREMIERE_GRACE_MIN: parseInt(process.env.PREMIERE_GRACE_MIN) || 10,
+    // A premiere whose video length is not known yet is treated as this long.
+    PREMIERE_DEFAULT_DURATION_S: parseInt(process.env.PREMIERE_DEFAULT_DURATION_S) || 3600,
+    // The scheduled-posts cron publishes a premiere this many minutes EARLY, so the
+    // Hive post and its video are linked and ready when the countdown ends (the
+    // watch page keeps showing the countdown until the start). One cron interval
+    // plus a minute by default: the cron runs every SCHEDULED_POSTS_INTERVAL_MIN.
+    PREMIERE_PUBLISH_LEAD_MIN: parseInt(process.env.PREMIERE_PUBLISH_LEAD_MIN)
+        || ((parseInt(process.env.SCHEDULED_POSTS_INTERVAL_MIN, 10) || 5) + 1),
+    PREMIERE_CHAT_MAX_CHARS: parseInt(process.env.PREMIERE_CHAT_MAX_CHARS) || 200,
+    // Per viewer: messages per minute, and the least gap between two.
+    PREMIERE_CHAT_PER_MIN: parseInt(process.env.PREMIERE_CHAT_PER_MIN) || 12,
+    PREMIERE_CHAT_GAP_MS: parseInt(process.env.PREMIERE_CHAT_GAP_MS) || 1500,
     CONTINUE_WATCHING_MIN_PCT: parseFloat(process.env.CONTINUE_WATCHING_MIN_PCT ?? '10'),
     CONTINUE_WATCHING_MAX_PCT: parseFloat(process.env.CONTINUE_WATCHING_MAX_PCT ?? '75'),
 

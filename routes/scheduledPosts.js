@@ -114,6 +114,7 @@ router.post('/create', validateApiKey, express.json({ limit: '2mb' }), async (re
             parentPermlink = 'hive-181335',
             embedPermlink = null,   // embedvideos service's internal permlink; lets the cron link the video record to the broadcast Hive post afterwards
             reblog = false,         // "Add to my blog": the cron reblogs the post onto the owner's blog after posting
+            premiere = false,       // "List as a premiere" (opt-in): countdown page, Notify me, live chat (routes/premieres.js)
         } = req.body || {};
 
         // ─── basic validation ──────────────────────────────────────────
@@ -181,6 +182,7 @@ router.post('/create', validateApiKey, express.json({ limit: '2mb' }), async (re
             parentPermlink,
             embedPermlink,
             reblog: reblog === true,
+            premiere: premiere === true,
             attempts: 0,
             lastError: null,
             createdAt: now,
@@ -239,6 +241,7 @@ router.get('/:username', async (req, res) => {
             beneficiaries: d.beneficiaries,
             payoutOptions: d.payoutOptions,
             thumbnail: d.thumbnail,
+            premiere: d.premiere === true,
             postedAt: d.postedAt || null,
             broadcastTxId: d.broadcastTxId || null,
             lastError: d.lastError || null,
@@ -287,7 +290,7 @@ router.post('/update', validateApiKey, express.json({ limit: '2mb' }), async (re
         const ALLOWED = [
             'title', 'description', 'body', 'tags', 'jsonMetadata',
             'beneficiaries', 'payoutOptions', 'thumbnail',
-            'parentAuthor', 'parentPermlink', 'embedPermlink', 'reblog',
+            'parentAuthor', 'parentPermlink', 'embedPermlink', 'reblog', 'premiere',
         ];
         const $set = { updatedAt: new Date() };
         for (const k of ALLOWED) {
@@ -296,6 +299,7 @@ router.post('/update', validateApiKey, express.json({ limit: '2mb' }), async (re
             }
         }
         if ('reblog' in $set) $set.reblog = $set.reblog === true;
+        if ('premiere' in $set) $set.premiere = $set.premiere === true;
         if (Object.prototype.hasOwnProperty.call(updates, 'payoutOptions')) {
             const v = String(updates.payoutOptions).toLowerCase();
             if (!VALID_PAYOUT.has(v)) {
