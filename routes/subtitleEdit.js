@@ -4,7 +4,9 @@
  * The captions are SRT files on IPFS, one per language, listed in the
  * `subtitles` collection as { author, permlink, subtitles: { <lang>: <cid> } }.
  * The pipeline that generates them runs elsewhere; this route only REPLACES the
- * file for one language that already exists:
+ * file for one language that already exists, or (the author only, e.g. the
+ * captions the shorts editor made for a Short it just published) adds a language
+ * the video has no captions in yet:
  *
  *   1. the author proves it is them (signature, see below),
  *   2. the SRT is rebuilt here from the submitted lines, so what is stored is
@@ -17,6 +19,11 @@
  *      be undone and the generator can tell an author's version from its own.
  *
  * 🚨 The generator must not overwrite a language listed in `subtitle_edits`.
+ *
+ * `burnedIn: true` (only read when the request ADDS the language): the words are
+ * already in the picture (the editor's "Show in the video"). Kept as
+ * `subtitle_edits.<lang>.burnedIn`, so readers can list the track for the
+ * transcript and search without switching CC on by default over the same words.
  *
  * Proof of authorship, same shape as the ad preferences (routes/advertise.js):
  * a signature over a message WE build from the request, accepted from the
@@ -44,6 +51,8 @@ const MAX_LINE_CHARS = 500;
 const MAX_SRT_BYTES = 1024 * 1024;
 const MAX_SECONDS = 24 * 3600;
 const HISTORY_KEEP = 20;
+// Languages an author may add to one video by hand (the generator adds its own)
+const MAX_LANGUAGES = 30;
 
 // Must match captionEditMessage() in the frontend (src/lib/captionEdit.js) and
 // the signer in server/index.cjs exactly.
@@ -109,6 +118,12 @@ async function ipfsAddPinned(text) {
   }
 }
 
+// What a later edit keeps of the language's earlier record
+const pickKept = (rec) => ({
+  ...(rec && rec.created ? { created: true } : {}),
+  ...(rec && rec.burnedIn ? { burnedIn: true } : {}),
+});
+
 // A small per-author brake: a save is a pin and a database write.
 const recentSaves = new Map();
 function tooMany(author) {
@@ -120,7 +135,7 @@ function tooMany(author) {
   return false;
 }
 
-// POST /subtitles/edit — { author, permlink, lang, cues: [{start,end,text}], signature, timestamp }
+// POST /subtitles/edit: { author, permlink, lang, cues: [{start,end,text}], signature, timestamp, burnedIn? }
 router.post('/subtitles/edit', express.json({ limit: '2mb' }), async (req, res) => {
   const b = req.body || {};
   const author = asText(b.author).toLowerCase();
@@ -174,9 +189,36 @@ router.post('/subtitles/edit', express.json({ limit: '2mb' }), async (req, res) 
     const col = getDb().collection('subtitles');
     const doc = await col.findOne({ author, permlink }, { projection: { subtitles: 1, subtitle_edits: 1 } });
     const previous = doc && doc.subtitles && doc.subtitles[lang];
-    // Only a language that exists can be corrected; adding new languages is the
-    // generator's job, not this route's.
-    if (!previous) return res.status(404).json({ success: false, error: 'no captions in this language' });
+    // A language the video has no captions in yet: the signature above proved the
+    // author (or @threespeak for them), and the row is keyed by that author, so
+    // only they can add one, and only to their own videos.
+    if (!previous) {
+      const langs = Object.keys((doc && doc.subtitles) || {});
+      if (langs.length >= MAX_LANGUAGES) return res.status(409).json({ success: false, error: 'too many languages' });
+      const cid = await ipfsAddPinned(srt);
+      const now = new Date();
+      const set = {
+        [`subtitles.${lang}`]: cid,
+        [`subtitle_edits.${lang}`]: {
+          by: author,
+          signedBy: verdict.signer,
+          at: now,
+          lines: cues.length,
+          created: true,
+          ...(b.burnedIn === true ? { burnedIn: true } : {}),
+          history: [],
+        },
+      };
+      // A video without any captions has no row yet: made here (upsert). One
+      // with other languages must still lack this one, or someone added it meanwhile.
+      const r = doc
+        ? await col.updateOne({ author, permlink, [`subtitles.${lang}`]: { $exists: false } }, { $set: set })
+        : await col.updateOne({ author, permlink }, { $set: set }, { upsert: true });
+      if (!r.matchedCount && !r.upsertedCount) {
+        return res.status(409).json({ success: false, error: 'The captions were changed meanwhile. Reload and try again.' });
+      }
+      return res.json({ success: true, cid, created: true });
+    }
 
     const cid = await ipfsAddPinned(srt);
     if (cid === previous) return res.json({ success: true, cid, unchanged: true });
@@ -197,6 +239,8 @@ router.post('/subtitles/edit', express.json({ limit: '2mb' }), async (req, res) 
             signedBy: verdict.signer,
             at: now,
             lines: cues.length,
+            // An author-added language stays marked as such (burnt in or not)
+            ...pickKept(doc.subtitle_edits && doc.subtitle_edits[lang]),
             history,
           },
         },
