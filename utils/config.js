@@ -1044,6 +1044,15 @@ module.exports = {
     COMMENT_INBOX_DONE_COLLECTION: process.env.COMMENT_INBOX_DONE_COLLECTION || 'comment_inbox_done',
     COMMENT_INBOX_DAYS: parseIntMin(process.env.COMMENT_INBOX_DAYS, 90, 7),
 
+    // Shorts from this video (routes/clipIdeas.js, utils/clipIdeas.js): clip ranges
+    // for a creator's own long video from replays, timestamped comments, chat and
+    // the transcript. Watch sessions needed before replays count, suggestions
+    // returned, how long one answer is kept, and the most watch rows read.
+    CLIP_IDEAS_MIN_SESSIONS: parseIntMin(process.env.CLIP_IDEAS_MIN_SESSIONS, 5, 1),
+    CLIP_IDEAS_MAX: parseIntMin(process.env.CLIP_IDEAS_MAX, 5, 1),
+    CLIP_IDEAS_CACHE_MS: parseIntMin(process.env.CLIP_IDEAS_CACHE_MS, 10 * 60 * 1000, 0),
+    CLIP_IDEAS_MAX_ROWS: parseIntMin(process.env.CLIP_IDEAS_MAX_ROWS, 20000, 100),
+
     // Global comment mutelist (utils/commentMutes.js): data/comment-mutelist.json
     // plus this collection, re-read every COMMENT_MUTES_TTL_MS.
     COMMENT_MUTES_COLLECTION: process.env.COMMENT_MUTES_COLLECTION || 'comment_mutes',
