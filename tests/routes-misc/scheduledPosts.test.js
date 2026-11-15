@@ -323,8 +323,11 @@ describe('POST /scheduled-posts/update', () => {
     await seed();
     await update({ updates: { premiere: true } }).expect(200);
     expect((await queue().findOne()).premiere).toBe(true);
+    expect((await queue().findOne()).jsonMetadata.video).toEqual({ premiere: true });
     await update({ updates: { premiere: 'true' } }).expect(200);
-    expect((await queue().findOne()).premiere).toBe(false);
+    const off = await queue().findOne();
+    expect(off.premiere).toBe(false);
+    expect(off.jsonMetadata).toEqual({ app: '3speak/embed', tags: ['a'], video: {} });
   });
 
   test.each(['posted', 'processing', 'cancelled', 'failed'])('a post in status %s is no longer editable (404)', async (status) => {

@@ -330,7 +330,7 @@ router.post('/update', validateApiKey, express.json({ limit: '2mb' }), async (re
         // array + top-level `image: [url]` + nested `video.thumbnail`). Without
         // this, the cron would broadcast with stale metadata while the doc fields
         // show the new values.
-        const fieldsThatAffectJsonMeta = ['tags', 'thumbnail'];
+        const fieldsThatAffectJsonMeta = ['tags', 'thumbnail', 'premiere'];
         const touchesJsonMeta = fieldsThatAffectJsonMeta.some(
             k => Object.prototype.hasOwnProperty.call(updates, k)
         );
@@ -354,6 +354,13 @@ router.post('/update', validateApiKey, express.json({ limit: '2mb' }), async (re
                         delete meta.image;
                         if (meta.video) delete meta.video.thumbnail;
                     }
+                }
+                // The premiere listing rides in the post too (video.premiere), so the
+                // watch page knows to ask for its chat long after the premiere.
+                if (Object.prototype.hasOwnProperty.call(updates, 'premiere')) {
+                    meta.video = Object.assign({}, meta.video || {});
+                    if (updates.premiere === true) meta.video.premiere = true;
+                    else delete meta.video.premiere;
                 }
                 $set.jsonMetadata = meta;
             }
