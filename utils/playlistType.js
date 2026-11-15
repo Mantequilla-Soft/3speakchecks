@@ -66,4 +66,17 @@ function storedPlaylistType(playlist) {
     return { type, kind: type === 'audio' ? kind : null };
 }
 
-module.exports = { AUDIO_KINDS, categoryToKind, kindFromCategories, decodeJsonMeta, storedPlaylistType };
+/**
+ * Is this playlist a series: a numbered set of parts in the owner's order
+ * ("Part 3 of 7"), Shorts first of all? A video playlist with
+ * `json_metadata.series: true`; the indexer only knows video and audio, so the
+ * mark lives in json_metadata like the owner's type choice. Mirrors 3speak.tv
+ * src/lib/series.js.
+ */
+function isSeriesPlaylist(playlist) {
+    if (!playlist) return false;
+    const jm = decodeJsonMeta(playlist.json_metadata);
+    return jm.series === true && storedPlaylistType(playlist).type !== 'audio';
+}
+
+module.exports = { AUDIO_KINDS, categoryToKind, kindFromCategories, decodeJsonMeta, storedPlaylistType, isSeriesPlaylist };

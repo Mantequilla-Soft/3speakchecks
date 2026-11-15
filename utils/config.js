@@ -1626,4 +1626,16 @@ module.exports = {
     CURATION_MAX_PICKS: Math.min(Math.max(parseInt(process.env.CURATION_MAX_PICKS, 10) || 60, 1), 200),
     CURATION_EARLY_SHARE: parseFloat(process.env.CURATION_EARLY_SHARE ?? '0.1'),
     CURATION_EARLY_MIN_VOTES: parseInt(process.env.CURATION_EARLY_MIN_VOTES, 10) || 10,
+    // ── Podcast feeds (routes/rss.js), Podcasting 2.0 tags ──
+    // Where the per-episode files the feeds link live: chapters JSON and the
+    // transcripts. Served by this checker under /rss (3speak.tv only proxies the
+    // .xml feeds and /img/c/ covers), so the default is this checker's public host.
+    RSS_FILES_BASE_URL: (process.env.RSS_FILES_BASE_URL || 'https://checker.3speak.tv/rss').replace(/\/+$/, ''),
+    // <podcast:liveItem> for a channel's streams, read from the live server
+    // (LIVE_ROOM_API_URLS, first one) and cached per channel this long.
+    RSS_LIVE_ITEMS_ENABLED: process.env.RSS_LIVE_ITEMS_ENABLED !== 'false',
+    RSS_LIVE_CACHE_MS: parseInt(process.env.RSS_LIVE_CACHE_MS, 10) || 60 * 1000,
+    // <podcast:soundbite>: Shorts made from an audiogram of an episode, looked
+    // for this long after the episode came out.
+    RSS_SOUNDBITE_WINDOW_DAYS: parseInt(process.env.RSS_SOUNDBITE_WINDOW_DAYS, 10) || 30,
 };
