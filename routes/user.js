@@ -1,5 +1,6 @@
 const express = require('express');
 const { hiddenSubset, hiddenListSync } = require('../utils/hiddenCreators');
+const { mutedSubset } = require('../utils/commentMutes');
 const router = express.Router();
 const { acceptedPostsOf, attachCollaborators } = require('../utils/collabs');
 const { getDb } = require('../utils/db');
@@ -395,20 +396,25 @@ router.get('/check/:username', async (req, res) => {
     }
 });
 
-// POST /check-hidden  body: { usernames: [...] } → { hidden: [...] }
+// POST /check-hidden  body: { usernames: [...] } → { hidden: [...], muted: [...] }
 // Bulk visibility check for the frontend: given the comment authors on a page, which
-// are hidden creators (so the client can drop their comments). Read-only, unauth —
-// mirrors GET /check. Capped to keep a single request cheap.
+// are hidden creators (so the client can drop their comments), and which are on the
+// global comment mutelist (utils/commentMutes.js: bots whose comments are removed,
+// their posts untouched). Read-only, unauth, mirrors GET /check. Capped to keep a
+// single request cheap.
 router.post('/check-hidden', async (req, res) => {
     try {
         const raw = Array.isArray(req.body?.usernames) ? req.body.usernames : [];
-        if (raw.length === 0) return res.json({ hidden: [] });
+        if (raw.length === 0) return res.json({ hidden: [], muted: [] });
         const names = raw.slice(0, 500).map((u) => String(u || '').toLowerCase());
-        const hidden = await hiddenSubset(getDb(), names);
-        res.json({ hidden });
+        const [hidden, muted] = await Promise.all([
+            hiddenSubset(getDb(), names),
+            mutedSubset(getDb(), names),
+        ]);
+        res.json({ hidden, muted });
     } catch (error) {
         console.error('check-hidden error:', error);
-        res.status(500).json({ hidden: [] }); // fail-open: hide nothing rather than break comments
+        res.status(500).json({ hidden: [], muted: [] }); // fail-open: hide nothing rather than break comments
     }
 });
 

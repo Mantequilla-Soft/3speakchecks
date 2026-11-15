@@ -75,6 +75,25 @@ describe('POST /creator-inbox', () => {
     expect(tipper).toMatchObject({ supporter: true, firstTime: true, rootPermlink: 'post-b' });
   });
 
+  test('accounts on the comment mutelist (repo list + comment_mutes) are left out, in the query too', async () => {
+    require('../../utils/commentMutes')._test.reset();
+    await db().collection('comment_mutes').insertOne({ _id: 'spambot', reason: 'bot', at: new Date() });
+    hafsqlFor({
+      comments: [
+        { author: 'fan', permlink: 're-1', parent_permlink: 'p', root_permlink: 'p', body: 'hi', created: at(1) },
+        { author: 'ai-agent-hunter', permlink: 're-2', parent_permlink: 'p', root_permlink: 'p', body: 'beep', created: at(2) },
+        { author: 'spambot', permlink: 're-3', parent_permlink: 'p', root_permlink: 'p', body: 'buy', created: at(3) },
+      ],
+      firsts: [{ author: 'fan', first: at(1) }],
+    });
+    const { body } = await request(app).post('/creator-inbox').send(vouch()).expect(200);
+    expect(body.items.map((i) => i.author)).toEqual(['fan']);
+    const [sql, params] = mockQuery.mock.calls.find(([q]) => /root_author = \$1 and parent_author = \$1/.test(q));
+    expect(sql).toMatch(/not \(author = any\(\$4\)\)/);
+    expect(params[3]).toEqual(expect.arrayContaining(['hivebuzz', 'ai-agent-hunter', 'spambot']));
+    require('../../utils/commentMutes')._test.reset();
+  });
+
   test('done is kept per creator and comes back on the list; undone removes it', async () => {
     hafsqlFor({ comments: [{ author: 'fan', permlink: 're-1', parent_permlink: 'p', root_permlink: 'p', body: 'hi', created: at(1) }] });
     await request(app).post('/creator-inbox/done').send({ ...vouch(), author: 'fan', permlink: 're-1' }).expect(200);

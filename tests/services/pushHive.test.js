@@ -116,6 +116,24 @@ test('types Hive raises that are not pushed (transfers, roles...) and switched-o
   expect((await state().findOne({ _id: 'alice' })).lastId).toBe(4); // cursor moves past skipped ones too
 });
 
+test('replies and mentions by accounts on the comment mutelist are not pushed', async () => {
+  require('../../utils/commentMutes')._test.reset();
+  await db().collection('comment_mutes').insertOne({ _id: 'spambot', reason: 'bot', at: NOW });
+  await seen('badadib', 1);
+  inbox.set('badadib', [
+    n(2, 'reply', '@ai-agent-hunter replied to your post', '@ai-agent-hunter/re-1'),
+    n(3, 'mention', '@spambot mentioned you', '@spambot/x'),
+    n(4, 'reply', '@fan replied to your post', '@fan/re-2'),
+    n(5, 'follow', '@spambot followed you', '@spambot'),
+  ]);
+
+  await runOnce();
+
+  expect(pushed.map((p) => p.payload.tag)).toEqual(['hive:4', 'hive:5']);
+  expect((await state().findOne({ _id: 'badadib' })).lastId).toBe(5);
+  require('../../utils/commentMutes')._test.reset();
+});
+
 test('at most three per person per pass: the newest three', async () => {
   await seen('alice', 0);
   inbox.set('alice', [1, 2, 3, 4, 5].map((i) => n(i, 'reply', `@u${i} replied`, `@u${i}/r`)));

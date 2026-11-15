@@ -154,6 +154,9 @@ describe('routes that fail open to an empty answer', () => {
   });
 
   test('POST /check-hidden hides nobody rather than breaking comments', async () => {
-    expect((await send('post', '/check-hidden', { body: { usernames: ['alice'] } }).expect(200)).body).toEqual({ hidden: [] });
+    expect((await send('post', '/check-hidden', { body: { usernames: ['alice'] } }).expect(200)).body).toEqual({ hidden: [], muted: [] });
+    // The repo half of the comment mutelist needs no database.
+    expect((await send('post', '/check-hidden', { body: { usernames: ['alice', 'ai-agent-hunter'] } }).expect(200)).body)
+      .toEqual({ hidden: [], muted: ['ai-agent-hunter'] });
   });
 });

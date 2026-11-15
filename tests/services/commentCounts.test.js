@@ -103,6 +103,20 @@ describe('what is stored', () => {
     expect(await counts().findOne({ _id: 'streamer/vod' })).toMatchObject({ comments: 34, effective: 1.5 });
   });
 
+  test('the global comment mutelist (repo list + comment_mutes) is passed to Hive, and what it left out is stored', async () => {
+    require('../../utils/commentMutes')._test.reset();
+    await db().collection('comment_mutes').insertOne({ _id: 'spambot', reason: 'bot', at: NOW });
+    await db().collection('videos').insertOne(legacy('badadib', 'v1'));
+    hiveReturns({ 'badadib/v1': { comments: 1, native3Speak: 0, commenters: 1, nativeCommenters: 0, muted: 3 } });
+    await syncCommentCounts();
+    const { exclude } = hive.fetchCommentReplyCounts.mock.calls[0][1];
+    expect(exclude.has('ai-agent-hunter')).toBe(true);
+    expect(exclude.has('spambot')).toBe(true);
+    expect(exclude.has('fan')).toBe(false);
+    expect(await counts().findOne({ _id: 'badadib/v1' })).toMatchObject({ comments: 1, commenters: 1, mutedComments: 3 });
+    require('../../utils/commentMutes')._test.reset();
+  });
+
   test('running twice with the same Hive answers leaves the same rows', async () => {
     await db().collection('videos').insertOne(legacy('alice', 'v1'));
     hiveReturns({ 'alice/v1': { comments: 2, native3Speak: 0, commenters: 2, nativeCommenters: 0 } });

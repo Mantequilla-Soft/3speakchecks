@@ -23,7 +23,8 @@
  *
  * Not in it: comments between other people further down a thread (they are not
  * addressed to the creator), deleted comments, off-chain comments of warm-up
- * users, and the service accounts that reply to everything (NOT_PEOPLE).
+ * users, the service accounts that reply to everything (NOT_PEOPLE), and the
+ * accounts on the global comment mutelist (utils/commentMutes.js).
  */
 const express = require('express');
 const rateLimit = require('express-rate-limit');
@@ -32,6 +33,7 @@ const { getDb } = require('../utils/db');
 const hafsql = require('../utils/hafsql');
 const { clientIp } = require('../utils/clientIp');
 const { proveProgressUser } = require('../utils/progressVouch');
+const { getMutedSet } = require('../utils/commentMutes');
 const { COMMENT_INBOX_DONE_COLLECTION, COMMENT_INBOX_DAYS, ENABLE_MONGO_WRITES } = require('../utils/config');
 
 const router = express.Router();
@@ -81,13 +83,18 @@ const iso = (d) => (d instanceof Date ? d.toISOString() : new Date(d).toISOStrin
 
 async function loadInbox(user) {
   const since = new Date(Date.now() - COMMENT_INBOX_DAYS * 24 * 3600 * 1000);
+  // The service accounts above plus the global comment mutelist (utils/commentMutes.js),
+  // left out in the query so a busy bot cannot push real comments past the limit.
+  const muted = await getMutedSet();
+  const skip = [...new Set([...NOT_PEOPLE, ...muted])];
   const comments = await hafsql.query(
     `select author, permlink, parent_permlink, root_permlink, body, created from hafsql.comments
       where root_author = $1 and parent_author = $1 and author <> $1 and deleted = false and created >= $2
+        and not (author = any($4))
       order by created desc limit $3`,
-    [user, since, MAX_ITEMS + NOT_PEOPLE.length * 5],
+    [user, since, MAX_ITEMS, skip],
   );
-  const items = comments.filter((c) => !NOT_PEOPLE.includes(c.author)).slice(0, MAX_ITEMS);
+  const items = comments.filter((c) => !skip.includes(c.author)).slice(0, MAX_ITEMS);
   if (!items.length) return [];
   const authors = [...new Set(items.map((c) => c.author))];
   const roots = [...new Set(items.map((c) => c.root_permlink))];

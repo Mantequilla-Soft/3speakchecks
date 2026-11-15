@@ -16,6 +16,7 @@
 const { getDb } = require('../utils/db');
 const { hiveRpcBatch } = require('../utils/hive');
 const push = require('../utils/webPush');
+const { getMutedSet } = require('../utils/commentMutes');
 
 const STATE_COLLECTION = 'push-hive-state';
 const MAX_PER_SUBSCRIBER = 3;
@@ -55,6 +56,9 @@ function routeFor(url) {
 
 const actorOf = (n) => String(n.msg || '').replace(/^@/, '').split(' ')[0] || 'someone';
 
+// Kinds that are a comment by the actor: a muted account's (utils/commentMutes.js) are not pushed.
+const COMMENT_KINDS = new Set(['replies', 'mentions']);
+
 async function notificationsFor(username) {
   const res = await hiveRpcBatch([{
     jsonrpc: '2.0',
@@ -71,6 +75,7 @@ async function runOnce() {
   const db = getDb();
   const state = db.collection(STATE_COLLECTION);
   const subscribers = (await push.listSubscribers()).slice(0, MAX_SUBSCRIBERS_PER_PASS);
+  const muted = await getMutedSet(db);
 
   let sent = 0;
   for (const username of subscribers) {
@@ -96,6 +101,7 @@ async function runOnce() {
         .filter((n) => Number(n.id) > seen.lastId)
         .map((n) => ({ ...n, kind: TYPE_TO_KIND[n.type] }))
         .filter((n) => n.kind && prefs[n.kind] !== false)
+        .filter((n) => !(COMMENT_KINDS.has(n.kind) && muted.has(actorOf(n).toLowerCase())))
         .sort((a, b) => Number(a.id) - Number(b.id))
         .slice(-MAX_PER_SUBSCRIBER);
 

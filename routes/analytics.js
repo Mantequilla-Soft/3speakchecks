@@ -590,9 +590,11 @@ async function loadHiveYear(username, days) {
     hafsql.query(`select amount::float as amount, symbol, memo from hafsql.operation_transfer_table
       where to_account = $1 and id >= $2 and memo like '3Speak ad revenue share%'`, [username, minId]),
   ]);
+  // Accounts on the global comment mutelist (bots, utils/commentMutes.js) are no fans either.
+  const muted = await require('../utils/commentMutes').getMutedSet();
   const fans = new Map();
   const add = (rows, key) => rows.forEach((r) => {
-    if (NOT_FANS.includes(r.account)) return;
+    if (NOT_FANS.includes(r.account) || muted.has(String(r.account || '').toLowerCase())) return;
     if (!fans.has(r.account)) fans.set(r.account, { account: r.account, votes: 0, comments: 0 });
     fans.get(r.account)[key] = r.n;
   });

@@ -130,6 +130,26 @@ function videoStatsMiddleware(req, res, next) {
   next();
 }
 
+/**
+ * How many direct replies by muted accounts (utils/commentMutes.js) each post has,
+ * as stored by the comment-count sync (services/commentCounts.js `mutedComments`,
+ * recent videos only). Bridge `children` counts them, the comment section does not
+ * show them. A read failure subtracts nothing.
+ */
+async function mutedCommentsFor(keys) {
+  const out = new Map();
+  if (!keys.length) return out;
+  try {
+    const rows = await getDb().collection('video-comment-counts')
+      .find({ _id: { $in: keys }, mutedComments: { $gt: 0 } }, { projection: { mutedComments: 1 } })
+      .toArray();
+    for (const r of rows) out.set(r._id, r.mutedComments);
+  } catch (err) {
+    console.warn('[videoStats] muted comment counts read failed:', err && err.message);
+  }
+  return out;
+}
+
 /** Refresh a slice of the pending queue from Hive and store it. */
 async function drainVideoStats() {
   if (!VIDEO_STATS_ENABLED || draining || pending.size === 0) return null;
@@ -149,16 +169,20 @@ async function drainVideoStats() {
     const stats = await fetchHiveVideoStats(authorPerms, { ttl: 0 });
     if (stats.size === 0) return { queued: pending.size, fetched: 0, ms: Date.now() - startedAt };
 
+    const mutedBy = await mutedCommentsFor([...stats.keys()]);
     const now = new Date();
     const ops = [];
     for (const [key, s] of stats) {
       const i = key.indexOf('/');
+      // Replies by accounts on the global comment mutelist (bots) are not shown on
+      // 3Speak, so the card does not count them either.
+      const comments = Math.max(0, (s.comments || 0) - (mutedBy.get(key) || 0));
       ops.push({
         updateOne: {
           filter: { _id: key },
           update: { $set: {
             author: key.slice(0, i), permlink: key.slice(i + 1),
-            reward: s.reward, votes: s.votes, comments: s.comments, updatedAt: now,
+            reward: s.reward, votes: s.votes, comments, updatedAt: now,
           } },
           upsert: true,
         },

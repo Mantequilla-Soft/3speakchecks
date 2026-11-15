@@ -410,6 +410,18 @@ describe('fetchCommentReplyCounts', () => {
     expect(map.get('Streamer/vod')).toEqual({ comments: 34, native3Speak: 31, commenters: 2, nativeCommenters: 1 });
   });
 
+  test('muted accounts (the comment mutelist) are left out of every count and counted as muted', async () => {
+    const by = (author, app) => ({ author, json_metadata: JSON.stringify({ app }) });
+    methods['condenser_api.get_content_replies'] = () => [
+      by('fan', '3speak/new-version'),
+      by('AI-Agent-Hunter', '3speak/new-version'),
+      by('ai-agent-hunter', 'peakd/1.0'),
+      by('other', 'ecency'),
+    ];
+    const map = await hive.fetchCommentReplyCounts([{ author: 'badadib', permlink: 'v' }], { exclude: new Set(['ai-agent-hunter']) });
+    expect(map.get('badadib/v')).toEqual({ comments: 2, native3Speak: 1, commenters: 2, nativeCommenters: 1, muted: 2 });
+  });
+
   test('an error entry or a dropped entry leaves that post absent', async () => {
     methods['condenser_api.get_content_replies'] = ([, permlink]) => (permlink === 'bad' ? { error: { message: 'x' } } : permlink === 'drop' ? SKIP : []);
     const map = await hive.fetchCommentReplyCounts([{ author: 'a', permlink: 'bad' }, { author: 'a', permlink: 'drop' }, { author: 'a', permlink: 'ok' }]);

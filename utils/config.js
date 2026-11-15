@@ -1044,6 +1044,11 @@ module.exports = {
     COMMENT_INBOX_DONE_COLLECTION: process.env.COMMENT_INBOX_DONE_COLLECTION || 'comment_inbox_done',
     COMMENT_INBOX_DAYS: parseIntMin(process.env.COMMENT_INBOX_DAYS, 90, 7),
 
+    // Global comment mutelist (utils/commentMutes.js): data/comment-mutelist.json
+    // plus this collection, re-read every COMMENT_MUTES_TTL_MS.
+    COMMENT_MUTES_COLLECTION: process.env.COMMENT_MUTES_COLLECTION || 'comment_mutes',
+    COMMENT_MUTES_TTL_MS: parseIntMin(process.env.COMMENT_MUTES_TTL_MS, 5 * 60 * 1000, 1000),
+
     // Earnings over time (routes/creatorEarnings.js): one answer per account and
     // range is kept this many minutes.
     CREATOR_EARNINGS_CACHE_MIN: parseIntMin(process.env.CREATOR_EARNINGS_CACHE_MIN, 15, 0),

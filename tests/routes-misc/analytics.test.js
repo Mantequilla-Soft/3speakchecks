@@ -300,6 +300,19 @@ describe('GET /creator-stats/hive-year (HafSQL)', () => {
     expect(rewardCall[1]).toEqual(['alice', (BigInt(sinceBlock) << 32n).toString()]);
   });
 
+  test('accounts on the comment mutelist are no fans', async () => {
+    require('../../utils/commentMutes')._test.reset();
+    await db().collection('comment_mutes').insertOne({ _id: 'spambot', reason: 'bot', at: new Date() });
+    hafsql.query.mockImplementation(async (sql) => {
+      if (/operation_comment_view/.test(sql)) return [{ account: 'fan', n: 1 }, { account: 'ai-agent-hunter', n: 40 }, { account: 'spambot', n: 9 }];
+      if (/operation_vote_view/.test(sql)) return [{ account: 'spambot', n: 50 }];
+      return answer(sql);
+    });
+    const res = await request(app).get('/creator-stats/hive-year?username=badadib').expect(200);
+    expect(res.body.fans.map((f) => f.account)).toEqual(['fan']);
+    require('../../utils/commentMutes')._test.reset();
+  });
+
   test('one answer per account and window is kept for 30 minutes', async () => {
     hafsql.query.mockImplementation(async (sql) => answer(sql));
     await request(app).get('/creator-stats/hive-year?username=cached&days=90').expect(200);
