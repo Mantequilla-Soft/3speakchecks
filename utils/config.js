@@ -1019,6 +1019,10 @@ module.exports = {
     CARD_REACH_SEEN_PER_HOUR: parseIntMin(process.env.CARD_REACH_SEEN_PER_HOUR, 1500, 1),
     CARD_REACH_OPEN_WINDOW_MIN: parseIntMin(process.env.CARD_REACH_OPEN_WINDOW_MIN, 30, 1),
 
+    // Comment inbox (routes/commentInbox.js): what a creator marked done.
+    COMMENT_INBOX_DONE_COLLECTION: process.env.COMMENT_INBOX_DONE_COLLECTION || 'comment_inbox_done',
+    COMMENT_INBOX_DAYS: parseIntMin(process.env.COMMENT_INBOX_DAYS, 90, 7),
+
     // Share of AD REVENUE that is paid out to viewers, in points of the whole.
     // At the defaults: creators+communities 50, viewers 10, platform 40.
     //

@@ -50,6 +50,8 @@ const OWNED = [
   // personal token) and how far it listened (services/podcastFeeds.js).
   { coll: 'podcast_subs', field: 'user' },
   { coll: 'podcast_progress', field: 'user' },
+  // Comment inbox: which comments on their content a creator marked done.
+  { coll: 'comment_inbox_done', field: 'user' },
 ];
 // watch_history keys by a compound _id "user:owner:permlink" — matched by prefix.
 const WATCH_HISTORY = 'watch_history';
