@@ -1005,6 +1005,26 @@ module.exports = {
     CONTINUE_WATCHING_MIN_PCT: parseFloat(process.env.CONTINUE_WATCHING_MIN_PCT ?? '10'),
     CONTINUE_WATCHING_MAX_PCT: parseFloat(process.env.CONTINUE_WATCHING_MAX_PCT ?? '75'),
 
+    // ─── Social: notification levels, "went live", polls, collab posts ───
+    // Per followed creator All / Highlights / Off (utils/notifyLevels.js).
+    NOTIFY_LEVELS_COLLECTION: process.env.NOTIFY_LEVELS_COLLECTION || 'notify_levels',
+    // One row per stream that went live (services/liveNotify.js), read by the bell
+    // feed (routes/notify.js) for the followers of its host. Kept LIVE_EVENTS_TTL_DAYS.
+    LIVE_EVENTS_COLLECTION: process.env.LIVE_EVENTS_COLLECTION || 'live_events',
+    LIVE_EVENTS_TTL_DAYS: parseInt(process.env.LIVE_EVENTS_TTL_DAYS) || 7,
+    LIVE_NOTIFY_ENABLED: process.env.LIVE_NOTIFY_ENABLED !== 'false',
+    LIVE_NOTIFY_INTERVAL_SEC: Math.max(20, parseInt(process.env.LIVE_NOTIFY_INTERVAL_SEC) || 60),
+    // The streaming servers whose public GET /streams is polled. Defaults to the
+    // same list the ad gate asks about rooms (utils/liveRoom.js).
+    LIVE_STREAMS_API_URLS: String(process.env.LIVE_STREAMS_API_URLS || process.env.LIVE_ROOM_API_URLS || 'https://live.3speak.tv')
+        .split(',').map((u) => u.trim().replace(/\/+$/, '')).filter(Boolean),
+    // How long a "went live" stays in the bell after it started.
+    LIVE_NOTIFY_FEED_HOURS: parseFloat(process.env.LIVE_NOTIFY_FEED_HOURS) || 24,
+    // Polls on community snaps: one vote per account (routes/polls.js).
+    POLL_VOTES_COLLECTION: process.env.POLL_VOTES_COLLECTION || 'poll_votes',
+    // Collab posts: invites the co-creator accepts or declines (routes/collabs.js).
+    COLLABS_COLLECTION: process.env.COLLABS_COLLECTION || 'collabs',
+
     // Share of AD REVENUE that is paid out to viewers, in points of the whole.
     // At the defaults: creators+communities 50, viewers 10, platform 40.
     //

@@ -5,7 +5,7 @@ const { handleRouteError } = require('./utils/asyncErrors');
 const cors = require('cors');
 const cron = require('node-cron');
 
-const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, BADGE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN, THUMBNAIL_FRAME_ENABLED, THUMBNAIL_FRAME_INTERVAL_MIN, VIDEO_HIVE_SYNC_ENABLED, VIDEO_HIVE_SYNC_INTERVAL_MIN, DURATION_SYNC_ENABLED, DURATION_SYNC_INTERVAL_MIN, AD_INVENTORY_ENABLED, AD_INVENTORY_INTERVAL_H, BACKGROUND_JOBS } = require('./utils/config');
+const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, BADGE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN, THUMBNAIL_FRAME_ENABLED, THUMBNAIL_FRAME_INTERVAL_MIN, VIDEO_HIVE_SYNC_ENABLED, VIDEO_HIVE_SYNC_INTERVAL_MIN, DURATION_SYNC_ENABLED, DURATION_SYNC_INTERVAL_MIN, AD_INVENTORY_ENABLED, AD_INVENTORY_INTERVAL_H, BACKGROUND_JOBS, LIVE_NOTIFY_ENABLED } = require('./utils/config');
 const { connectToMongo, getDb } = require('./utils/db');
 const { calculateAndFlagTrendingVideos } = require('./services/trending');
 const { syncHiveCommunities } = require('./services/communitySync');
@@ -159,6 +159,7 @@ app.use('/badges', badgeRoutes);          // same ordering rule as above
 app.use('/', announcementRoutes);         // same ordering rule as above
 app.use('/', require('./routes/stories')); // 24h stories row + follower notifications; same ordering rule
 app.use('/pulse', require('./routes/pulse')); // Video Pulse hot set (#93); same ordering rule
+app.use('/', require('./routes/notify'));  // per-creator notification levels + the bell's "went live" feed; same ordering rule
 app.use('/', streamStatsRoutes);
 
 // Last: any error a route did not answer itself becomes a JSON 500.
@@ -481,6 +482,11 @@ async function startServer() {
     } else {
         console.log('Push notifications disabled (no VAPID keys)');
     }
+
+    // "Went live" notifications: polls the streaming servers' public /streams,
+    // records each stream that went live, pushes it to followers. One row per
+    // stream, so it writes shared data: background-jobs instance only.
+    if (LIVE_NOTIFY_ENABLED) require('./services/liveNotify').schedule();
 
     // Ad inventory forecast. Reads only aggregate watch data and writes one cached
     // document; cheap enough to run on the main thread, unlike the retention worker.
