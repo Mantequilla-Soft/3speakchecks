@@ -1023,6 +1023,10 @@ module.exports = {
     COMMENT_INBOX_DONE_COLLECTION: process.env.COMMENT_INBOX_DONE_COLLECTION || 'comment_inbox_done',
     COMMENT_INBOX_DAYS: parseIntMin(process.env.COMMENT_INBOX_DAYS, 90, 7),
 
+    // Earnings over time (routes/creatorEarnings.js): one answer per account and
+    // range is kept this many minutes.
+    CREATOR_EARNINGS_CACHE_MIN: parseIntMin(process.env.CREATOR_EARNINGS_CACHE_MIN, 15, 0),
+
     // Share of AD REVENUE that is paid out to viewers, in points of the whole.
     // At the defaults: creators+communities 50, viewers 10, platform 40.
     //

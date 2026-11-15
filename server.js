@@ -147,6 +147,7 @@ app.use('/podcasts', require('./routes/podcasts')); // outside podcast feeds (Ex
 app.use('/', require('./routes/supports'));    // every tip on a video (profile Supporters); same ordering rule
 app.use('/', require('./routes/cardReach'));   // cards seen / opened per surface, creator stats reach; same ordering rule
 app.use('/', require('./routes/commentInbox')); // creator comment inbox (vouched); same ordering rule
+app.use('/', require('./routes/creatorEarnings')); // creator earnings per day and source; same ordering rule
 app.use('/advertise', advertiseRoutes);   // same reason as above: must precede streamStatsRoutes
 app.use('/advertise', adCampaignRoutes);  // booking + payment, same mount, same ordering rule
 app.use('/advertise', adSelfPromoRoutes); // a creator promoting their OWN video, same mount
