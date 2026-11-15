@@ -63,6 +63,7 @@ const rateLimit = require('express-rate-limit');
 const { ObjectId } = require('mongodb');
 const { getDb, getLinksCollection } = require('../utils/db');
 const { verifyHiveAuthority, verifyDelegateVouch } = require('../utils/hiveAuth');
+const { proveProgressUser, PROGRESS_VOUCH_MAX_AGE_MS } = require('../utils/progressVouch');
 const { SIGNATURE_TIMESTAMP_TOLERANCE_MS, AD_SIGNING_DELEGATES } = require('../utils/config');
 const { Transform, pipeline } = require('stream');
 const { checkUrl, safeFetch, safeStream, splitCredentials } = require('../utils/safeFetch');
@@ -900,22 +901,8 @@ router.get('/art/:token/:px.jpg', async (req, res) => {
 // from our API (`progress-vouch` over "session") for up to a day and reuses it.
 // A stolen one could only move that person's progress bars.
 
-const PROGRESS_VOUCH_MAX_AGE_MS = 24 * 3600 * 1000;
+// proveProgressUser and its max age: utils/progressVouch.js (shared with Continue watching).
 const progressBrake = new Map();
-
-async function proveProgressUser(b) {
-  const user = userOf(b.user);
-  if (!USER_RE.test(user)) return null;
-  const signature = typeof b.signature === 'string' ? b.signature.slice(0, 200) : '';
-  const timestamp = parseInt(b.timestamp, 10);
-  if (!signature || !Number.isFinite(timestamp) || Math.abs(Date.now() - timestamp) > PROGRESS_VOUCH_MAX_AGE_MS) return null;
-  try {
-    const v = await verifyDelegateVouch({ message: podcastMessage('progress-vouch', user, 'session', timestamp), signature, delegates: AD_SIGNING_DELEGATES });
-    return v.ok ? user : null;
-  } catch (_) {
-    return null;
-  }
-}
 
 const presentProgress = (rows) => Object.fromEntries(rows.map((r) => [r.ep, { pos: r.pos, dur: r.dur, done: !!r.done }]));
 

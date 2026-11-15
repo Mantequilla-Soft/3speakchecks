@@ -286,3 +286,5 @@ router.get('/watched/:username', async (req, res) => {
 });
 
 module.exports = router;
+// The feed-card shape for one embed-video, shared with routes/continueWatching.js.
+module.exports.embedCard = embedCard;

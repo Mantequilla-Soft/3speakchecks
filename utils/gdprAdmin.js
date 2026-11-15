@@ -28,6 +28,8 @@ const OWNED = [
   // has to reach it, and the opt-in row that authorised it, or we would be holding
   // identified watch data for someone who asked to be forgotten.
   { coll: 'ad_viewer_watch', field: 'viewer' },
+  // Continue watching: where they left each video, under the same opt-in.
+  { coll: 'viewer_progress', field: 'viewer' },
   { coll: 'ad_viewer_prefs', field: '_id' },
   // Listener rewards: listening tied to a name, only for people who agreed.
   { coll: 'ad_listener_listen', field: 'listener' },

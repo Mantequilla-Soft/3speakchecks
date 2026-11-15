@@ -996,6 +996,15 @@ module.exports = {
     // collection rather than a surgical edit of the log we keep on all viewers.
     AD_VIEWER_WATCH_COLLECTION: process.env.AD_VIEWER_WATCH_COLLECTION || 'ad_viewer_watch',
 
+    // Continue watching (the home strip): where each opted-in viewer left a video,
+    // copied from the player's short-lived `view-sessions` into `viewer_progress`
+    // (services/viewerProgress.js). Same consent as the watch rows above, and
+    // deleted with them on opt-out. Listed between MIN and MAX percent watched.
+    VIEWER_PROGRESS_COLLECTION: process.env.VIEWER_PROGRESS_COLLECTION || 'viewer_progress',
+    VIEWER_PROGRESS_SYNC_MIN: parseInt(process.env.VIEWER_PROGRESS_SYNC_MIN) || 2,
+    CONTINUE_WATCHING_MIN_PCT: parseFloat(process.env.CONTINUE_WATCHING_MIN_PCT ?? '10'),
+    CONTINUE_WATCHING_MAX_PCT: parseFloat(process.env.CONTINUE_WATCHING_MAX_PCT ?? '75'),
+
     // Share of AD REVENUE that is paid out to viewers, in points of the whole.
     // At the defaults: creators+communities 50, viewers 10, platform 40.
     //

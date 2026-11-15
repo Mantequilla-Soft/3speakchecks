@@ -117,6 +117,7 @@ app.use('/', promoteRoutes);
 app.use('/', shortsRoutes);
 app.use('/audio/listen', require('./routes/audioListen')); // listening time for all audio, like video watch time
 app.use('/audio', audioRoutes);
+app.use('/feeds', require('./routes/continueWatching')); // POST /feeds/continue-watching (+ /hide), the home strip
 app.use('/feeds', feedsRoutes);
 app.use('/feeds', watchedFeedRoutes);              // /feeds/watched/:username (history as cards)
 app.use('/rss', rssRoutes);
@@ -567,6 +568,10 @@ async function startServer() {
     // stamp them into video-comment-counts, so the feeds can apply a comment boost
     // cheaply. In-process (network I/O, not CPU) — see services/commentCounts.js.
     scheduleCommentCounts();
+
+    // Continue watching: copy opted-in viewers' player sessions into viewer_progress
+    // before they expire. See services/viewerProgress.js.
+    require('./services/viewerProgress').scheduleViewerProgress();
 
     listen();
 }
