@@ -43,30 +43,24 @@ async function fetchWithTimeout(url, method = 'GET') {
   }
 }
 
-// GET /subtitle-proxy/:cid — text/plain passthrough of the SRT file at that CID.
-router.get('/subtitle-proxy/:cid', async (req, res) => {
-  const { cid } = req.params;
-  if (!CID_RE.test(cid)) {
-    return res.status(400).json({ success: false, error: 'invalid cid' });
-  }
-
+/**
+ * The text of the subtitle file at `cid`: { text } or { status } (the last
+ * upstream status) when no source had it. Also used by the podcast feeds'
+ * transcript files (routes/rss.js).
+ */
+async function fetchSubtitleText(cid) {
   let lastStatus = null;
-  const send = (text) => {
-    res.set('Cache-Control', 'public, max-age=3600'); // subtitle content is immutable per CID
-    return res.type('text/plain; charset=utf-8').send(text);
-  };
-
   // The node next door FIRST. Subtitles are written by our own pipeline, so the
   // ingest node this service runs beside already holds them: it answers in
   // single-digit milliseconds, needs no CORS and needs no propagation. The
-  // gateways are the fallback, not the other way round — trying them first cost
+  // gateways are the fallback, not the other way round: trying them first cost
   // 8s per request, because the hot CDN 500s for un-pinned content and
   // ipfs.3speak.tv then hangs to the timeout before the local node ever gets
   // asked. That latency is what kept the transcript out of the prerendered page
   // for crawlers, which give up long before 8s.
   try {
     const local = await fetchWithTimeout(`${LOCAL_IPFS_API}/api/v0/cat?arg=${encodeURIComponent(cid)}`, 'POST');
-    if (local.ok) return send(await local.text());
+    if (local.ok) return { text: await local.text() };
     lastStatus = local.status;
   } catch (err) {
     lastStatus = err.name === 'AbortError' ? 504 : 502;
@@ -76,13 +70,28 @@ router.get('/subtitle-proxy/:cid', async (req, res) => {
     try {
       const upstream = await fetchWithTimeout(`${base}/${cid}`);
       if (!upstream.ok) { lastStatus = upstream.status; continue; }
-      return send(await upstream.text());
+      return { text: await upstream.text() };
     } catch (err) {
       lastStatus = err.name === 'AbortError' ? 504 : 502;
     }
   }
+  return { status: lastStatus };
+}
 
-  res.status(502).json({ success: false, error: 'no gateway succeeded', lastStatus });
+// GET /subtitle-proxy/:cid: text/plain passthrough of the SRT file at that CID.
+router.get('/subtitle-proxy/:cid', async (req, res) => {
+  const { cid } = req.params;
+  if (!CID_RE.test(cid)) {
+    return res.status(400).json({ success: false, error: 'invalid cid' });
+  }
+  const got = await fetchSubtitleText(cid);
+  if (got.text != null) {
+    res.set('Cache-Control', 'public, max-age=3600'); // subtitle content is immutable per CID
+    return res.type('text/plain; charset=utf-8').send(got.text);
+  }
+  return res.status(502).json({ success: false, error: 'no gateway succeeded', lastStatus: got.status });
 });
 
 module.exports = router;
+module.exports.fetchSubtitleText = fetchSubtitleText;
+module.exports.CID_RE = CID_RE;
