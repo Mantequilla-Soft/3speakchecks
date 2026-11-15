@@ -160,6 +160,7 @@ app.use('/', announcementRoutes);         // same ordering rule as above
 app.use('/', require('./routes/stories')); // 24h stories row + follower notifications; same ordering rule
 app.use('/pulse', require('./routes/pulse')); // Video Pulse hot set (#93); same ordering rule
 app.use('/', require('./routes/polls'));   // poll votes on community snaps (one per account); same ordering rule
+app.use('/', require('./routes/collabs')); // collab post invites (accept / decline); same ordering rule
 app.use('/', require('./routes/notify'));  // per-creator notification levels + the bell's "went live" feed; same ordering rule
 app.use('/', streamStatsRoutes);
 
