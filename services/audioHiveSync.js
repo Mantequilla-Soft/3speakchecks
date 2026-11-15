@@ -15,6 +15,15 @@
 
 const { getDb } = require('../utils/db');
 const { ENABLE_MONGO_WRITES, HIVE_RPC_ENDPOINTS, PPL_BENEFICIARY } = require('../utils/config');
+const { seasonEpisodeOf } = require('../utils/postMeta');
+
+// Season and episode numbers (json_metadata.audio.season/.episode) onto the row,
+// for the cards' "S2 E5". Set when the post has them, removed when it no longer does.
+function numbersUpdate(jsonMetadata, $set, $unset) {
+    const { season, episode } = seasonEpisodeOf(jsonMetadata);
+    if (season != null) $set.season = season; else $unset.season = '';
+    if (episode != null) $set.episode = episode; else $unset.episode = '';
+}
 
 // A track is "pay-per-listen" when its Hive post assigns (almost) all
 // beneficiary weight to PPL_BENEFICIARY (uploader sets 10000 = 100%). We
@@ -203,6 +212,9 @@ async function syncAudioHiveLinks() {
                             if (!isNaN(bpmNum) && bpmNum > 0) $set.bpm = bpmNum;
                         }
                     } catch { /* ignore parse errors */ }
+                    const { season, episode } = seasonEpisodeOf(match.json_metadata);
+                    if (season != null) $set.season = season;
+                    if (episode != null) $set.episode = episode;
 
                     // Flag pay-per-listen posts so the player only opens
                     // listen sessions for tracks that actually earn that way.
@@ -276,6 +288,8 @@ async function syncAudioPostTitles(now = new Date()) {
             continue;
         }
         const $set = { hive_title_checked_at: now };
+        const $unset = {};
+        if (post && post.author) numbersUpdate(post.json_metadata, $set, $unset);
         const title = post && post.author ? String(post.title || '').trim() : '';
         if (title) {
             $set.hive_title = title;
@@ -285,7 +299,8 @@ async function syncAudioPostTitles(now = new Date()) {
                 retitled++;
             }
         }
-        if (ENABLE_MONGO_WRITES) await audioCol.updateOne({ _id: row._id }, { $set });
+        const update = Object.keys($unset).length ? { $set, $unset } : { $set };
+        if (ENABLE_MONGO_WRITES) await audioCol.updateOne({ _id: row._id }, update);
     }
     if (rows.length) console.log(`[audioHiveSync] Titles: ${rows.length} checked, ${retitled} retitled, ${errors} errors`);
     return { checked: rows.length, retitled, errors };

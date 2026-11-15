@@ -128,7 +128,54 @@ function buildOperations(doc) {
         },
     ]);
 
+    // An audio post headed for one of the owner's playlists: the same op the
+    // uploader puts in its own transaction (3speak.tv AudioUploadModal playlistAddOp).
+    const pa = doc.playlistAdd;
+    if (pa && typeof pa.playlist_id === 'string' && pa.playlist_id) {
+        ops.push([
+            'custom_json',
+            {
+                required_auths: [],
+                required_posting_auths: [doc.owner],
+                id: '3speak_playlist_add',
+                json: JSON.stringify({
+                    playlist_id: pa.playlist_id,
+                    author: doc.owner,
+                    permlink: doc.permlink,
+                    position: Number.isInteger(pa.position) ? pa.position : 0,
+                }),
+            },
+        ]);
+    }
+
     return ops;
+}
+
+/**
+ * A scheduled AUDIO post is out: point its upload (embed-audio, by the uploader's
+ * own permlink) at the post, as the uploader's link call does for one published
+ * at once, and show it again (it was held back as "scheduled" while it waited).
+ * Only a row of the same owner that is not linked to another post yet.
+ * Non-fatal, but logged: nothing else links it later.
+ */
+async function linkAudioToHivePost(doc) {
+    if (!doc.audioPermlink) return;
+    try {
+        // routes/scheduledPosts.js held it back as "scheduled" until now.
+        const r = await getDb().collection('embed-audio').updateOne(
+            {
+                owner: doc.owner,
+                permlink: doc.audioPermlink,
+                status: { $in: ['scheduled', 'published'] },
+                $or: [{ post_permlink: null }, { post_permlink: '' }, { post_permlink: { $exists: false } }, { post_permlink: doc.permlink }],
+            },
+            { $set: { post_permlink: doc.permlink, post_author: doc.owner, status: 'published' }, $unset: { scheduled_post: '' } },
+        );
+        if (r.matchedCount) console.log(`[scheduledPosts] linked audio ${doc.audioPermlink} -> @${doc.owner}/${doc.permlink}`);
+        else console.warn(`[scheduledPosts] audio ${doc.audioPermlink} of @${doc.owner} not found or linked elsewhere`);
+    } catch (err) {
+        console.warn(`[scheduledPosts] audio link failed for ${doc.owner}/${doc.permlink}:`, err.message || err);
+    }
 }
 
 async function broadcastPost(doc) {
@@ -391,6 +438,7 @@ async function earlierAttemptLanded(doc) {
  */
 async function afterPosted(doc) {
     await linkEmbedVideoToHivePost(doc);
+    await linkAudioToHivePost(doc);
     await reblogToBlog(doc);
     // Per-video ad opt-out. The uploader cannot sync this one itself, the post
     // did not exist yet. Taken from the metadata just broadcast rather than
@@ -660,4 +708,4 @@ function schedule() {
     }, 30 * 1000);
 }
 
-module.exports = { schedule, runOnce, COLLECTION, hasThreespeakPostingAuthority, requeueStuckPosts, isPostOnChain };
+module.exports = { schedule, runOnce, COLLECTION, hasThreespeakPostingAuthority, requeueStuckPosts, isPostOnChain, buildOperations };

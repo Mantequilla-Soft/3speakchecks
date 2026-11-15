@@ -7,9 +7,21 @@
  * and the cron publishes a queued post AS its owner. Read paths are public.
  *
  * Signed message format (body fields `signature` and `timestamp`, ms):
- *   create: scheduled-post|create|<owner>|<permlink>|<scheduledOn as sent>|<timestamp>
- *   update: scheduled-post|update|<owner>|<permlink>|<timestamp>
- *   cancel: scheduled-post|cancel|<owner>|<permlink>|<timestamp>
+ *   create:  scheduled-post|create|<owner>|<permlink>|<scheduledOn as sent>|<timestamp>
+ *   draft:   scheduled-post|draft|<owner>|<permlink>|<timestamp>     (create with draft: true)
+ *   publish: scheduled-post|publish|<owner>|<permlink>|<scheduledOn as sent>|<timestamp>
+ *   update:  scheduled-post|update|<owner>|<permlink>|<timestamp>
+ *   cancel:  scheduled-post|cancel|<owner>|<permlink>|<timestamp>
+ *
+ * Drafts: a post saved with `draft: true` is kept with status "draft" and no
+ * scheduledOn, so the cron never touches it. POST /publish turns it into an
+ * ordinary scheduled post, due at the time given (the current time = at the
+ * cron's next run). Update and cancel work on drafts as on scheduled posts.
+ *
+ * Audio: `audioPermlink` names the upload on audio.3speak.tv, which the cron
+ * links to the post once it is out (embed-audio post_permlink), and
+ * `playlistAdd` ({ playlist_id, position }) is broadcast with the post as the
+ * owner's 3speak_playlist_add (services/scheduledPosts.js).
  *
  * Signed by the owner's own posting key (Keychain and the other wallets), or by
  * @threespeak (AD_SIGNING_DELEGATES) under the posting authority the owner granted
@@ -33,6 +45,8 @@ const { COLLECTION, hasThreespeakPostingAuthority } = require('../services/sched
 const { SIGNATURE_TIMESTAMP_TOLERANCE_MS, HIVE_AUTH_REQUIRED, AD_SIGNING_DELEGATES } = require('../utils/config');
 
 const VALID_PAYOUT = new Set(['default', 'powerup', 'decline']);
+// What update may change: a post still waiting for its time, or a draft.
+const EDITABLE = ['scheduled', 'draft'];
 // Backend floor is 5 minutes (slack for cron drift / clock skew); the frontend
 // keeps a stricter 15-minute floor for the schedule picker.
 const MIN_LEAD_MS = 5 * 60 * 1000;
@@ -41,11 +55,36 @@ const MAX_LEAD_MS = 90 * 24 * 60 * 60 * 1000; // and no more than 90 days
 function buildCreateMessage({ owner, permlink, scheduledOn, timestamp }) {
     return ['scheduled-post', 'create', owner, permlink, scheduledOn, String(timestamp)].join('|');
 }
+function buildDraftMessage({ owner, permlink, timestamp }) {
+    return ['scheduled-post', 'draft', owner, permlink, String(timestamp)].join('|');
+}
+function buildPublishMessage({ owner, permlink, scheduledOn, timestamp }) {
+    return ['scheduled-post', 'publish', owner, permlink, scheduledOn, String(timestamp)].join('|');
+}
 function buildCancelMessage({ owner, permlink, timestamp }) {
     return ['scheduled-post', 'cancel', owner, permlink, String(timestamp)].join('|');
 }
 function buildUpdateMessage({ owner, permlink, timestamp }) {
     return ['scheduled-post', 'update', owner, permlink, String(timestamp)].join('|');
+}
+
+const AUDIO_PERMLINK_RE = /^[a-z0-9-]{1,255}$/;
+const PLAYLIST_ID_RE = /^[A-Za-z0-9-]{8,64}$/;
+
+/** The audio fields of a create: { audioPermlink, playlistAdd } or { error }. */
+function audioFields(body) {
+    const out = { audioPermlink: null, playlistAdd: null };
+    if (body.audioPermlink != null && body.audioPermlink !== '') {
+        if (typeof body.audioPermlink !== 'string' || !AUDIO_PERMLINK_RE.test(body.audioPermlink)) return { error: 'audioPermlink is invalid' };
+        out.audioPermlink = body.audioPermlink;
+    }
+    if (body.playlistAdd != null) {
+        const pa = body.playlistAdd;
+        const position = Number.isInteger(pa && pa.position) ? Math.max(0, Math.min(100000, pa.position)) : 0;
+        if (!pa || typeof pa.playlist_id !== 'string' || !PLAYLIST_ID_RE.test(pa.playlist_id)) return { error: 'playlistAdd.playlist_id is invalid' };
+        out.playlistAdd = { playlist_id: pa.playlist_id, position };
+    }
+    return out;
 }
 
 const signatureRequired = () => String(process.env.SCHEDULED_POSTS_REQUIRE_SIGNATURE || '').trim().toLowerCase() === 'true';
@@ -114,7 +153,9 @@ router.post('/create', validateApiKey, express.json({ limit: '2mb' }), async (re
             parentPermlink = 'hive-181335',
             embedPermlink = null,   // embedvideos service's internal permlink; lets the cron link the video record to the broadcast Hive post afterwards
             reblog = false,         // "Add to my blog": the cron reblogs the post onto the owner's blog after posting
+            draft = false,          // keep it as a draft: no time, never published until POST /publish
         } = req.body || {};
+        const isDraft = draft === true;
 
         // ─── basic validation ──────────────────────────────────────────
         if (!owner || typeof owner !== 'string') {
@@ -123,22 +164,26 @@ router.post('/create', validateApiKey, express.json({ limit: '2mb' }), async (re
         if (!permlink || typeof permlink !== 'string') {
             return res.status(422).json({ error: 'permlink is required' });
         }
-        const scheduledMs = Date.parse(scheduledOn);
-        if (!Number.isFinite(scheduledMs)) {
+        const scheduledMs = isDraft ? null : Date.parse(scheduledOn);
+        if (!isDraft && !Number.isFinite(scheduledMs)) {
             return res.status(422).json({ error: 'scheduledOn must be a valid ISO-8601 date' });
         }
-        const leadMs = scheduledMs - Date.now();
-        if (leadMs < MIN_LEAD_MS || leadMs > MAX_LEAD_MS) {
+        const leadMs = isDraft ? null : scheduledMs - Date.now();
+        if (!isDraft && (leadMs < MIN_LEAD_MS || leadMs > MAX_LEAD_MS)) {
             return res.status(422).json({ error: 'scheduledOn must be between 5 minutes and 90 days from now' });
         }
+        const audio = audioFields(req.body || {});
+        if (audio.error) return res.status(422).json({ error: audio.error });
         if (!VALID_PAYOUT.has(String(payoutOptions).toLowerCase())) {
             return res.status(422).json({ error: 'payoutOptions must be default | powerup | decline' });
         }
 
         // ─── the owner's signature (see the file header) ───────────────
         const signedOn = asText(scheduledOn);
-        if (!await signedByOwner(req, res, 'create', owner,
-            (timestamp) => buildCreateMessage({ owner, permlink, scheduledOn: signedOn, timestamp }))) return undefined;
+        if (!await signedByOwner(req, res, isDraft ? 'draft' : 'create', owner,
+            (timestamp) => (isDraft
+                ? buildDraftMessage({ owner, permlink, timestamp })
+                : buildCreateMessage({ owner, permlink, scheduledOn: signedOn, timestamp })))) return undefined;
 
         // ─── authorize: the on-chain @threespeak grant ─────────────────
         // Without that grant the cron couldn't broadcast for the owner anyway. On
@@ -167,8 +212,8 @@ router.post('/create', validateApiKey, express.json({ limit: '2mb' }), async (re
         const doc = {
             owner,
             permlink,
-            status: 'scheduled',
-            scheduledOn: new Date(scheduledMs),
+            status: isDraft ? 'draft' : 'scheduled',
+            scheduledOn: isDraft ? null : new Date(scheduledMs),
             title,
             description,
             body: body || description, // body is what gets broadcast; fall back to description.
@@ -180,6 +225,8 @@ router.post('/create', validateApiKey, express.json({ limit: '2mb' }), async (re
             parentAuthor,
             parentPermlink,
             embedPermlink,
+            ...(audio.audioPermlink ? { audioPermlink: audio.audioPermlink } : {}),
+            ...(audio.playlistAdd ? { playlistAdd: audio.playlistAdd } : {}),
             reblog: reblog === true,
             attempts: 0,
             lastError: null,
@@ -194,7 +241,16 @@ router.post('/create', validateApiKey, express.json({ limit: '2mb' }), async (re
                 { upsert: true, returnDocument: 'after' },
             );
             const saved = result && (result.value || result);
-            return res.status(201).json({ success: true, id: saved && saved._id, scheduledOn: doc.scheduledOn });
+            // The audio upload is already on audio.3speak.tv, and every audio list
+            // shows a published row whether it has a post or not: hold it back
+            // (status "scheduled") until the cron publishes the post and links it.
+            if (audio.audioPermlink) {
+                await db.collection('embed-audio').updateOne(
+                    { owner, permlink: audio.audioPermlink, status: 'published', post_permlink: { $in: [null, ''] } },
+                    { $set: { status: 'scheduled', scheduled_post: permlink } },
+                );
+            }
+            return res.status(201).json({ success: true, id: saved && saved._id, scheduledOn: doc.scheduledOn, ...(isDraft ? { status: 'draft' } : {}) });
         } catch (err) {
             // Duplicate-key on (owner, permlink) shouldn't happen under upsert,
             // but surface it loudly if it ever does.
@@ -239,6 +295,8 @@ router.get('/:username', async (req, res) => {
             beneficiaries: d.beneficiaries,
             payoutOptions: d.payoutOptions,
             thumbnail: d.thumbnail,
+            // An audio post (scheduled or a draft) names its upload; a video its embed.
+            kind: d.audioPermlink ? 'audio' : 'video',
             postedAt: d.postedAt || null,
             broadcastTxId: d.broadcastTxId || null,
             lastError: d.lastError || null,
@@ -255,7 +313,7 @@ router.get('/:username', async (req, res) => {
 });
 
 /* ─── POST /scheduled-posts/update ────────────────────────────────────── */
-// Edit a still-`scheduled` post: title/description/body/scheduledOn/tags/
+// Edit a still-`scheduled` post or a draft: title/description/body/scheduledOn/tags/
 // beneficiaries/payoutOptions/thumbnail/jsonMetadata/embedPermlink can all
 // change. Posts already in `processing`, `posted`, `cancelled`, or `failed`
 // states are immutable — the route returns 404 / 409 for those.
@@ -332,7 +390,7 @@ router.post('/update', validateApiKey, express.json({ limit: '2mb' }), async (re
         );
         if (touchesJsonMeta) {
             const current = await db.collection(COLLECTION).findOne(
-                { owner, permlink, status: 'scheduled' },
+                { owner, permlink, status: { $in: EDITABLE } },
                 { projection: { jsonMetadata: 1 } },
             );
             if (current) {
@@ -355,8 +413,11 @@ router.post('/update', validateApiKey, express.json({ limit: '2mb' }), async (re
             }
         }
 
+        // A draft keeps no time: it gets one from POST /publish.
+        const isDraftDoc = await db.collection(COLLECTION).countDocuments({ owner, permlink, status: 'draft' }, { limit: 1 });
+        if (isDraftDoc) { delete $set.scheduledOn; delete $set.attempts; delete $set.lastError; }
         const result = await db.collection(COLLECTION).findOneAndUpdate(
-            { owner, permlink, status: 'scheduled' },
+            { owner, permlink, status: { $in: EDITABLE } },
             { $set },
             { returnDocument: 'after' },
         );
@@ -368,6 +429,59 @@ router.post('/update', validateApiKey, express.json({ limit: '2mb' }), async (re
         return res.json({ success: true, id: saved._id, scheduledOn: saved.scheduledOn });
     } catch (err) {
         console.error('[scheduledPosts] /update error:', err);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+/* ─── POST /scheduled-posts/publish ───────────────────────────────────── */
+// A draft goes out: it becomes a scheduled post due at `scheduledOn`, which may
+// be the current time (then the cron publishes it on its next run, within
+// SCHEDULED_POSTS_INTERVAL_MIN) or up to 90 days ahead.
+router.post('/publish', validateApiKey, express.json(), async (req, res) => {
+    try {
+        const { owner, permlink, scheduledOn } = req.body || {};
+        if (!owner || !permlink || typeof owner !== 'string' || typeof permlink !== 'string') {
+            return res.status(422).json({ error: 'owner and permlink required' });
+        }
+        const ms = Date.parse(scheduledOn);
+        if (!Number.isFinite(ms)) return res.status(422).json({ error: 'scheduledOn must be a valid ISO-8601 date' });
+        // "Now" may be a little behind our clock; a time in the future is a schedule.
+        const lead = ms - Date.now();
+        if (lead < -SIGNATURE_TIMESTAMP_TOLERANCE_MS || lead > MAX_LEAD_MS) {
+            return res.status(422).json({ error: 'scheduledOn must be now or within 90 days' });
+        }
+        if (lead > 0 && lead < MIN_LEAD_MS) {
+            return res.status(422).json({ error: 'scheduledOn must be now or at least 5 minutes from now' });
+        }
+
+        const signedOn = asText(scheduledOn);
+        if (!await signedByOwner(req, res, 'publish', owner,
+            (timestamp) => buildPublishMessage({ owner, permlink, scheduledOn: signedOn, timestamp }))) return undefined;
+
+        let granted;
+        try {
+            granted = await hasThreespeakPostingAuthority(owner);
+        } catch (err) {
+            console.error('[scheduledPosts] posting-auth check error:', err.message || err);
+            return res.status(502).json({ error: 'Could not verify posting authority' });
+        }
+        if (!granted) {
+            return res.status(403).json({ error: 'owner has not granted @threespeak posting authority' });
+        }
+
+        const db = await getDb();
+        const now = new Date();
+        const due = new Date(Math.max(ms, now.getTime()));
+        const result = await db.collection(COLLECTION).findOneAndUpdate(
+            { owner, permlink, status: 'draft' },
+            { $set: { status: 'scheduled', scheduledOn: due, attempts: 0, lastError: null, updatedAt: now } },
+            { returnDocument: 'after' },
+        );
+        const saved = result && (result.value || result);
+        if (!saved) return res.status(404).json({ error: 'No draft found' });
+        return res.json({ success: true, id: saved._id, status: saved.status, scheduledOn: saved.scheduledOn });
+    } catch (err) {
+        console.error('[scheduledPosts] /publish error:', err);
         return res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -397,7 +511,7 @@ router.post('/cancel', validateApiKey, express.json(), async (req, res) => {
 
         const db = await getDb();
         const result = await db.collection(COLLECTION).findOneAndUpdate(
-            { owner, permlink, status: { $in: ['scheduled', 'failed'] } },
+            { owner, permlink, status: { $in: ['scheduled', 'failed', 'draft'] } },
             { $set: { status: 'cancelled', updatedAt: new Date() } },
             { returnDocument: 'after' },
         );
