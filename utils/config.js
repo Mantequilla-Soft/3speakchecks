@@ -1066,6 +1066,17 @@ module.exports = {
     POLL_VOTES_COLLECTION: process.env.POLL_VOTES_COLLECTION || 'poll_votes',
     // Collab posts: invites the co-creator accepts or declines (routes/collabs.js).
     COLLABS_COLLECTION: process.env.COLLABS_COLLECTION || 'collabs',
+    // Sound pages (services/soundIndex.js, routes/sounds.js): which Shorts use which
+    // sound. The index job runs every SOUND_INDEX_INTERVAL_MIN on the background-jobs
+    // instance, SOUND_INDEX_BATCH Shorts per run (the backfill), and re-reads the
+    // last SOUND_INDEX_RECHECK_H hours of Shorts each time. Library songs are named
+    // from the editor's music list at SOUND_LIBRARY_URL (empty: no library names).
+    SOUND_INDEX_ENABLED: parseBool(process.env.SOUND_INDEX_ENABLED, true),
+    SOUND_INDEX_INTERVAL_MIN: parseIntMin(process.env.SOUND_INDEX_INTERVAL_MIN, 10, 1),
+    SOUND_INDEX_BATCH: parseIntMin(process.env.SOUND_INDEX_BATCH, 200, 1),
+    SOUND_INDEX_RECHECK_H: parseIntMin(process.env.SOUND_INDEX_RECHECK_H, 48, 1),
+    SOUND_LIBRARY_URL: process.env.SOUND_LIBRARY_URL ?? 'https://3speak-editor.okinoko.io/music/library.json',
+    SOUND_TRENDING_DAYS: parseIntMin(process.env.SOUND_TRENDING_DAYS, 7, 1),
 
     // Share of AD REVENUE that is paid out to viewers, in points of the whole.
     // At the defaults: creators+communities 50, viewers 10, platform 40.

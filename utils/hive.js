@@ -165,6 +165,8 @@ function pickSound(s) {
         source: str(s.source, 60),
         url: str(s.url, 300),
         license: str(s.license, 40),
+        // The sound's id (utils/soundIds.js), when the post names it: sound pages.
+        id: str(s.id, 300),
     };
 }
 
@@ -654,4 +656,5 @@ module.exports = {
     mulberry32,
     reputationCache,
     REPUTATION_CACHE_TTL,
+    pickSound,
 };

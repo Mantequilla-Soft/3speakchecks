@@ -30,6 +30,8 @@ const OWNED = [
   { coll: 'ad_viewer_watch', field: 'viewer' },
   // Continue watching: where they left each video, under the same opt-in.
   { coll: 'viewer_progress', field: 'viewer' },
+  // Sound pages: each Short's sound, under its Hive author (public post data, rebuilt from Hive).
+  { coll: 'sound_uses', field: 'author' },
   { coll: 'ad_viewer_prefs', field: '_id' },
   // Listener rewards: listening tied to a name, only for people who agreed.
   { coll: 'ad_listener_listen', field: 'listener' },
