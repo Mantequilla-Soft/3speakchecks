@@ -63,6 +63,8 @@ const OWNED = [
   { coll: 'poll_votes', field: 'voter' },
   { coll: 'collabs', field: 'collaborator' },
   { coll: 'collabs', field: 'author' },
+  // "Your stream clips are ready" notices (services/streamClipNotices.js).
+  { coll: 'stream_clip_notices', field: 'user' },
 ];
 // watch_history keys by a compound _id "user:owner:permlink" — matched by prefix.
 const WATCH_HISTORY = 'watch_history';
