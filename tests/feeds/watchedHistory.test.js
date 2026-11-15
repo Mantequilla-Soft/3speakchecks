@@ -142,3 +142,71 @@ describe('entries that no longer resolve', () => {
     expect(res.body.counts).toEqual({ videos: 1, shorts: 1, audio: 1 });
   });
 });
+
+describe('listens in the global audio player', () => {
+  const FEED = '6ae8465717bc26ca49e3afce';
+  const PRIVATE_FEED = '6ae8465717bc26ca49e3afcf';
+  const EP = `${FEED}:AAAAAAAAAAAAAAAA`;
+  beforeEach(async () => {
+    const { ObjectId } = require('mongodb');
+    await db().collection('podcast_feeds').insertMany([
+      { _id: new ObjectId(FEED), title: 'A show', image: 'https://example.com/show.jpg' },
+      { _id: new ObjectId(PRIVATE_FEED), title: 'Paid show', image: 'https://example.com/paid.jpg', private: true },
+    ]);
+    await db().collection('podcast_episodes').insertMany([
+      { _id: EP, feed_id: FEED, title: 'Episode one', audio_url: 'https://example.com/one.mp3', duration: 600 },
+      { _id: `${FEED}:BBBBBBBBBBBBBBBB`, feed_id: FEED, title: 'Episode two', image: 'https://example.com/two.jpg', duration: 300 },
+      { _id: `${PRIVATE_FEED}:CCCCCCCCCCCCCCCC`, feed_id: PRIVATE_FEED, title: 'Paid episode', duration: 300 },
+    ]);
+    const a = await db().collection('embed-audio').insertOne({ owner: 'badadib', permlink: 'track', post_permlink: 'track-post', title: 'A track', status: 'published' });
+    await db().collection('podcast_progress').insertMany([
+      { _id: `fan|${EP}`, user: 'fan', ep: EP, pos: 120, dur: 600, done: false },
+      { _id: `fan|${a.insertedId}`, user: 'fan', pos: 30, dur: 90, done: false },
+      { _id: `other|${EP}`, user: 'other', ep: EP, pos: 590, dur: 600, done: true },
+    ]);
+    await history().insertMany([
+      row(EP, '_podcast', 1),                                       // an outside episode, never classified
+      row(`${FEED}:BBBBBBBBBBBBBBBB`, '_podcast', 2, { audio: false, short: false }), // settled wrongly by an older checker
+      row('track-post', 'badadib', 3),                              // a 3Speak episode from a followed 3Speak feed: its Hive post
+      row(`${FEED}:ZZZZZZZZZZZZZZZZ`, '_podcast', 4),               // no longer in the feed
+      row(`${PRIVATE_FEED}:CCCCCCCCCCCCCCCC`, '_podcast', 5),       // a private feed: never in a public history
+      row('v', 'cr', 6),
+    ]);
+    await db().collection('embed-video').insertOne(F.embedVideo({ owner: 'cr', permlink: 'v' }));
+  });
+
+  test('outside episodes are audio (also ones settled wrongly before), counted in the Audio tab and never in Videos', async () => {
+    const res = await watchedFeed('fan', { type: 'audio' }).expect(200);
+    expect(res.body.counts).toEqual({ videos: 1, shorts: 0, audio: 5 });
+    expect(res.body.videos.map((v) => v._historyKey)).toEqual([
+      `_podcast/${EP}`, `_podcast/${FEED}:BBBBBBBBBBBBBBBB`, 'badadib/track-post',
+    ]);
+    const flags = Object.fromEntries((await history().find({ author: '_podcast' }).toArray()).map((r) => [r.permlink.slice(-4), r.audio]));
+    expect(flags).toEqual({ AAAA: true, BBBB: true, ZZZZ: true, CCCC: true });
+    const videos = await watchedFeed('fan', { type: 'videos' }).expect(200);
+    expect(videos.body.videos.map((v) => v._historyKey)).toEqual(['cr/v']);
+  });
+
+  test('an episode card: show, cover, the listener\'s own progress, and no audio URL', async () => {
+    const res = await watchedFeed('fan', { type: 'audio' }).expect(200);
+    const [one, two, track] = res.body.videos;
+    expect(one).toMatchObject({
+      _id: EP, _audio: true, _podcast: true, external: true, title: 'Episode one', show: 'A show', show_id: FEED,
+      thumbnail_url: 'https://example.com/show.jpg', duration: 600, progress: { pos: 120, dur: 600, done: false },
+      watched_at: Math.floor(F.hoursAgo(1).getTime() / 1000),
+    });
+    expect(one.art).toEqual(expect.any(String));
+    expect(one).not.toHaveProperty('audio_url');
+    expect(one).not.toHaveProperty('src');
+    expect(two).toMatchObject({ thumbnail_url: 'https://example.com/two.jpg' });
+    expect(two).not.toHaveProperty('progress');
+    expect(track).toMatchObject({ title: 'A track', _audio: true, progress: { pos: 30, dur: 90, done: false } });
+  });
+
+  test('the Today filter (since=) applies to outside episodes too', async () => {
+    const since = Math.floor(F.hoursAgo(1.5).getTime() / 1000);
+    const res = await watchedFeed('fan', { type: 'audio', since }).expect(200);
+    expect(res.body.counts.audio).toBe(1);
+    expect(res.body.videos.map((v) => v._historyKey)).toEqual([`_podcast/${EP}`]);
+  });
+});
