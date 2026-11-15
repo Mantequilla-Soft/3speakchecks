@@ -145,6 +145,7 @@ app.use('/', subtitleEditRoutes);          // author caption edits; same orderin
 app.use('/', require('./routes/commentPins')); // author pins comments on own video; same ordering rule
 app.use('/podcasts', require('./routes/podcasts')); // outside podcast feeds (External on /audio); same ordering rule (before streamStats)
 app.use('/', require('./routes/supports'));    // every tip on a video (profile Supporters); same ordering rule
+app.use('/', require('./routes/curation'));    // GET /curation/:user, the curator page; same ordering rule
 app.use('/advertise', advertiseRoutes);   // same reason as above: must precede streamStatsRoutes
 app.use('/advertise', adCampaignRoutes);  // booking + payment, same mount, same ordering rule
 app.use('/advertise', adSelfPromoRoutes); // a creator promoting their OWN video, same mount
