@@ -187,8 +187,10 @@ describe('POST /subtitles/edit', () => {
     });
 
     test('a valid signature for your own account cannot reach another author captions', async () => {
-      await send(editRequest({ signer: mallory, author: 'mallory' })).expect(404, { success: false, error: 'no captions in this language' });
+      // it lands on mallory's own (new) row, never on alice's
+      await send(editRequest({ signer: mallory, author: 'mallory' })).expect(200);
       expect((await row()).subtitles.en).toBe('QmOldEn');
+      expect((await db().collection('subtitles').findOne({ author: 'mallory' })).subtitles).toEqual({ en: 'QmNew1' });
     });
 
     test.each([
@@ -252,9 +254,59 @@ describe('POST /subtitles/edit', () => {
       expect(await row()).not.toHaveProperty('subtitle_edits');
     });
 
-    test('404 for a language the video has no captions in: adding languages is not this route', async () => {
-      await send(editRequest({ lang: 'de' })).expect(404);
-      expect(ipfs.added).toHaveLength(0);
+    describe('the author adding a language (the shorts editor\'s captions)', () => {
+      test('a new language on a video with captions: stored pinned, marked as the author\'s, others untouched', async () => {
+        const res = await send(editRequest({ lang: 'de' })).expect(200);
+        expect(res.body).toEqual({ success: true, cid: 'QmNew1', created: true });
+        expect(ipfs.added).toHaveLength(1);
+        const saved = await row();
+        expect(saved.subtitles).toEqual({ en: 'QmOldEn', es: 'QmOldEs', de: 'QmNew1' });
+        expect(saved.subtitle_edits.de).toEqual({ by: 'alice', signedBy: 'alice', at: NOW, lines: 2, created: true, history: [] });
+      });
+
+      test('a video without any captions gets its row, burnt-in captions are marked so', async () => {
+        await send({ ...editRequest({ permlink: 'new-short' }), burnedIn: true }).expect(200);
+        const saved = await db().collection('subtitles').findOne({ author: 'alice', permlink: 'new-short' });
+        expect(saved.subtitles).toEqual({ en: 'QmNew1' });
+        expect(saved.subtitle_edits.en).toMatchObject({ by: 'alice', created: true, burnedIn: true });
+        expect(await db().collection('subtitles').countDocuments({ author: 'alice', permlink: 'new-short' })).toBe(1);
+      });
+
+      test('@threespeak signing for the author may add one too', async () => {
+        await send(editRequest({ signer: threespeak, permlink: 'new-short' })).expect(200);
+        const saved = await db().collection('subtitles').findOne({ author: 'alice', permlink: 'new-short' });
+        expect(saved.subtitle_edits.en).toMatchObject({ by: 'alice', signedBy: 'threespeak', created: true });
+        expect(saved.subtitle_edits.en).not.toHaveProperty('burnedIn');
+      });
+
+      test('nobody else can add a language to the author\'s video', async () => {
+        await send(editRequest({ signer: mallory, permlink: 'new-short' })).expect(401);
+        await send(editRequest({ signer: peakd, lang: 'de' })).expect(401);
+        expect(ipfs.added).toHaveLength(0);
+        expect(await db().collection('subtitles').countDocuments({ permlink: 'new-short' })).toBe(0);
+        expect((await row()).subtitles).not.toHaveProperty('de');
+      });
+
+      test('burnedIn is only read when adding: an edit of an existing language keeps what it was', async () => {
+        await send({ ...editRequest({ lang: 'es' }), burnedIn: true }).expect(200);
+        expect((await row()).subtitle_edits.es).not.toHaveProperty('burnedIn');
+        await db().collection('subtitles').updateOne({ author: 'alice' }, { $set: { 'subtitle_edits.en': { by: 'alice', created: true, burnedIn: true, history: [] } } });
+        await send(editRequest({ cues: [{ start: 0, end: 1, text: 'Fixed' }] })).expect(200);
+        expect((await row()).subtitle_edits.en).toMatchObject({ created: true, burnedIn: true, lines: 1, history: [{ cid: 'QmOldEn', replacedAt: NOW }] });
+      });
+
+      test('409 when the language appeared between reading and writing', async () => {
+        ipfs.onAdd = () => db().collection('subtitles').updateOne({ author: 'alice' }, { $set: { 'subtitles.de': 'QmGenerator' } });
+        await send(editRequest({ lang: 'de' })).expect(409);
+        expect((await row()).subtitles.de).toBe('QmGenerator');
+      });
+
+      test('at most 30 languages per video', async () => {
+        const many = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`l${String.fromCharCode(97 + (i % 26))}${String.fromCharCode(97 + Math.floor(i / 26))}`, 'QmX']));
+        await db().collection('subtitles').updateOne({ author: 'alice' }, { $set: { subtitles: many } });
+        await send(editRequest({ lang: 'de' })).expect(409, { success: false, error: 'too many languages' });
+        expect(ipfs.added).toHaveLength(0);
+      });
     });
 
     test('409 when the captions were replaced between reading and writing', async () => {
