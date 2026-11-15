@@ -117,6 +117,7 @@ app.use('/', promoteRoutes);
 app.use('/', shortsRoutes);
 app.use('/audio/listen', require('./routes/audioListen')); // listening time for all audio, like video watch time
 app.use('/audio', audioRoutes);
+app.use('/sounds', require('./routes/sounds')); // sound pages: a sound and the Shorts using it (before the streamStats gate)
 app.use('/feeds', require('./routes/continueWatching')); // POST /feeds/continue-watching (+ /hide), the home strip
 app.use('/feeds', feedsRoutes);
 app.use('/feeds', watchedFeedRoutes);              // /feeds/watched/:username (history as cards)
@@ -572,6 +573,10 @@ async function startServer() {
     // Continue watching: copy opted-in viewers' player sessions into viewer_progress
     // before they expire. See services/viewerProgress.js.
     require('./services/viewerProgress').scheduleViewerProgress();
+
+    // Sound pages: which Shorts use which sound (json_metadata.video.sound, remixes,
+    // else the Short's own audio), backfilled and kept current. See services/soundIndex.js.
+    if (require('./utils/config').SOUND_INDEX_ENABLED) require('./services/soundIndex').scheduleSoundIndex();
 
     listen();
 }
