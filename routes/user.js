@@ -1,6 +1,7 @@
 const express = require('express');
-const { hiddenSubset } = require('../utils/hiddenCreators');
+const { hiddenSubset, hiddenListSync } = require('../utils/hiddenCreators');
 const router = express.Router();
+const { acceptedPostsOf, attachCollaborators } = require('../utils/collabs');
 const { getDb } = require('../utils/db');
 const { attachTopicTags } = require('../utils/topicTag');
 const { ObjectId } = require('mongodb');
@@ -505,6 +506,18 @@ router.get('/getjobid/:owner/:permlink', async (req, res) => {
     }
 });
 
+// The embed docs of collab posts `username` accepted (utils/collabs.js).
+async function collabEmbedsFor(db, username) {
+    const pairs = await acceptedPostsOf(db, [String(username || '').toLowerCase()]);
+    if (!pairs.length) return [];
+    return db.collection('embed-video').find({
+        $or: pairs.map((p) => ({ hive_author: p.author, hive_permlink: p.permlink })),
+        status: 'published', listed_on_3speak: true, short: false, ...BANNED_FILTER,
+        // A moderated author's post does not come back through someone else's channel.
+        owner: { $nin: hiddenListSync() },
+    }).toArray();
+}
+
 // Endpoint to get user's videos
 router.get('/api/my-videos', async (req, res) => {
     try {
@@ -555,12 +568,17 @@ router.get('/api/my-videos', async (req, res) => {
         }
 
         // Fetch both in parallel
-        const [videosData, embedVideosData] = await Promise.all([
+        const [videosData, ownEmbeds, collabEmbeds] = await Promise.all([
             openpodOnly
                 ? Promise.resolve([])
                 : videosCollection.find(query).sort({ created: -1, _id: -1 }).toArray(),
-            embedVideoCollection.find(embedQuery).sort({ createdAt: -1, _id: -1 }).toArray()
+            embedVideoCollection.find(embedQuery).sort({ createdAt: -1, _id: -1 }).toArray(),
+            // Collab posts this channel accepted (routes/collabs.js): someone
+            // else's post, listed here too. Published and listed only.
+            openpodOnly ? Promise.resolve([]) : collabEmbedsFor(db, username),
         ]);
+        const ownIds = new Set(ownEmbeds.map((ev) => String(ev._id)));
+        const embedVideosData = [...ownEmbeds, ...collabEmbeds.filter((ev) => !ownIds.has(String(ev._id)))];
 
         // Transform legacy videos
         const legacyVideos = videosData.map(video => {
@@ -667,6 +685,9 @@ router.get('/api/my-videos', async (req, res) => {
         // Display topic, same as the feeds — the profile grid uses Card3 too.
         // `video_id` is the ASSET permlink (auto tags) for both legacy and embed
         // rows, while `permlink` is the HIVE permlink (viewer tags).
+        // "badadib with x": accepted collaborators of each post on the page.
+        await attachCollaborators(db, paginatedVideos);
+
         await attachTopicTags(
             db,
             paginatedVideos,

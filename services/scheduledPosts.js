@@ -399,6 +399,16 @@ async function afterPosted(doc) {
         await applyVideoAdFlag(doc.owner, doc.permlink, doc.jsonMetadata);
     } catch (flagErr) {
         console.error(`[scheduledPosts] video ad flag failed for ${doc.owner}/${doc.permlink}:`, flagErr && flagErr.message);
+    }    // Collab invites (routes/collabs.js): from the metadata just broadcast, as
+    // above, with the beneficiaries this post carries. Never fails the post.
+    try {
+        const benes = ((doc.beneficiaries) || []).map((b) => ({ account: b.account, weight: b.weight }));
+        const meta = typeof doc.jsonMetadata === 'string' ? doc.jsonMetadata : JSON.stringify(doc.jsonMetadata || {});
+        await require('../routes/collabs').registerFromPost({
+            author: doc.owner, permlink: doc.permlink, title: doc.title, json_metadata: meta, beneficiaries: benes,
+        });
+    } catch (collabErr) {
+        console.error(`[scheduledPosts] collab invites failed for ${doc.owner}/${doc.permlink}:`, collabErr && collabErr.message);
     }
 }
 

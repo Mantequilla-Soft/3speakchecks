@@ -17,6 +17,7 @@ const { hiddenFromFeedMatch } = require('./hiddenFromFeed');
 const { nsfwFilterTags, nsfwFilterHiveTags } = require('./filters');
 const { hiddenListSync } = require('./hiddenCreators');
 const { getFollowingList } = require('./hive');
+const { acceptedPostsOf, attachCollaborators } = require('./collabs');
 const { FOLLOW_FEED_HALFLIFE_H } = require('./config');
 const { rankFeed } = require('./feedRank');
 const { getCommentCounts, commentBoost, keyOf: commentKeyOf } = require('./commentBoost');
@@ -34,6 +35,20 @@ const { getCommentCounts, commentBoost, keyOf: commentKeyOf } = require('./comme
  *                                no recipients yet has no videos, and saying so is
  *                                the honest answer.
  */
+// Embed docs of accepted collab posts whose collaborator is followed, under the
+// feed's own filters minus "the author is followed".
+async function collabEmbedsOf(collection, embedQuery, followingList, limit) {
+    const pairs = await acceptedPostsOf(getDb(), followingList.map((u) => String(u).toLowerCase()));
+    if (!pairs.length) return [];
+    const { hive_author: authorClause, ...rest } = embedQuery;
+    // $and, so an $or another filter may add is never overwritten.
+    return collection.find({
+        ...rest,
+        hive_author: { $nin: (authorClause && authorClause.$nin) || [] },
+        $and: [...(rest.$and || []), { $or: pairs.map((p) => ({ hive_author: p.author, hive_permlink: p.permlink })) }],
+    }).sort({ createdAt: -1 }).limit(limit).toArray();
+}
+
 async function buildFollowFeed(req, username, { allowFallback = true, chronological = false } = {}) {
     const db = getDb();
 
@@ -114,10 +129,15 @@ async function buildFollowFeed(req, username, { allowFallback = true, chronologi
     // would shrink after filtering and stop infinite scroll early, while a
     // countDocuments total would loop on empty pages. Bounded pool = neither.
     const FOLLOW_CANDIDATE_LIMIT = Math.max(limit, 300);
-    const [legacyVideos, embedVideosRaw] = await Promise.all([
+    const [legacyVideos, ownEmbedsRaw, collabEmbedsRaw] = await Promise.all([
         videosCollection.find(legacyQuery).sort({ created: -1 }).limit(FOLLOW_CANDIDATE_LIMIT).toArray(),
-        embedVideoCollection.find(embedQuery).sort({ createdAt: -1 }).limit(FOLLOW_CANDIDATE_LIMIT).toArray()
+        embedVideoCollection.find(embedQuery).sort({ createdAt: -1 }).limit(FOLLOW_CANDIDATE_LIMIT).toArray(),
+        // Collab posts a followed creator accepted (utils/collabs.js): in this
+        // feed as if that creator had posted them. Same filters, by Hive address.
+        feedType === 'personalized' ? collabEmbedsOf(embedVideoCollection, embedQuery, followingList, FOLLOW_CANDIDATE_LIMIT) : [],
     ]);
+    const ownIds = new Set(ownEmbedsRaw.map((ev) => String(ev._id)));
+    const embedVideosRaw = [...ownEmbedsRaw, ...collabEmbedsRaw.filter((ev) => !ownIds.has(String(ev._id)))];
 
     // Transform embed videos to the legacy shape (same mapping the other feeds use).
     const embedVideos = embedVideosRaw.map(ev => ({
@@ -197,6 +217,8 @@ async function buildFollowFeed(req, username, { allowFallback = true, chronologi
     const total = visibleVideos.length;
     const totalPages = Math.ceil(total / limit);
     const videos = visibleVideos.slice(skip, skip + limit);
+    // "badadib with x" on the cards.
+    await attachCollaborators(db, videos);
     videos.forEach(v => { delete v._sortDate; delete v._source; delete v._rankScore; delete v._embedPermlink; delete v.retention_mult; delete v.retention_relq; delete v.interest_match; });
 
     return {

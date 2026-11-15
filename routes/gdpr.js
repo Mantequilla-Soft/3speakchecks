@@ -49,6 +49,7 @@ const DATA_SCOPE = [
   { key: 'user-filters', label: 'Feed preferences', detail: 'Creators and videos you hid, and your selected interests.', onChain: false },
   { key: 'announcement_replies', label: 'Announcement replies', detail: 'What you wrote back to an announcement popup on 3Speak.', onChain: false },
   { key: 'push', label: 'Browser notifications', detail: 'The browsers you turned notifications on in, and which notifications you chose.', onChain: false },
+  { key: 'social', label: 'Notification levels, poll votes and collabs', detail: 'Which creators you set to Highlights or Off, how you voted in polls, and collab invites you sent or answered.', onChain: false },
   { key: 'podcasts', label: 'Podcasts', detail: 'Outside podcasts you follow and how far you listened to their episodes.', onChain: false },
   { key: 'comment_inbox', label: 'Comment inbox', detail: 'Which comments on your content you marked done in your comment inbox.', onChain: false },
   { key: 'subscriptions', label: 'Subscription records', detail: 'Your 3Speak Pro subscription and payment records, if any.', onChain: true },

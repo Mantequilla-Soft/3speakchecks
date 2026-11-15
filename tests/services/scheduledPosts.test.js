@@ -314,6 +314,18 @@ describe('after the broadcast', () => {
     expect(await db().collection('ad_video_optouts').findOne({ _id: 'alice/noads' }))
       .toMatchObject({ owner: 'alice', permlink: 'noads', mode: 'off', hiveAuthor: 'alice' });
   });
+
+  test('a collaborator in the metadata gets a pending collab invite with its beneficiary weight', async () => {
+    await posts().insertOne(post('collab', {
+      jsonMetadata: { app: '3speak/embed', collaborators: ['fan'] },
+      beneficiaries: [{ account: 'fan', weight: 4450 }],
+    }));
+
+    await scheduled.runOnce();
+
+    expect(await db().collection('collabs').findOne({ _id: 'alice/collab|fan' }))
+      .toMatchObject({ status: 'pending', author: 'alice', collaborator: 'fan', weight: 4450 });
+  });
 });
 
 describe('isPostOnChain', () => {

@@ -27,6 +27,8 @@ const PREFS_COLLECTION = 'push-prefs';
 const KINDS = [
   // from the platform: a creator you follow published something
   'videos', 'shorts', 'audio',
+  // a creator you follow went live (services/liveNotify.js)
+  'live',
   // an outside podcast you follow on the Podcasts tab has a new episode
   'podcasts',
   // from Hive itself: things that happened to YOU
@@ -38,7 +40,7 @@ const KINDS = [
 // reblogs, and a phone buzzing thirty times is how someone learns to turn
 // notifications off altogether.
 const DEFAULT_PREFS = {
-  videos: true, shorts: true, audio: true, podcasts: true,
+  videos: true, shorts: true, audio: true, live: true, podcasts: true,
   replies: true, mentions: true, follows: true,
   votes: false, reblogs: false,
 };

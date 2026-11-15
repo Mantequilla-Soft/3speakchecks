@@ -52,6 +52,12 @@ const OWNED = [
   { coll: 'podcast_progress', field: 'user' },
   // Comment inbox: which comments on their content a creator marked done.
   { coll: 'comment_inbox_done', field: 'user' },
+  // Social: per-creator notification levels (utils/notifyLevels.js), poll votes
+  // (routes/polls.js) and collab invites, both sides (routes/collabs.js).
+  { coll: 'notify_levels', field: 'user' },
+  { coll: 'poll_votes', field: 'voter' },
+  { coll: 'collabs', field: 'collaborator' },
+  { coll: 'collabs', field: 'author' },
 ];
 // watch_history keys by a compound _id "user:owner:permlink" — matched by prefix.
 const WATCH_HISTORY = 'watch_history';
