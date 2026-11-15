@@ -14,6 +14,7 @@ const OWN_PARSER = new Set([
   '/subtitles/edit',          // routes/subtitleEdit.js, 2 MB
   '/scheduled-posts/create',  // routes/scheduledPosts.js, 2 MB
   '/podcasts/subscribe',      // routes/podcasts.js, 256 kB
+  '/reviews',                 // routes/reviews.js, 1 MB (an optional screenshot)
 ]);
 
 const defaultJson = express.json();
