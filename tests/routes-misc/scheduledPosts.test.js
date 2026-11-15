@@ -184,7 +184,7 @@ describe('POST /scheduled-posts/create', () => {
       title: 'Hello', description: 'desc', body: 'desc', tags: ['music', 'live'],
       jsonMetadata: { app: '3speak/embed', tags: ['music', 'live'] }, beneficiaries: [],
       payoutOptions: 'default', thumbnail: null, parentAuthor: '', parentPermlink: 'hive-181335',
-      embedPermlink: null, reblog: false, attempts: 0, lastError: null, createdAt: NOW, updatedAt: NOW,
+      embedPermlink: null, reblog: false, premiere: false, attempts: 0, lastError: null, createdAt: NOW, updatedAt: NOW,
     });
   });
 
@@ -196,6 +196,15 @@ describe('POST /scheduled-posts/create', () => {
   test('reblog must be exactly true, and non-array tags or beneficiaries become empty', async () => {
     await create({ reblog: 'yes', tags: 'music', beneficiaries: { account: 'x' }, jsonMetadata: 'not-an-object' }).expect(201);
     expect(await queue().findOne()).toMatchObject({ reblog: false, tags: [], beneficiaries: [], jsonMetadata: { app: '3speak/embed', tags: [] } });
+  });
+
+  test('"List as a premiere" is opt-in: stored only when exactly true, and shown in the list', async () => {
+    await create({ permlink: 'p-on', premiere: true }).expect(201);
+    await create({ permlink: 'p-odd', premiere: 'yes' }).expect(201);
+    expect((await queue().findOne({ permlink: 'p-on' })).premiere).toBe(true);
+    expect((await queue().findOne({ permlink: 'p-odd' })).premiere).toBe(false);
+    const list = (await request(app).get('/scheduled-posts/alice').expect(200)).body.scheduled_posts;
+    expect(Object.fromEntries(list.map((p) => [p.permlink, p.premiere]))).toEqual({ 'p-on': true, 'p-odd': false });
   });
 
   test('re-scheduling the same permlink updates the entry instead of adding a second one', async () => {
@@ -308,6 +317,17 @@ describe('POST /scheduled-posts/update', () => {
     await seed();
     await update({ updates: { reblog: 1, payoutOptions: 'DECLINE' } }).expect(200);
     expect(await queue().findOne()).toMatchObject({ reblog: false, payoutOptions: 'decline' });
+  });
+
+  test('the premiere listing can be switched on and off while the post waits', async () => {
+    await seed();
+    await update({ updates: { premiere: true } }).expect(200);
+    expect((await queue().findOne()).premiere).toBe(true);
+    expect((await queue().findOne()).jsonMetadata.video).toEqual({ premiere: true });
+    await update({ updates: { premiere: 'true' } }).expect(200);
+    const off = await queue().findOne();
+    expect(off.premiere).toBe(false);
+    expect(off.jsonMetadata).toEqual({ app: '3speak/embed', tags: ['a'], video: {} });
   });
 
   test.each(['posted', 'processing', 'cancelled', 'failed'])('a post in status %s is no longer editable (404)', async (status) => {

@@ -124,6 +124,7 @@ app.use('/rss', rssRoutes);
 app.use('/client-errors', require('./routes/clientErrors')); // frontend route-error reports (before the streamStats gate)
 app.use('/verify', verifyRoutes);
 app.use('/scheduled-posts', scheduledPostsRoutes);
+app.use('/premieres', require('./routes/premieres')); // premiere countdown, Notify me, live chat; before the streamStats gate
 app.use('/', communitiesRoutes);
 app.use('/', analyticsRoutes);
 app.use('/', require('./routes/galaxy')); // galaxy follow graph from HafSQL; before the streamStats gate

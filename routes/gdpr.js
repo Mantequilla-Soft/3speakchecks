@@ -52,6 +52,7 @@ const DATA_SCOPE = [
   { key: 'social', label: 'Notification levels, poll votes and collabs', detail: 'Which creators you set to Highlights or Off, how you voted in polls, and collab invites you sent or answered.', onChain: false },
   { key: 'podcasts', label: 'Podcasts', detail: 'Outside podcasts you follow and how far you listened to their episodes.', onChain: false },
   { key: 'comment_inbox', label: 'Comment inbox', detail: 'Which comments on your content you marked done in your comment inbox.', onChain: false },
+  { key: 'premieres', label: 'Premieres', detail: 'Messages you wrote in a premiere chat and the premieres you asked to be reminded of.', onChain: false },
   { key: 'subscriptions', label: 'Subscription records', detail: 'Your 3Speak Pro subscription and payment records, if any.', onChain: true },
 ];
 
