@@ -496,6 +496,10 @@ async function startServer() {
     // stream, so it writes shared data: background-jobs instance only.
     if (LIVE_NOTIFY_ENABLED) require('./services/liveNotify').schedule();
 
+    // Premiere reminders: a web push to each viewer who pressed "Notify me", once,
+    // when the premiere starts. Marks shared rows: background-jobs instance only.
+    require('./services/premiereNotify').schedule();
+
     // Ad inventory forecast. Reads only aggregate watch data and writes one cached
     // document; cheap enough to run on the main thread, unlike the retention worker.
     if (AD_INVENTORY_ENABLED) {

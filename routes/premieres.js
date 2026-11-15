@@ -190,5 +190,8 @@ router.post('/:owner/:permlink/chat/remove', express.json({ limit: '2kb' }), asy
   }
 });
 
+// Started premiere reminders also show in the bell (services/premiereNotify.js).
+require('./notify').addSource(require('../services/premiereNotify').premiereSource);
+
 module.exports = router;
 module.exports._cleanText = cleanText;
