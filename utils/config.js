@@ -1615,4 +1615,15 @@ module.exports = {
     AD_CATEGORIES: (process.env.AD_CATEGORIES
         || 'defi,dapp,exchange,gaming,nft,infrastructure,dao,media,education,event,tooling,other')
         .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+
+    // Curator page (routes/curation.js): a voter's picks on 3Speak, their curation
+    // rewards and "found it early" badges, read from Hive account history and kept
+    // in memory per account for CURATION_CACHE_MIN. A vote is EARLY when the votes
+    // before it carried at most CURATION_EARLY_SHARE of the post's vote weight and the
+    // post went on to at least CURATION_EARLY_MIN_VOTES votes.
+    CURATION_DAYS: Math.min(Math.max(parseInt(process.env.CURATION_DAYS, 10) || 30, 1), 90),
+    CURATION_CACHE_MIN: Math.max(parseInt(process.env.CURATION_CACHE_MIN, 10) || 10, 1),
+    CURATION_MAX_PICKS: Math.min(Math.max(parseInt(process.env.CURATION_MAX_PICKS, 10) || 60, 1), 200),
+    CURATION_EARLY_SHARE: parseFloat(process.env.CURATION_EARLY_SHARE ?? '0.1'),
+    CURATION_EARLY_MIN_VOTES: parseInt(process.env.CURATION_EARLY_MIN_VOTES, 10) || 10,
 };

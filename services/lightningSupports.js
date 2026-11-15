@@ -31,6 +31,7 @@ const { getDb } = require('../utils/db');
 const { historySince } = require('../utils/hive');
 const { paymentHash, findInvoice } = require('../utils/bolt11');
 const supports = require('../routes/supports');
+const { boostKind, streamKey } = require('../utils/boosts');
 
 const ENABLED = String(process.env.LIGHTNING_SUPPORTS_ENABLED || 'true').toLowerCase() !== 'false';
 const INTERVAL_MIN = Math.max(1, parseInt(process.env.LIGHTNING_SUPPORTS_INTERVAL_MIN, 10) || 2);
@@ -134,6 +135,9 @@ async function runOnce() {
             { trx_id: { $in: tips.map((t) => t.trx_id) } },
             { projection: { trx_id: 1 } },
         ).toArray()).map((r) => r.trx_id));
+        // Streamed sats are never their own row (they sit in a day's total, see
+        // recordStream), so the trx_id check above can't see them: the total's
+        // own list of credits does.
         const fresh = tips.filter((t) => !known.has(t.trx_id));
 
         let payers = new Map();
@@ -148,6 +152,11 @@ async function runOnce() {
             if (!content) continue;
             const payer = payers.get(t.hash) || null;
             if (payer === t.to) continue; // a creator paying themselves is no support
+            const kind = boostKind(t.memo);
+            if (kind === 'stream') {
+                if (await recordStream(coll, t, payer, content.kind)) recorded += 1;
+                continue;
+            }
             try {
                 await coll.insertOne({
                     trx_id: t.trx_id,
@@ -162,6 +171,7 @@ async function runOnce() {
                     via: 'lightning',
                     payment_hash: t.hash,
                     memo: supports.cleanMemo(commentOf(t.memo, t.to)),
+                    ...(kind === 'boost' ? { boost: true } : {}),
                     block: t.block,
                     tippedAt: new Date(`${t.timestamp}Z`),
                     createdAt: new Date(),
@@ -180,4 +190,36 @@ async function runOnce() {
     }
 }
 
-module.exports = { enabled, runOnce, INTERVAL_MIN, _test: { creditsFrom, payersFrom, commentOf, LINK_RE } };
+/**
+ * Streamed sats (`#stream` in the comment: a few sats a minute while someone
+ * listens) are added into ONE row per listener, post and UTC day instead of a row
+ * a minute. The row's `stream_trx` lists the credits already in it, so a re-read
+ * never adds one twice: the filter misses, the upsert collides on the row's
+ * trx_id, and that duplicate means "already counted". True when it was added.
+ */
+const STREAM_TRX_KEEP = 2000;
+async function recordStream(coll, t, payer, kind) {
+    const at = new Date(`${t.timestamp}Z`);
+    const id = streamKey({ author: t.to, permlink: t.permlink, tipper: payer, at });
+    try {
+        await coll.updateOne(
+            { trx_id: id, stream_trx: { $ne: t.trx_id } },
+            {
+                $inc: { amount: t.sats },
+                $push: { stream_trx: { $each: [t.trx_id], $slice: -STREAM_TRX_KEEP } },
+                $max: { tippedAt: at },
+                $setOnInsert: {
+                    tipper: payer, author: t.to, permlink: t.permlink, kind, hbd_value: 0, currency: 'SATS',
+                    hbd_per_hive: null, via: 'lightning', stream: true, memo: null, block: t.block, createdAt: new Date(),
+                },
+            },
+            { upsert: true },
+        );
+        return true;
+    } catch (err) {
+        if (err && err.code === 11000) return false;
+        throw err;
+    }
+}
+
+module.exports = { enabled, runOnce, INTERVAL_MIN, _test: { creditsFrom, payersFrom, commentOf, recordStream, LINK_RE } };

@@ -30,6 +30,7 @@ const { transfersSince, hiveRpcBatch } = require('../utils/hive');
 const { isHiddenSync, hiddenListSync } = require('../utils/hiddenCreators');
 const { verifyHiveAuthority } = require('../utils/hiveAuth');
 const { SIGNATURE_TIMESTAMP_TOLERANCE_MS, AD_SIGNING_DELEGATES } = require('../utils/config');
+const { boostKind } = require('../utils/boosts');
 
 const router = express.Router();
 
@@ -207,6 +208,8 @@ router.post('/supports/record', express.json({ limit: '4kb' }), recordLimiter, a
       currency,
       hbd_per_hive: currency === 'HIVE' ? hbdPerHive : null,
       memo: cleanMemo(match.op[1].memo),
+      // Sent from a Boost button: shown as a boost on the post's wall (routes/boosts.js).
+      ...(boostKind(match.op[1].memo) === 'boost' ? { boost: true } : {}),
       block: match.block,
       tippedAt: new Date(`${match.timestamp}Z`),
       createdAt: new Date(),
@@ -268,7 +271,7 @@ async function attachContent(db, rows) {
   return rows.map((r) => ({ ...r, video: byKey.get(`${r.author}/${r.permlink}`) || null }));
 }
 
-const PUBLIC_FIELDS = { _id: 0, trx_id: 1, tipper: 1, author: 1, permlink: 1, kind: 1, hbd_value: 1, amount: 1, currency: 1, via: 1, tippedAt: 1, createdAt: 1, memo: 1, hidden: 1 };
+const PUBLIC_FIELDS = { _id: 0, trx_id: 1, tipper: 1, author: 1, permlink: 1, kind: 1, hbd_value: 1, amount: 1, currency: 1, via: 1, tippedAt: 1, createdAt: 1, memo: 1, hidden: 1, boost: 1, stream: 1 };
 
 // Lightning tips (services/lightningSupports.js) are sats with hbd_value 0: they
 // are summed on their own, never converted into the HBD totals.
@@ -498,3 +501,6 @@ module.exports.COLLECTION = COLLECTION;
 module.exports.findContent = findContent;
 module.exports.cleanMemo = cleanMemo;
 module.exports.ensureIndexes = ensureIndexes;
+module.exports.getHbdPerHive = getHbdPerHive;
+module.exports.roundHbd = roundHbd;
+module.exports.parseAsset = parseAsset;

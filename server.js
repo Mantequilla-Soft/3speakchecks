@@ -149,6 +149,8 @@ app.use('/', require('./routes/supports'));    // every tip on a video (profile 
 app.use('/', require('./routes/cardReach'));   // cards seen / opened per surface, creator stats reach; same ordering rule
 app.use('/', require('./routes/commentInbox')); // creator comment inbox (vouched); same ordering rule
 app.use('/', require('./routes/creatorEarnings')); // creator earnings per day and source; same ordering rule
+app.use('/', require('./routes/curation'));    // GET /curation/:user, the curator page; same ordering rule
+app.use('/', require('./routes/boosts'));      // GET /boosts/:author/:permlink, a post's boost wall; same ordering rule
 app.use('/advertise', advertiseRoutes);   // same reason as above: must precede streamStatsRoutes
 app.use('/advertise', adCampaignRoutes);  // booking + payment, same mount, same ordering rule
 app.use('/advertise', adSelfPromoRoutes); // a creator promoting their OWN video, same mount
