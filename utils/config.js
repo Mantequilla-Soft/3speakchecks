@@ -1005,6 +1005,20 @@ module.exports = {
     CONTINUE_WATCHING_MIN_PCT: parseFloat(process.env.CONTINUE_WATCHING_MIN_PCT ?? '10'),
     CONTINUE_WATCHING_MAX_PCT: parseFloat(process.env.CONTINUE_WATCHING_MAX_PCT ?? '75'),
 
+    // Card reach (routes/cardReach.js): daily counters per video and surface of how
+    // often its card was seen (sampled by the page, scaled back up here) and opened.
+    // No viewer is stored. Rows older than CARD_REACH_TTL_DAYS expire on their own.
+    CARD_REACH_COLLECTION: process.env.CARD_REACH_COLLECTION || 'card_reach_daily',
+    CARD_REACH_TTL_DAYS: parseIntMin(process.env.CARD_REACH_TTL_DAYS, 400, 30),
+    // The sample rates a page may report under; anything else is refused, so a
+    // client cannot pick a tiny rate to multiply what it sends.
+    CARD_REACH_RATES: (process.env.CARD_REACH_RATES || '1,0.5,0.25,0.1')
+        .split(',').map(Number).filter((n) => n > 0 && n <= 1),
+    // Most cards one address may report as seen per hour, and opens of one video
+    // per address counted once per window.
+    CARD_REACH_SEEN_PER_HOUR: parseIntMin(process.env.CARD_REACH_SEEN_PER_HOUR, 1500, 1),
+    CARD_REACH_OPEN_WINDOW_MIN: parseIntMin(process.env.CARD_REACH_OPEN_WINDOW_MIN, 30, 1),
+
     // Share of AD REVENUE that is paid out to viewers, in points of the whole.
     // At the defaults: creators+communities 50, viewers 10, platform 40.
     //
