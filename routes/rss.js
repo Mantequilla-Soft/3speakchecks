@@ -464,8 +464,10 @@ function episodeExtras(video) {
  */
 function liveItemTags(username, itunesAuthor, items) {
     return (items || []).map((it) => {
+        // An audio room (Record as podcast) lives at /openpods/<room>.
+        const page = it.kind === 'audio' ? 'openpods' : 'watch';
         const link = it.room && it.status !== 'pending'
-            ? `${PAGE_PROTOCOL}://${DOMAIN_NO_PROTO}/watch/${encodeURIComponent(it.room)}`
+            ? `${PAGE_PROTOCOL}://${DOMAIN_NO_PROTO}/${page}/${encodeURIComponent(it.room)}`
             : channelLink(username);
         const attr = { status: it.status, start: it.start };
         if (it.end) attr.end = it.end;
@@ -480,7 +482,7 @@ function liveItemTags(username, itunesAuthor, items) {
                 ...(it.thumb && /^https:\/\//.test(it.thumb) ? [{ 'itunes:image': { _attr: { href: it.thumb } } }] : []),
                 personTag(username, itunesAuthor),
                 { enclosure: { _attr: { url: link, length: 0, type: 'text/html' } } },
-                { 'podcast:contentLink': [{ _attr: { href: link } }, 'Watch on 3Speak'] },
+                { 'podcast:contentLink': [{ _attr: { href: link } }, it.kind === 'audio' ? 'Listen on 3Speak' : 'Watch on 3Speak'] },
             ],
         };
     });

@@ -3,7 +3,8 @@
  * read from the live server (hangouts, the first of LIVE_ROOM_API_URLS):
  *
  *   GET /streams                 rooms open now; a standalone one that is
- *                                broadcasting is "live"
+ *                                broadcasting is "live", and so is an audio
+ *                                room flagged `podcast` (Record as podcast)
  *   GET /events?host=<user>      the host's scheduled streams ("pending", or
  *                                "live" once started)
  *   GET /events?host=&status=ended  the last few that ended ("ended")
@@ -64,7 +65,9 @@ const publicEvent = (e) => !e.visibility || e.visibility === 'public';
 /**
  * Pure: the live items from what the server answered, newest-relevant first:
  * live ones, then upcoming (soonest first), then recently ended. At most five.
- * [{ id, status: 'live'|'pending'|'ended', start, end, title, description, room, thumb }]
+ * [{ id, status: 'live'|'pending'|'ended', start, end, title, description, room, thumb, kind? }]
+ * `kind: 'audio'` marks an audio room being recorded as a podcast (its page is
+ * /openpods/<room>, not /watch/<room>).
  */
 function liveItemsFrom(host, { openRooms: open = [], upcoming = [], ended = [] } = {}, now = Date.now()) {
     const h = String(host).toLowerCase();
@@ -72,7 +75,10 @@ function liveItemsFrom(host, { openRooms: open = [], upcoming = [], ended = [] }
     const seenRooms = new Set();
 
     for (const r of open) {
-        if (!r || r.mode !== 'standalone' || String(r.host || '').toLowerCase() !== h || r.live !== true) continue;
+        // A video stream, or an audio room the host records as a podcast episode
+        // (`podcast: true` while "Record as podcast" runs): the show is live.
+        const audioShow = r && r.mode === 'conference' && r.podcast === true;
+        if (!r || (r.mode !== 'standalone' && !audioShow) || String(r.host || '').toLowerCase() !== h || r.live !== true) continue;
         if (r.visibility && r.visibility !== 'public') continue;
         const start = iso(r.createdAt);
         if (!start || !r.name) continue;
@@ -80,6 +86,7 @@ function liveItemsFrom(host, { openRooms: open = [], upcoming = [], ended = [] }
         out.push({
             id: `room:${r.name}`, status: 'live', start, end: null, room: r.name,
             title: String(r.title || r.name), description: String(r.description || ''), thumb: r.thumbnail || null,
+            ...(audioShow ? { kind: 'audio' } : {}),
         });
     }
     for (const e of upcoming) {

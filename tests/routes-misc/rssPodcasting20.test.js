@@ -161,6 +161,18 @@ describe('liveItemsFrom (utils/liveItems.js)', () => {
     ]);
     expect(items[3]).toMatchObject({ start: '2026-10-30T18:00:00.000Z', end: '2026-10-30T19:00:00.000Z' });
   });
+
+  test('an audio room recorded as a podcast (podcast: true) is live, marked kind audio; a plain audio room is not', () => {
+    const items = liveItemsFrom('badadib', {
+      openRooms: [
+        { name: 'show', mode: 'conference', podcast: true, host: 'badadib', live: true, createdAt: '2026-11-01T11:00:00Z', title: 'Weekly show' },
+        { name: 'chat', mode: 'conference', host: 'badadib', live: true, createdAt: '2026-11-01T11:00:00Z' },
+        { name: 'private', mode: 'conference', podcast: true, host: 'badadib', live: true, visibility: 'hive-internal', createdAt: '2026-11-01T11:00:00Z' },
+        { name: 'empty', mode: 'conference', podcast: true, host: 'badadib', live: false, createdAt: '2026-11-01T11:00:00Z' },
+      ],
+    }, NOW.getTime());
+    expect(items).toEqual([expect.objectContaining({ id: 'room:show', status: 'live', kind: 'audio', title: 'Weekly show' })]);
+  });
 });
 
 // ─── The channel feed ───────────────────────────────────────────────────────
@@ -270,6 +282,16 @@ describe('GET /rss/:username.xml, Podcasting 2.0 tags', () => {
     expect(textOf(lives[0].guid)).toBe('3speak.tv/live/badadib/room:room-a');
     expect(lives[1].link).toBe('https://3speak.tv/user/badadib');
     expect(lives[0]['podcast:person']).toMatchObject({ '@_role': 'host' });
+  });
+
+  test('liveItem: an audio show being recorded as a podcast links its OpenPods room to listen', async () => {
+    await seedChannel();
+    liveState.streams = [{ name: 'show-1', mode: 'conference', podcast: true, host: 'badadib', live: true, createdAt: '2026-11-01T11:30:00Z', title: 'Weekly show' }];
+    liveState.events = [];
+    const { doc } = await feed('/rss/badadib.xml');
+    const [item] = asList(doc.rss.channel['podcast:liveItem']);
+    expect(item.link).toBe('https://3speak.tv/openpods/show-1');
+    expect(item['podcast:contentLink']).toMatchObject({ '@_href': 'https://3speak.tv/openpods/show-1', '#text': 'Listen on 3Speak' });
   });
 
   test('the live server being down only means no live items', async () => {
