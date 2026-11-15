@@ -1068,7 +1068,11 @@ module.exports = {
     // feed (routes/notify.js) for the followers of its host. Kept LIVE_EVENTS_TTL_DAYS.
     LIVE_EVENTS_COLLECTION: process.env.LIVE_EVENTS_COLLECTION || 'live_events',
     LIVE_EVENTS_TTL_DAYS: parseInt(process.env.LIVE_EVENTS_TTL_DAYS) || 7,
-    LIVE_NOTIFY_ENABLED: process.env.LIVE_NOTIFY_ENABLED !== 'false',
+    // The "went live" job (services/liveNotify.js): records streams for the bell
+    // and web-pushes "@host is live" to followers. OFF unless set to true: the
+    // push reaches every follower with notifications on, and production 3speak.tv
+    // has no switch for it yet, so it goes on with the frontend that has one.
+    LIVE_NOTIFY_ENABLED: parseBool(process.env.LIVE_NOTIFY_ENABLED, false),
     LIVE_NOTIFY_INTERVAL_SEC: Math.max(20, parseInt(process.env.LIVE_NOTIFY_INTERVAL_SEC) || 60),
     // The streaming servers whose public GET /streams is polled. Defaults to the
     // same list the ad gate asks about rooms (utils/liveRoom.js).
