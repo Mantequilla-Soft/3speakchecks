@@ -122,6 +122,16 @@ describe('linking a track to its post', () => {
     expect(d).not.toHaveProperty('ppl');
   });
 
+  test('season and episode numbers from the post go onto the row', async () => {
+    publish({
+      author: 'badadib', permlink: 'ep-post', body: playBody('ep5'),
+      json_metadata: JSON.stringify({ audio: { type: 'podcast', season: 2, episode: '5' } }),
+    });
+    await audio().insertOne(track('badadib', 'ep5'));
+    await syncAudioHiveLinks();
+    expect(await get('ep5')).toMatchObject({ post_permlink: 'ep-post', season: 2, episode: 5 });
+  });
+
   test('broken or partial audio metadata is ignored, the link still happens', async () => {
     publish({ author: 'dj', permlink: 'p1', body: playBody('t1'), json_metadata: '{oops' });
     publish({ author: 'dj', permlink: 'p2', body: playBody('t2'), json_metadata: { audio: { genre: 5, bpm: 'fast', type: 'podcast' } } });
@@ -284,6 +294,19 @@ describe('giving a linked track its post title', () => {
     const again = await get('t1');
     expect(again.title).toBe('Introduction (edited)');
     expect(again.upload_title).toBe('recording f879');
+  });
+
+  test('keeps the season and episode in step with the post, removing them when the post drops them', async () => {
+    publish({ author: 'dj', permlink: 'post-n1', title: 'Show', json_metadata: JSON.stringify({ audio: { season: 1, episode: 3 } }) });
+    await audio().insertOne(linked('n1', 'Show'));
+    await syncAudioPostTitles(NOW);
+    expect(await get('n1')).toMatchObject({ season: 1, episode: 3 });
+
+    live.get('dj/post-n1').json_metadata = JSON.stringify({ audio: { episode: 4 } });
+    await syncAudioPostTitles(new Date(NOW.getTime() + 2 * 60 * 60 * 1000));
+    const row = await get('n1');
+    expect(row.episode).toBe(4);
+    expect(row.season).toBeUndefined();
   });
 
   test('leaves the title of a titleless snap and of a missing post alone, but marks both read', async () => {

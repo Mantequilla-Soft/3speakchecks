@@ -5,6 +5,12 @@
  *                              episodes of the outside shows it names merged in
  * GET /rss/cover/user/:username.jpg, /rss/cover/playlist/:id.jpg
  *                              square JPEG cover art, behind nginx's /img/c/ cache
+ * GET /rss/chapters/:owner/:permlink.json
+ *                              an episode's chapters, Podcast Namespace JSON chapters
+ * GET /rss/transcript/:owner/:permlink/:lang.srt (.vtt)
+ *                              an episode's captions in one language, SRT or WebVTT
+ * GET /rss/transcript/:owner/:permlink.txt
+ *                              the transcript the audio uploader wrote into the post
  *
  * Generates a valid RSS 2.0 / Podcast Namespace feed for a 3Speak channel.
  * Ported from the legacy frontend's helper/rss.js & routes/index.js.
@@ -30,7 +36,11 @@ const generateXML = require('xml');
 const { getDb } = require('../utils/db');
 const { hiveRpcBatch } = require('../utils/hive');
 const { decodePlaylistMeta } = require('../utils/playlistMeta');
-const { storedPlaylistType } = require('../utils/playlistType');
+const { storedPlaylistType, isSeriesPlaylist } = require('../utils/playlistType');
+const { parseMeta, seasonEpisodeOf, chaptersOfPost, audiogramOf, transcriptFromBody } = require('../utils/postMeta');
+const { liveItemsFor } = require('../utils/liveItems');
+const { fetchSubtitleText, CID_RE } = require('./subtitleProxy');
+const { RSS_FILES_BASE_URL, RSS_SOUNDBITE_WINDOW_DAYS } = require('../utils/config');
 const { playlistFeedRefs, findFeedsFor, threeSpeakRef } = require('../utils/playlistFeeds');
 const { renderCover } = require('../utils/podcastCover');
 const { createConcurrencyGate } = require('../utils/concurrencyGate');
@@ -135,6 +145,7 @@ function fromLegacyVideo(v) {
         created: v.created,
         duration: v.duration || 0,
         isNsfw: !!v.isNsfwContent,
+        asset: v.permlink,
         thumb: getThumbnailUrl(v).baseThumbUrl,
         media: { url: getVideoPlayUrl(v), type: 'video/mp4', length: parseInt(v.size) || 0 },
         alternates: [],
@@ -155,6 +166,7 @@ function fromEmbedVideo(ev) {
         created: ev.createdAt,
         duration: ev.duration || 0,
         isNsfw: !!ev.isNsfwContent,
+        asset: ev.permlink,
         thumb: ev.thumbnail_url || `${IMAGE_CDN}/${ev.permlink}/thumbnails/default.png`,
         media: null,                                   // HLS only, no single file
         alternates: [],
@@ -187,6 +199,7 @@ function fromAudio(a) {
         created: a.createdAt,
         duration: Math.round(a.mp3_duration || a.duration || 0),
         isNsfw: !!a.isNsfwContent,
+        asset: a.permlink,
         thumb: a.thumbnail_url || `https://images.hive.blog/u/${a.owner}/avatar/large`,
         media: mp3 || original,
         alternates: mp3 && original ? [original] : [],
@@ -194,13 +207,15 @@ function fromAudio(a) {
     };
 }
 
-// The audio uploader writes the show notes into the Hive post only: the row's
-// `description` has been empty for every upload since May 2026, which left
-// those items with nothing but the watch link. Fill title and notes from the
-// post itself. Cached per post, since a playlist feed can carry 300 of them.
+// Every 3Speak episode is a Hive post, and the post is the record of what the
+// creator said about it: chapters, season and episode, the audiogram a Short was
+// cut from (utils/postMeta.js). The audio uploader also writes the show notes
+// into the post only: the row's `description` has been empty for every upload
+// since May 2026, which left those items with nothing but the watch link.
+// Cached per post, since a playlist feed can carry 300 of them.
 const HIVE_POST_TTL_MS = 60 * 60 * 1000;
 const HIVE_POST_CACHE_MAX = 5000;
-const hivePostCache = new Map();               // "owner/permlink" -> { at, title, text }
+const hivePostCache = new Map();               // "owner/permlink" -> { at, title, text, chapters, season, episode, transcript, audiogram }
 
 /** A post body as plain show notes: no images, no player link, no markup. */
 function showNotesFromBody(body) {
@@ -217,41 +232,260 @@ function showNotesFromBody(body) {
         .trim();
 }
 
-/**
- * Audio episodes without a stored description get the Hive post's title and
- * body. Mutates and returns `episodes`. A Hive outage leaves them as they were.
- */
-async function withHivePostText(episodes) {
-    const now = Date.now();
-    const wanted = episodes.filter((e) => e.kind === 'audio' && !e.description && e.owner && e.permlink);
-    const missing = [...new Set(wanted.map((e) => `${e.owner}/${e.permlink}`))]
-        .filter((k) => !(now - (hivePostCache.get(k)?.at || 0) < HIVE_POST_TTL_MS));
+/** What the feeds keep of one post (never the whole body: a transcript can be 40 KB). */
+function postFacts(post) {
+    const meta = parseMeta(post.json_metadata);
+    const { season, episode } = seasonEpisodeOf(meta);
+    return {
+        title: post.title || '',
+        text: showNotesFromBody(post.body),
+        // Unfiltered: the duration is the episode's, applied by chaptersFor()
+        chapters: chaptersOfPost({ body: post.body, json_metadata: meta }),
+        season,
+        episode,
+        transcript: !!transcriptFromBody(post.body),
+        audiogram: audiogramOf(meta),
+    };
+}
 
+/**
+ * The cached facts of these posts ("owner/permlink" keys), reading the missing
+ * ones from Hive in batches of 50. A Hive outage leaves them out, never fails.
+ */
+async function hivePosts(keys) {
+    const now = Date.now();
+    const missing = [...new Set(keys)].filter((k) => !(now - (hivePostCache.get(k)?.at || 0) < HIVE_POST_TTL_MS));
     for (let i = 0; i < missing.length; i += 50) {
         const chunk = missing.slice(i, i + 50);
         try {
             const results = await hiveRpcBatch(chunk.map((k, n) => ({
                 jsonrpc: '2.0', id: n, method: 'condenser_api.get_content', params: k.split('/'),
             })));
-            for (const r of results) {
+            for (const r of results || []) {
                 const key = chunk[r?.id];
                 const post = r?.result;
                 if (!key || !post || !post.author) continue;
-                hivePostCache.set(key, { at: now, title: post.title || '', text: showNotesFromBody(post.body) });
+                hivePostCache.set(key, { at: now, ...postFacts(post) });
             }
         } catch (err) {
             console.warn('[RSS] Could not read Hive posts for show notes:', err.message);
         }
     }
     while (hivePostCache.size > HIVE_POST_CACHE_MAX) hivePostCache.delete(hivePostCache.keys().next().value);
+    const out = new Map();
+    for (const k of keys) if (hivePostCache.has(k)) out.set(k, hivePostCache.get(k));
+    return out;
+}
 
-    for (const e of wanted) {
-        const post = hivePostCache.get(`${e.owner}/${e.permlink}`);
+/** An episode's chapters inside its duration, or [] when fewer than two remain. */
+function chaptersFor(chapters, duration) {
+    const d = Number(duration) || 0;
+    const list = (chapters || []).filter((c) => !(d > 0) || c.start < d);
+    return list.length >= 2 ? list : [];
+}
+
+/**
+ * Each 3Speak episode gets what its post says (chapters, season, episode, a
+ * transcript block); audio episodes without a stored description also get the
+ * post's title and body as their notes. Mutates and returns `episodes`.
+ */
+async function withHivePosts(episodes) {
+    const own = episodes.filter((e) => !e.outside && e.owner && e.permlink);
+    const posts = await hivePosts(own.map((e) => `${e.owner}/${e.permlink}`));
+    for (const e of own) {
+        const post = posts.get(`${e.owner}/${e.permlink}`);
         if (!post) continue;
-        if (post.title) e.title = post.title;
-        if (post.text) e.description = post.text.replace(/\n/g, '<br>');
+        if (e.kind === 'audio' && !e.description) {
+            if (post.title) e.title = post.title;
+            if (post.text) e.description = post.text.replace(/\n/g, '<br>');
+        }
+        e.chapters = chaptersFor(post.chapters, e.duration);
+        if (post.season != null) e.season = post.season;
+        if (post.episode != null) e.episode = post.episode;
+        e.hasBodyTranscript = post.transcript;
     }
     return episodes;
+}
+
+// ─── Podcasting 2.0 extras: transcripts, soundbites, people, funding ─────────
+
+const MAX_TRANSCRIPT_LANGS = 6;
+const MAX_SOUNDBITES = 5;
+const EPISODE_LINK_RE = /3speak\.tv\/audio\/([a-z0-9.-]{3,16})\/([a-z0-9-]{1,255})/;
+
+const filesUrl = (path) => `${RSS_FILES_BASE_URL}/${path}`;
+const avatarOf = (account) => `https://images.hive.blog/u/${account}/avatar/large`;
+const channelLink = (account) => `${PAGE_PROTOCOL}://${DOMAIN_NO_PROTO}/user/${account}`;
+
+/**
+ * Captions per episode from the `subtitles` collection ({ author, permlink,
+ * subtitles: { <lang>: <cid> } }), filed under the Hive permlink or the upload's
+ * own one. Sets `e.captionLangs` (sorted, at most six).
+ */
+async function withCaptions(db, episodes) {
+    const own = episodes.filter((e) => !e.outside && e.owner && e.permlink);
+    if (!own.length) return episodes;
+    const docs = await db.collection('subtitles')
+        .find({ $or: own.map((e) => ({ author: e.owner, permlink: { $in: [...new Set([e.permlink, e.asset].filter(Boolean))] } })) })
+        .project({ author: 1, permlink: 1, subtitles: 1 })
+        .toArray();
+    const byKey = new Map();
+    for (const d of docs) {
+        const langs = Object.entries(d.subtitles || {})
+            .filter(([lang, cid]) => /^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/.test(lang) && typeof cid === 'string' && CID_RE.test(cid))
+            .map(([lang]) => lang);
+        if (langs.length) byKey.set(`${d.author}/${d.permlink}`, langs);
+    }
+    for (const e of own) {
+        const langs = byKey.get(`${e.owner}/${e.permlink}`) || byKey.get(`${e.owner}/${e.asset}`);
+        if (langs) e.captionLangs = [...new Set(langs)].sort().slice(0, MAX_TRANSCRIPT_LANGS);
+    }
+    return episodes;
+}
+
+/**
+ * Soundbites: the Shorts made from an audiogram of an audio episode (the audio
+ * editor posts them with the episode, src/utils/audiogramShorts.js on 3speak.tv).
+ * A Short's body links its episode (/audio/<owner>/<permlink>), and its post's
+ * json_metadata['3speak'].audiogram says which piece it is; only a Short that
+ * records its start time becomes a soundbite. Sets `e.soundbites`.
+ */
+async function withSoundbites(db, episodes) {
+    const audio = episodes.filter((e) => !e.outside && e.kind === 'audio' && e.owner && e.permlink);
+    if (!audio.length) return episodes;
+    const byKey = new Map(audio.map((e) => [`${e.owner}/${e.permlink}`, e]));
+    const oldest = Math.min(...audio.map((e) => new Date(e.created).getTime()).filter(Number.isFinite));
+    if (!Number.isFinite(oldest)) return episodes;
+    const windowMs = RSS_SOUNDBITE_WINDOW_DAYS * 24 * 3600 * 1000;
+    const shorts = await db.collection('embed-video')
+        .find({
+            hive_author: { $in: [...new Set(audio.map((e) => e.owner))] },
+            short: true,
+            status: 'published',
+            hive_permlink: { $ne: null },
+            createdAt: { $gte: new Date(oldest - 3600 * 1000) },
+            hive_body: { $regex: '3speak\\.tv/audio/' },
+        })
+        .project({ hive_author: 1, hive_permlink: 1, hive_body: 1, hive_title: 1, createdAt: 1 })
+        .sort({ createdAt: 1 })
+        .limit(300)
+        .toArray();
+    const candidates = [];
+    for (const sh of shorts) {
+        const m = EPISODE_LINK_RE.exec(String(sh.hive_body || ''));
+        const ep = m && byKey.get(`${m[1]}/${m[2]}`);
+        if (!ep || ep.owner !== sh.hive_author) continue;
+        const after = new Date(sh.createdAt).getTime() - new Date(ep.created).getTime();
+        if (!(after > -3600 * 1000 && after < windowMs)) continue;
+        candidates.push({ sh, ep });
+    }
+    if (!candidates.length) return episodes;
+    const posts = await hivePosts(candidates.map(({ sh }) => `${sh.hive_author}/${sh.hive_permlink}`));
+    for (const { sh, ep } of candidates) {
+        const post = posts.get(`${sh.hive_author}/${sh.hive_permlink}`);
+        const piece = post && post.audiogram;
+        if (!piece || piece.author !== ep.owner || piece.permlink !== ep.permlink) continue;
+        if (piece.start == null || piece.duration == null) continue;
+        if (ep.duration > 0 && piece.start >= ep.duration) continue;
+        ep.soundbites = ep.soundbites || [];
+        if (ep.soundbites.length >= MAX_SOUNDBITES) continue;
+        ep.soundbites.push({ start: piece.start, duration: piece.duration, title: (post.title || sh.hive_title || '').slice(0, 128) });
+    }
+    return episodes;
+}
+
+/** Captions and soundbites, for the feeds (the share card does not need them). */
+async function withFeedExtras(db, episodes) {
+    try {
+        await withCaptions(db, episodes);
+    } catch (err) {
+        console.warn('[RSS] Captions not read:', err.message);
+    }
+    try {
+        await withSoundbites(db, episodes);
+    } catch (err) {
+        console.warn('[RSS] Soundbites not read:', err.message);
+    }
+    return episodes;
+}
+
+/** <podcast:person>: a creator as the host, with their avatar and channel. */
+function personTag(account, name, role = 'host') {
+    return {
+        'podcast:person': [
+            { _attr: { role, img: avatarOf(account), href: channelLink(account) } },
+            name || account,
+        ],
+    };
+}
+
+/** <podcast:funding>: where to support the channel. Spec: text up to 128 characters. */
+function fundingTag(account) {
+    return {
+        'podcast:funding': [
+            { _attr: { url: channelLink(account) } },
+            `Support @${account} on 3Speak`.slice(0, 128),
+        ],
+    };
+}
+
+/** The Podcasting 2.0 tags of one 3Speak episode. */
+function episodeExtras(video) {
+    const out = [];
+    if (video.season != null) out.push({ 'itunes:season': video.season }, { 'podcast:season': video.season });
+    if (video.episode != null) out.push({ 'itunes:episode': video.episode }, { 'podcast:episode': video.episode });
+    const key = `${encodeURIComponent(video.owner)}/${encodeURIComponent(video.permlink)}`;
+    if (video.chapters && video.chapters.length >= 2) {
+        out.push({ 'podcast:chapters': { _attr: { url: filesUrl(`chapters/${key}.json`), type: 'application/json+chapters' } } });
+    }
+    for (const lang of video.captionLangs || []) {
+        out.push({ 'podcast:transcript': { _attr: { url: filesUrl(`transcript/${key}/${lang}.vtt`), type: 'text/vtt', language: lang, rel: 'captions' } } });
+        out.push({ 'podcast:transcript': { _attr: { url: filesUrl(`transcript/${key}/${lang}.srt`), type: 'application/x-subrip', language: lang, rel: 'captions' } } });
+    }
+    if (video.hasBodyTranscript) {
+        out.push({ 'podcast:transcript': { _attr: { url: filesUrl(`transcript/${key}.txt`), type: 'text/plain' } } });
+    }
+    for (const sb of video.soundbites || []) {
+        out.push({
+            'podcast:soundbite': [
+                { _attr: { startTime: sb.start.toFixed(1), duration: sb.duration.toFixed(1) } },
+                ...(sb.title ? [sb.title] : []),
+            ],
+        });
+    }
+    return out;
+}
+
+/**
+ * <podcast:liveItem> for each of the channel's streams (utils/liveItems.js). The
+ * live server has no public HLS for a stream, so the enclosure is the watch page
+ * (text/html) and <podcast:contentLink> names it; apps that cannot play a page
+ * open the link.
+ */
+function liveItemTags(username, itunesAuthor, items) {
+    return (items || []).map((it) => {
+        // An audio room (Record as podcast) lives at /openpods/<room>.
+        const page = it.kind === 'audio' ? 'openpods' : 'watch';
+        const link = it.room && it.status !== 'pending'
+            ? `${PAGE_PROTOCOL}://${DOMAIN_NO_PROTO}/${page}/${encodeURIComponent(it.room)}`
+            : channelLink(username);
+        const attr = { status: it.status, start: it.start };
+        if (it.end) attr.end = it.end;
+        return {
+            'podcast:liveItem': [
+                { _attr: attr },
+                { title: { _cdata: it.title || `${itunesAuthor} live on 3Speak` } },
+                { description: { _cdata: it.description || it.title || `${itunesAuthor} live on 3Speak` } },
+                { link },
+                { guid: [{ _attr: { isPermaLink: 'false' } }, `${DOMAIN_NO_PROTO}/live/${username}/${it.id}`] },
+                { 'itunes:author': { _cdata: itunesAuthor } },
+                ...(it.thumb && /^https:\/\//.test(it.thumb) ? [{ 'itunes:image': { _attr: { href: it.thumb } } }] : []),
+                personTag(username, itunesAuthor),
+                { enclosure: { _attr: { url: link, length: 0, type: 'text/html' } } },
+                { 'podcast:contentLink': [{ _attr: { href: link } }, it.kind === 'audio' ? 'Listen on 3Speak' : 'Watch on 3Speak'] },
+            ],
+        };
+    });
 }
 
 /** RFC 4122 UUIDv5 (SHA-1, name-based). */
@@ -440,6 +674,9 @@ function buildItem(video, itunesAuthor, feedOwner, everyItemPays = false) {
             ...(video.duration > 0 ? [{ 'itunes:duration': hms(video.duration) }] : []),
             ...enclosure,
             ...alternate,
+            ...episodeExtras(video),
+            // Someone else's episode in a playlist feed: they are its host.
+            ...(foreign ? [personTag(video.owner, video.owner)] : []),
             ...(foreign || everyItemPays ? valueBlocks(video.owner, foreign ? video.owner : itunesAuthor) : [])
         ]
     };
@@ -493,7 +730,7 @@ function buildOutsideItem(ep) {
  * `feedPath` / `pageLink` / `medium` are given (podcastSettings then carries
  * the playlist's title, description and cover).
  */
-function buildFeed({ username, videos, itunesAuthor, podcastSettings, feedPath, pageLink, coverUrl, medium = 'video', everyItemPays = false }) {
+function buildFeed({ username, videos, itunesAuthor, podcastSettings, feedPath, pageLink, coverUrl, medium = 'video', everyItemPays = false, liveItems = [] }) {
     const feedUrl = `${DOMAIN_NO_PROTO}/${feedPath || `rss/${username}.xml`}`;
     const selfUrl = `${PAGE_PROTOCOL}://${feedUrl}`;
     const link = pageLink || `${PAGE_PROTOCOL}://${DOMAIN_NO_PROTO}/user/${username}`;
@@ -589,8 +826,13 @@ function buildFeed({ username, videos, itunesAuthor, podcastSettings, feedPath, 
                     ...podcast_categories.map(category => ({
                         'itunes:category': { _attr: { text: category } }
                     })),
+                    // The channel (or playlist owner) as the host, and where to support them.
+                    personTag(username, itunesAuthor),
+                    fundingTag(username),
                     // A playlist with outside shows in it: each item names who it pays.
                     ...(everyItemPays ? [] : valueBlocks(username, itunesAuthor)),
+                    // The channel's streams: live now, coming up, just ended
+                    ...liveItemTags(username, itunesAuthor, liveItems),
                     // Append video items below
                     ...videos.map(v => buildItem(v, itunesAuthor, username, everyItemPays))
                 ]
@@ -734,6 +976,124 @@ router.get('/cover/user/:username.jpg', async (req, res) => {
     }
 });
 
+/** One episode by its Hive post, from the same three collections the feeds read, or null. */
+async function findEpisode(db, owner, permlink, { publishedAudioOnly = false } = {}) {
+    const [audio, embed, legacy] = await Promise.all([
+        db.collection('embed-audio').findOne({
+            owner, post_permlink: { $in: [permlink, `${owner}/${permlink}`] }, ...(publishedAudioOnly ? { status: 'published' } : {}),
+        }),
+        db.collection('embed-video').findOne({ hive_author: owner, hive_permlink: permlink, status: 'published' }),
+        db.collection('videos').findOne({ owner, permlink, status: 'published' }),
+    ]);
+    return (embed && fromEmbedVideo(embed)) || (legacy && fromLegacyVideo(legacy)) || (audio && fromAudio(audio)) || null;
+}
+
+/** A banned or hidden creator's episode files are as gone as their feed. */
+async function creatorBlocked(db, owner) {
+    const c = await db.collection('contentcreators').findOne({ username: owner, $or: [{ banned: true }, { hidden: true }] }, { projection: { _id: 1 } });
+    return !!c;
+}
+
+const OWNER_RE = /^[a-z0-9.-]{3,16}$/;
+const PERMLINK_RE = /^[a-z0-9-]{1,255}$/;
+
+/**
+ * GET /rss/chapters/:owner/:permlink.json
+ *
+ * The episode's chapters in the Podcast Namespace JSON chapters format
+ * (version 1.2.0, startTime in seconds), what <podcast:chapters> links. From
+ * the post: the timeline's chapters, else the timestamped list in its text.
+ */
+router.get('/chapters/:owner/:permlink.json', async (req, res) => {
+    const { owner, permlink } = req.params;
+    if (!OWNER_RE.test(owner) || !PERMLINK_RE.test(permlink)) return res.status(400).json({ error: 'Invalid episode' });
+    try {
+        const db = getDb();
+        const episode = await findEpisode(db, owner, permlink, { publishedAudioOnly: true });
+        if (!episode || await creatorBlocked(db, owner)) return res.status(404).json({ error: 'Not found' });
+        const post = (await hivePosts([`${owner}/${permlink}`])).get(`${owner}/${permlink}`);
+        const chapters = chaptersFor(post && post.chapters, episode.duration);
+        if (!chapters.length) return res.status(404).json({ error: 'No chapters' });
+        res.setHeader('Content-Type', 'application/json+chapters; charset=utf-8');
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        return res.send(JSON.stringify({
+            version: '1.2.0',
+            ...(post.title ? { title: post.title } : {}),
+            chapters: chapters.map((c) => ({ startTime: c.start, title: c.title || `${Math.floor(c.start / 60)}:${String(c.start % 60).padStart(2, '0')}` })),
+        }));
+    } catch (err) {
+        console.error(`[RSS] Chapters error for ${owner}/${permlink}:`, err);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+/** SRT as WebVTT: a header, and a dot before the milliseconds. */
+function srtToVtt(srt) {
+    const body = String(srt || '').replace(/\r\n?/g, '\n')
+        .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2')
+        .trim();
+    return `WEBVTT\n\n${body}\n`;
+}
+
+/**
+ * GET /rss/transcript/:owner/:permlink/:lang.srt and .vtt
+ *
+ * The episode's captions in one language (the `subtitles` collection, filed
+ * under the Hive permlink or the upload's own), as SRT or converted to WebVTT.
+ */
+async function sendCaptions(req, res, format) {
+    const { owner, permlink, lang } = req.params;
+    if (!OWNER_RE.test(owner) || !PERMLINK_RE.test(permlink) || !/^[a-z]{2,3}(?:-[a-z0-9]{2,8})?$/.test(lang)) {
+        return res.status(400).send('Invalid transcript');
+    }
+    try {
+        const db = getDb();
+        const episode = await findEpisode(db, owner, permlink, { publishedAudioOnly: true });
+        if (!episode || await creatorBlocked(db, owner)) return res.status(404).send('Not found');
+        const doc = await db.collection('subtitles').findOne(
+            { author: owner, permlink: { $in: [...new Set([permlink, episode.asset].filter(Boolean))] }, [`subtitles.${lang}`]: { $type: 'string' } },
+            { projection: { subtitles: 1 } },
+        );
+        const cid = doc && doc.subtitles && doc.subtitles[lang];
+        if (!cid || !CID_RE.test(cid)) return res.status(404).send('Not found');
+        const got = await fetchSubtitleText(cid);
+        if (got.text == null) return res.status(502).send('Transcript not reachable');
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        if (format === 'vtt') return res.type('text/vtt; charset=utf-8').send(srtToVtt(got.text));
+        return res.type('application/x-subrip; charset=utf-8').send(got.text);
+    } catch (err) {
+        console.error(`[RSS] Transcript error for ${owner}/${permlink}/${lang}:`, err);
+        return res.status(500).send('Internal server error');
+    }
+}
+router.get('/transcript/:owner/:permlink/:lang.srt', (req, res) => sendCaptions(req, res, 'srt'));
+router.get('/transcript/:owner/:permlink/:lang.vtt', (req, res) => sendCaptions(req, res, 'vtt'));
+
+/**
+ * GET /rss/transcript/:owner/:permlink.txt
+ *
+ * The transcript the audio uploader put into the post ("Make a transcript"),
+ * as plain text. Read from Hive each time (cached by nginx and apps), since a
+ * transcript is far too big for the feeds' post cache.
+ */
+router.get('/transcript/:owner/:permlink.txt', async (req, res) => {
+    const { owner, permlink } = req.params;
+    if (!OWNER_RE.test(owner) || !PERMLINK_RE.test(permlink)) return res.status(400).send('Invalid transcript');
+    try {
+        const db = getDb();
+        const episode = await findEpisode(db, owner, permlink, { publishedAudioOnly: true });
+        if (!episode || await creatorBlocked(db, owner)) return res.status(404).send('Not found');
+        const [r] = await hiveRpcBatch([{ jsonrpc: '2.0', id: 0, method: 'condenser_api.get_content', params: [owner, permlink] }]);
+        const text = transcriptFromBody(r && r.result && r.result.body);
+        if (!text) return res.status(404).send('Not found');
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        return res.type('text/plain; charset=utf-8').send(`${text.replace(/\*\*/g, '')}\n`);
+    } catch (err) {
+        console.error(`[RSS] Transcript error for ${owner}/${permlink}:`, err);
+        return res.status(500).send('Internal server error');
+    }
+});
+
 // Episode art: resolved from the post itself (never from a URL in the
 // request), across the same three collections the feeds read.
 router.get('/cover/episode/:owner/:permlink.jpg', async (req, res) => {
@@ -742,13 +1102,7 @@ router.get('/cover/episode/:owner/:permlink.jpg', async (req, res) => {
         return res.status(400).send('Invalid episode');
     }
     try {
-        const db = getDb();
-        const [audio, embed, legacy] = await Promise.all([
-            db.collection('embed-audio').findOne({ owner, post_permlink: { $in: [permlink, `${owner}/${permlink}`] } }),
-            db.collection('embed-video').findOne({ hive_author: owner, hive_permlink: permlink, status: 'published' }),
-            db.collection('videos').findOne({ owner, permlink, status: 'published' }),
-        ]);
-        const episode = (embed && fromEmbedVideo(embed)) || (legacy && fromLegacyVideo(legacy)) || (audio && fromAudio(audio));
+        const episode = await findEpisode(getDb(), owner, permlink);
         if (!episode || !episode.thumb) return res.status(404).send('Not found');
         return await sendCover(res, episode.thumb, `episode ${owner}/${permlink}`, 'fit');
     } catch (err) {
@@ -818,7 +1172,7 @@ async function loadPublicPlaylist(db, id) {
                 })
                 .toArray(),
         ]);
-        episodes = await withHivePostText(mergeEpisodes({ embedRaw, legacyRaw, audioRaw }, PLAYLIST_FEED_LIMIT));
+        episodes = await withHivePosts(mergeEpisodes({ embedRaw, legacyRaw, audioRaw }, PLAYLIST_FEED_LIMIT));
     }
     return { playlist, blocked: false, live, episodes };
 }
@@ -866,6 +1220,26 @@ function mergeOutside(episodes, outside, limit) {
     return [...episodes, ...outside.filter((e) => !e.ref || !have.has(e.ref))]
         .sort((a, b) => new Date(b.created) - new Date(a.created))
         .slice(0, limit);
+}
+
+/**
+ * Episode numbers for a playlist whose order is the order of its parts: a
+ * series (a numbered set of Shorts or videos) or a music album. The first item
+ * is episode 1. An episode whose own post names its number keeps it, and a
+ * playlist in no particular order (a channel's picks, a daily show added newest
+ * first) gets no numbers at all. Mutates `episodes`.
+ */
+function numberByPosition(playlist, refs, episodes) {
+    const stored = storedPlaylistType(playlist);
+    if (!isSeriesPlaylist(playlist) && stored.kind !== 'music') return episodes;
+    const order = [...refs].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+    const rank = new Map(order.map((r, i) => [`${r.author}/${r.permlink}`, i + 1]));
+    for (const e of episodes) {
+        if (e.outside || e.episode != null) continue;
+        const n = rank.get(`${e.owner}/${e.permlink}`);
+        if (n) e.episode = n;
+    }
+    return episodes;
 }
 
 /**
@@ -1003,6 +1377,8 @@ router.get('/playlist/:id.xml', feedGate, async (req, res) => {
             loadOutsideEpisodes(db, playlist, PLAYLIST_FEED_LIMIT),
         ]);
         const episodes = mergeOutside(loaded.episodes, outside, PLAYLIST_FEED_LIMIT);
+        numberByPosition(playlist, loaded.live, episodes);
+        await withFeedExtras(db, episodes);
 
         const album = decodePlaylistMeta(playlist.metadata)?.album || {};
         const podcastSettings = {
@@ -1075,7 +1451,7 @@ router.get('/:username.xml', feedGate, async (req, res) => {
                 .sort({ createdAt: -1 }).limit(FEED_LIMIT).toArray(),
         ]);
 
-        const videos = await withHivePostText(mergeEpisodes({ embedRaw, legacyRaw, audioRaw }, FEED_LIMIT));
+        const videos = await withHivePosts(mergeEpisodes({ embedRaw, legacyRaw, audioRaw }, FEED_LIMIT));
 
         if (videos.length === 0) {
             // No published videos — return a minimal valid empty feed
@@ -1105,11 +1481,15 @@ router.get('/:username.xml', feedGate, async (req, res) => {
             );
         }
 
-        const itunesAuthor = await fetchItunesAuthor(username);
-        const podcastSettings = await fetchPodcastSettings(db, username);
+        const [itunesAuthor, podcastSettings, liveItems] = await Promise.all([
+            fetchItunesAuthor(username),
+            fetchPodcastSettings(db, username),
+            liveItemsFor(username).catch(() => []),
+            withFeedExtras(db, videos),
+        ]);
 
         const feedXml = buildFeed({
-            username, videos, itunesAuthor, podcastSettings,
+            username, videos, itunesAuthor, podcastSettings, liveItems,
             coverUrl: coverLink('user', username, channelCoverSource(username, podcastSettings)),
         });
 
@@ -1124,3 +1504,5 @@ router.get('/:username.xml', feedGate, async (req, res) => {
 });
 
 module.exports = router;
+// Tests only: forget the cached Hive posts.
+module.exports._clearPostCache = () => hivePostCache.clear();

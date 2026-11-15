@@ -165,6 +165,8 @@ function pickSound(s) {
         source: str(s.source, 60),
         url: str(s.url, 300),
         license: str(s.license, 40),
+        // The sound's id (utils/soundIds.js), when the post names it: sound pages.
+        id: str(s.id, 300),
     };
 }
 
@@ -500,8 +502,11 @@ function isNative3SpeakComment(reply) {
  * A post whose batch failed (transient RPC error) is simply ABSENT from the map, so
  * the caller keeps its previous stored value rather than zeroing it. A real post with
  * no comments returns `result: []` → { comments: 0, native3Speak: 0 }.
+ *
+ * `exclude` (a Set of lowercased names, the global comment mutelist) leaves those
+ * accounts' replies out of every count; how many were left out is `muted`.
  */
-async function fetchCommentReplyCounts(authorPerms, { batchSize = 20 } = {}) {
+async function fetchCommentReplyCounts(authorPerms, { batchSize = 20, exclude = null } = {}) {
     const results = new Map();
     for (let i = 0; i < authorPerms.length; i += batchSize) {
         const batch = authorPerms.slice(i, i + batchSize);
@@ -522,18 +527,22 @@ async function fetchCommentReplyCounts(authorPerms, { batchSize = 20 } = {}) {
             const commenters = new Set();
             const nativeCommenters = new Set();
             let native = 0;
+            let muted = 0;
             for (const rep of r.result) {
+                const who = String((rep && rep.author) || '').toLowerCase();
+                if (who && exclude && exclude.has(who)) { muted += 1; continue; }
                 const isNative = isNative3SpeakComment(rep);
                 if (isNative) native += 1;
-                const who = String((rep && rep.author) || '').toLowerCase();
                 if (!who || who === owner) continue;
                 commenters.add(who);
                 if (isNative) nativeCommenters.add(who);
             }
-            results.set(`${item.author}/${item.permlink}`, {
-                comments: r.result.length, native3Speak: native,
+            const row = {
+                comments: r.result.length - muted, native3Speak: native,
                 commenters: commenters.size, nativeCommenters: nativeCommenters.size,
-            });
+            };
+            if (exclude) row.muted = muted;
+            results.set(`${item.author}/${item.permlink}`, row);
         }
     }
     return results;
@@ -654,4 +663,5 @@ module.exports = {
     mulberry32,
     reputationCache,
     REPUTATION_CACHE_TTL,
+    pickSound,
 };

@@ -35,7 +35,7 @@ describe('POST /reviews', () => {
     expect(row).toEqual({
       area: 'upload', username: 'alice', permlink: 'my-video', stars: 4,
       aspects: ['speed', 'ui', 'x'.repeat(32)], recommend: true, comment: 'great',
-      app_version: '1.81.0', path: '/upload', user_agent: 'TestBrowser/1', processed: false, created_at: NOW,
+      app_version: '1.81.0', path: '/upload', user_agent: 'TestBrowser/1', screenshot: null, processed: false, created_at: NOW,
     });
   });
 
@@ -78,6 +78,62 @@ describe('POST /reviews', () => {
     jest.spyOn(console, 'error').mockImplementation(() => {});
     jest.spyOn(Collection.prototype, 'insertOne').mockRejectedValue(new Error('disk full'));
     await post('/reviews', { stars: 2 }).expect(500, { error: 'failed to save review' });
+  });
+});
+
+describe('POST /reviews with a screenshot', () => {
+  // A real PNG header plus padding: the route checks the first bytes, not the pixels.
+  const png = (size = 64) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(size)]);
+  const dataUrl = (mime, buf) => `data:${mime};base64,${buf.toString('base64')}`;
+
+  test('is kept apart in review_screenshots; the review row only points at it', async () => {
+    const buf = png(300 * 1024); // well over the app-wide 100 kB body limit
+    await post('/reviews', { stars: 4, comment: 'the button is cut off', screenshot: dataUrl('image/png', buf) }).expect(201, { ok: true });
+
+    const review = await db().collection('reviews').findOne({});
+    const shot = await db().collection('review_screenshots').findOne({});
+    expect(review.screenshot).toEqual({ id: shot._id, mime: 'image/png', bytes: buf.length });
+    expect(shot).toMatchObject({ review_id: review._id, mime: 'image/png', bytes: buf.length, created_at: NOW });
+    expect(Buffer.from(shot.data.buffer).equals(buf)).toBe(true);
+  });
+
+  test.each([
+    ['a GIF', dataUrl('image/gif', Buffer.from('GIF89a0000000000'))],
+    ['a JPEG label on PNG bytes', dataUrl('image/jpeg', png())],
+    ['not a data URL', 'https://example.com/shot.png'],
+    ['an object', { $gt: '' }],
+    ['more than 750 kB', dataUrl('image/png', png(750 * 1024))],
+  ])('400 and nothing stored for %s', async (_label, screenshot) => {
+    const res = await post('/reviews', { stars: 3, screenshot }).expect(400);
+    expect(res.body.error).toBe('screenshot must be a PNG, JPEG or WebP image of at most 750 kB');
+    expect(await db().collection('reviews').countDocuments()).toBe(0);
+    expect(await db().collection('review_screenshots').countDocuments()).toBe(0);
+  });
+
+  test('JPEG and WebP are taken too', async () => {
+    const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(32)]);
+    const webp = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBPVP8 '), Buffer.alloc(32)]);
+    await post('/reviews', { stars: 5, screenshot: dataUrl('image/jpeg', jpeg) }).expect(201);
+    await post('/reviews', { stars: 5, screenshot: dataUrl('image/webp', webp) }).expect(201);
+    const mimes = (await db().collection('review_screenshots').find({}).toArray()).map((d) => d.mime).sort();
+    expect(mimes).toEqual(['image/jpeg', 'image/webp']);
+  });
+
+  test('an empty screenshot field is the same as none', async () => {
+    await post('/reviews', { stars: 2, screenshot: '' }).expect(201);
+    expect((await db().collection('reviews').findOne({})).screenshot).toBeNull();
+    expect(await db().collection('review_screenshots').countDocuments()).toBe(0);
+  });
+
+  test('when the review cannot be saved, its screenshot is removed again', async () => {
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    const real = Collection.prototype.insertOne;
+    jest.spyOn(Collection.prototype, 'insertOne').mockImplementation(function (...a) {
+      return this.collectionName === 'reviews' ? Promise.reject(new Error('disk full')) : real.apply(this, a);
+    });
+    await post('/reviews', { stars: 2, screenshot: dataUrl('image/png', png()) }).expect(500, { error: 'failed to save review' });
+    jest.restoreAllMocks();
+    expect(await db().collection('review_screenshots').countDocuments()).toBe(0);
   });
 });
 

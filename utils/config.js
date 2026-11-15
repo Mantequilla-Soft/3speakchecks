@@ -996,6 +996,106 @@ module.exports = {
     // collection rather than a surgical edit of the log we keep on all viewers.
     AD_VIEWER_WATCH_COLLECTION: process.env.AD_VIEWER_WATCH_COLLECTION || 'ad_viewer_watch',
 
+    // Continue watching (the home strip): where each opted-in viewer left a video,
+    // copied from the player's short-lived `view-sessions` into `viewer_progress`
+    // (services/viewerProgress.js). Same consent as the watch rows above, and
+    // deleted with them on opt-out. Listed between MIN and MAX percent watched.
+    VIEWER_PROGRESS_COLLECTION: process.env.VIEWER_PROGRESS_COLLECTION || 'viewer_progress',
+    VIEWER_PROGRESS_SYNC_MIN: parseInt(process.env.VIEWER_PROGRESS_SYNC_MIN) || 2,
+
+    // Premieres (routes/premieres.js, services/premieres.js): a scheduled post the
+    // creator listed as a premiere. Its countdown page, "Notify me" reminders and a
+    // live chat that runs from the start for the video's length plus a short grace,
+    // then stays as timecoded "Premiere chat" messages.
+    PREMIERE_CHAT_COLLECTION: process.env.PREMIERE_CHAT_COLLECTION || 'premiere_chat',
+    PREMIERE_REMINDERS_COLLECTION: process.env.PREMIERE_REMINDERS_COLLECTION || 'premiere_reminders',
+    // Minutes the chat stays open after the video's own end.
+    PREMIERE_GRACE_MIN: parseInt(process.env.PREMIERE_GRACE_MIN) || 10,
+    // A premiere whose video length is not known yet is treated as this long.
+    PREMIERE_DEFAULT_DURATION_S: parseInt(process.env.PREMIERE_DEFAULT_DURATION_S) || 3600,
+    // The scheduled-posts cron publishes a premiere this many minutes EARLY, so the
+    // Hive post and its video are linked and ready when the countdown ends (the
+    // watch page keeps showing the countdown until the start). One cron interval
+    // plus a minute by default: the cron runs every SCHEDULED_POSTS_INTERVAL_MIN.
+    PREMIERE_PUBLISH_LEAD_MIN: parseInt(process.env.PREMIERE_PUBLISH_LEAD_MIN)
+        || ((parseInt(process.env.SCHEDULED_POSTS_INTERVAL_MIN, 10) || 5) + 1),
+    PREMIERE_CHAT_MAX_CHARS: parseInt(process.env.PREMIERE_CHAT_MAX_CHARS) || 200,
+    // Per viewer: messages per minute, and the least gap between two.
+    PREMIERE_CHAT_PER_MIN: parseInt(process.env.PREMIERE_CHAT_PER_MIN) || 12,
+    PREMIERE_CHAT_GAP_MS: parseInt(process.env.PREMIERE_CHAT_GAP_MS) || 1500,
+    CONTINUE_WATCHING_MIN_PCT: parseFloat(process.env.CONTINUE_WATCHING_MIN_PCT ?? '10'),
+    CONTINUE_WATCHING_MAX_PCT: parseFloat(process.env.CONTINUE_WATCHING_MAX_PCT ?? '75'),
+
+    // Card reach (routes/cardReach.js): daily counters per video and surface of how
+    // often its card was seen (sampled by the page, scaled back up here) and opened.
+    // No viewer is stored. Rows older than CARD_REACH_TTL_DAYS expire on their own.
+    CARD_REACH_COLLECTION: process.env.CARD_REACH_COLLECTION || 'card_reach_daily',
+    CARD_REACH_TTL_DAYS: parseIntMin(process.env.CARD_REACH_TTL_DAYS, 400, 30),
+    // The sample rates a page may report under; anything else is refused, so a
+    // client cannot pick a tiny rate to multiply what it sends.
+    CARD_REACH_RATES: (process.env.CARD_REACH_RATES || '1,0.5,0.25,0.1')
+        .split(',').map(Number).filter((n) => n > 0 && n <= 1),
+    // Most cards one address may report as seen per hour, and opens of one video
+    // per address counted once per window.
+    CARD_REACH_SEEN_PER_HOUR: parseIntMin(process.env.CARD_REACH_SEEN_PER_HOUR, 1500, 1),
+    CARD_REACH_OPEN_WINDOW_MIN: parseIntMin(process.env.CARD_REACH_OPEN_WINDOW_MIN, 30, 1),
+
+    // Comment inbox (routes/commentInbox.js): what a creator marked done.
+    COMMENT_INBOX_DONE_COLLECTION: process.env.COMMENT_INBOX_DONE_COLLECTION || 'comment_inbox_done',
+    COMMENT_INBOX_DAYS: parseIntMin(process.env.COMMENT_INBOX_DAYS, 90, 7),
+
+    // Shorts from this video (routes/clipIdeas.js, utils/clipIdeas.js): clip ranges
+    // for a creator's own long video from replays, timestamped comments, chat and
+    // the transcript. Watch sessions needed before replays count, suggestions
+    // returned, how long one answer is kept, and the most watch rows read.
+    CLIP_IDEAS_MIN_SESSIONS: parseIntMin(process.env.CLIP_IDEAS_MIN_SESSIONS, 5, 1),
+    CLIP_IDEAS_MAX: parseIntMin(process.env.CLIP_IDEAS_MAX, 5, 1),
+    CLIP_IDEAS_CACHE_MS: parseIntMin(process.env.CLIP_IDEAS_CACHE_MS, 10 * 60 * 1000, 0),
+    CLIP_IDEAS_MAX_ROWS: parseIntMin(process.env.CLIP_IDEAS_MAX_ROWS, 20000, 100),
+
+    // Global comment mutelist (utils/commentMutes.js): data/comment-mutelist.json
+    // plus this collection, re-read every COMMENT_MUTES_TTL_MS.
+    COMMENT_MUTES_COLLECTION: process.env.COMMENT_MUTES_COLLECTION || 'comment_mutes',
+    COMMENT_MUTES_TTL_MS: parseIntMin(process.env.COMMENT_MUTES_TTL_MS, 5 * 60 * 1000, 1000),
+
+    // Earnings over time (routes/creatorEarnings.js): one answer per account and
+    // range is kept this many minutes.
+    CREATOR_EARNINGS_CACHE_MIN: parseIntMin(process.env.CREATOR_EARNINGS_CACHE_MIN, 15, 0),
+    // ─── Social: notification levels, "went live", polls, collab posts ───
+    // Per followed creator All / Highlights / Off (utils/notifyLevels.js).
+    NOTIFY_LEVELS_COLLECTION: process.env.NOTIFY_LEVELS_COLLECTION || 'notify_levels',
+    // One row per stream that went live (services/liveNotify.js), read by the bell
+    // feed (routes/notify.js) for the followers of its host. Kept LIVE_EVENTS_TTL_DAYS.
+    LIVE_EVENTS_COLLECTION: process.env.LIVE_EVENTS_COLLECTION || 'live_events',
+    LIVE_EVENTS_TTL_DAYS: parseInt(process.env.LIVE_EVENTS_TTL_DAYS) || 7,
+    // The "went live" job (services/liveNotify.js): records streams for the bell
+    // and web-pushes "@host is live" to followers. OFF unless set to true: the
+    // push reaches every follower with notifications on, and production 3speak.tv
+    // has no switch for it yet, so it goes on with the frontend that has one.
+    LIVE_NOTIFY_ENABLED: parseBool(process.env.LIVE_NOTIFY_ENABLED, false),
+    LIVE_NOTIFY_INTERVAL_SEC: Math.max(20, parseInt(process.env.LIVE_NOTIFY_INTERVAL_SEC) || 60),
+    // The streaming servers whose public GET /streams is polled. Defaults to the
+    // same list the ad gate asks about rooms (utils/liveRoom.js).
+    LIVE_STREAMS_API_URLS: String(process.env.LIVE_STREAMS_API_URLS || process.env.LIVE_ROOM_API_URLS || 'https://live.3speak.tv')
+        .split(',').map((u) => u.trim().replace(/\/+$/, '')).filter(Boolean),
+    // How long a "went live" stays in the bell after it started.
+    LIVE_NOTIFY_FEED_HOURS: parseFloat(process.env.LIVE_NOTIFY_FEED_HOURS) || 24,
+    // Polls on community snaps: one vote per account (routes/polls.js).
+    POLL_VOTES_COLLECTION: process.env.POLL_VOTES_COLLECTION || 'poll_votes',
+    // Collab posts: invites the co-creator accepts or declines (routes/collabs.js).
+    COLLABS_COLLECTION: process.env.COLLABS_COLLECTION || 'collabs',
+    // Sound pages (services/soundIndex.js, routes/sounds.js): which Shorts use which
+    // sound. The index job runs every SOUND_INDEX_INTERVAL_MIN on the background-jobs
+    // instance, SOUND_INDEX_BATCH Shorts per run (the backfill), and re-reads the
+    // last SOUND_INDEX_RECHECK_H hours of Shorts each time. Library songs are named
+    // from the editor's music list at SOUND_LIBRARY_URL (empty: no library names).
+    SOUND_INDEX_ENABLED: parseBool(process.env.SOUND_INDEX_ENABLED, true),
+    SOUND_INDEX_INTERVAL_MIN: parseIntMin(process.env.SOUND_INDEX_INTERVAL_MIN, 10, 1),
+    SOUND_INDEX_BATCH: parseIntMin(process.env.SOUND_INDEX_BATCH, 200, 1),
+    SOUND_INDEX_RECHECK_H: parseIntMin(process.env.SOUND_INDEX_RECHECK_H, 48, 1),
+    SOUND_LIBRARY_URL: process.env.SOUND_LIBRARY_URL ?? 'https://3speak-editor.okinoko.io/music/library.json',
+    SOUND_TRENDING_DAYS: parseIntMin(process.env.SOUND_TRENDING_DAYS, 7, 1),
+
     // Share of AD REVENUE that is paid out to viewers, in points of the whole.
     // At the defaults: creators+communities 50, viewers 10, platform 40.
     //
@@ -1544,4 +1644,27 @@ module.exports = {
     AD_CATEGORIES: (process.env.AD_CATEGORIES
         || 'defi,dapp,exchange,gaming,nft,infrastructure,dao,media,education,event,tooling,other')
         .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
+
+    // Curator page (routes/curation.js): a voter's picks on 3Speak, their curation
+    // rewards and "found it early" badges, read from Hive account history and kept
+    // in memory per account for CURATION_CACHE_MIN. A vote is EARLY when the votes
+    // before it carried at most CURATION_EARLY_SHARE of the post's vote weight and the
+    // post went on to at least CURATION_EARLY_MIN_VOTES votes.
+    CURATION_DAYS: Math.min(Math.max(parseInt(process.env.CURATION_DAYS, 10) || 30, 1), 90),
+    CURATION_CACHE_MIN: Math.max(parseInt(process.env.CURATION_CACHE_MIN, 10) || 10, 1),
+    CURATION_MAX_PICKS: Math.min(Math.max(parseInt(process.env.CURATION_MAX_PICKS, 10) || 60, 1), 200),
+    CURATION_EARLY_SHARE: parseFloat(process.env.CURATION_EARLY_SHARE ?? '0.1'),
+    CURATION_EARLY_MIN_VOTES: parseInt(process.env.CURATION_EARLY_MIN_VOTES, 10) || 10,
+    // ── Podcast feeds (routes/rss.js), Podcasting 2.0 tags ──
+    // Where the per-episode files the feeds link live: chapters JSON and the
+    // transcripts. Served by this checker under /rss (3speak.tv only proxies the
+    // .xml feeds and /img/c/ covers), so the default is this checker's public host.
+    RSS_FILES_BASE_URL: (process.env.RSS_FILES_BASE_URL || 'https://checker.3speak.tv/rss').replace(/\/+$/, ''),
+    // <podcast:liveItem> for a channel's streams, read from the live server
+    // (LIVE_ROOM_API_URLS, first one) and cached per channel this long.
+    RSS_LIVE_ITEMS_ENABLED: process.env.RSS_LIVE_ITEMS_ENABLED !== 'false',
+    RSS_LIVE_CACHE_MS: parseInt(process.env.RSS_LIVE_CACHE_MS, 10) || 60 * 1000,
+    // <podcast:soundbite>: Shorts made from an audiogram of an episode, looked
+    // for this long after the episode came out.
+    RSS_SOUNDBITE_WINDOW_DAYS: parseInt(process.env.RSS_SOUNDBITE_WINDOW_DAYS, 10) || 30,
 };

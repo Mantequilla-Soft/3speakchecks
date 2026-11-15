@@ -38,7 +38,7 @@ const failure = async (p) => p.then(() => 'resolved', (e) => (e.code ? e.code : 
 const logged = () => [...errors.mock.calls, ...warns.mock.calls].flat().join('\n');
 
 describe('the platform registry and the link switches', () => {
-  const KEYS = ['VERIFY_YOUTUBE', 'VERIFY_SOUNDCLOUD', 'VERIFY_TIKTOK', 'VERIFY_INSTAGRAM', 'VERIFY_BITCHUTE', 'VERIFY_RUMBLE'];
+  const KEYS = ['VERIFY_YOUTUBE', 'VERIFY_SOUNDCLOUD', 'VERIFY_TIKTOK', 'VERIFY_INSTAGRAM', 'VERIFY_BITCHUTE', 'VERIFY_RUMBLE', 'VERIFY_RSS'];
   beforeEach(() => KEYS.forEach((k) => delete process.env[k]));
   afterEach(() => KEYS.forEach((k) => delete process.env[k]));
 
@@ -48,13 +48,14 @@ describe('the platform registry and the link switches', () => {
     expect(getPlatform(undefined)).toBeNull();
   });
 
-  test('by default only YouTube and SoundCloud can be linked', () => {
-    expect(listPlatforms()).toEqual(['youtube', 'soundcloud']);
+  test('by default YouTube, SoundCloud and podcast RSS feeds can be linked', () => {
+    expect(listPlatforms()).toEqual(['youtube', 'soundcloud', 'rss']);
   });
 
   test('VERIFY_<NAME> switches a platform on or off, read at call time', () => {
     process.env.VERIFY_TIKTOK = 'true';
     process.env.VERIFY_SOUNDCLOUD = 'false';
+    process.env.VERIFY_RSS = 'false';
     expect(listPlatforms()).toEqual(['youtube', 'tiktok']);
     expect(isLinkEnabled('TikTok')).toBe(true);
     process.env.VERIFY_TIKTOK = 'yes'; // anything but true/false = the default

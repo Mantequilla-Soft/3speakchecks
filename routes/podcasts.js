@@ -24,6 +24,10 @@
  *   POST /podcasts/progress                        save that (session vouch, below)
  *   POST /podcasts/bundle   { urls, cursor?, limit? }   the shows a 3Speak playlist names
  *                           and their episodes merged by date (utils/playlistFeeds.js)
+ *   GET  /podcasts/verified?user=                  the shows a Hive user proved they publish
+ *                           (a verified `rss` link, routes/verify.js): the podcast import
+ *                           reads their episodes through the reads above
+ *   GET  /podcasts/verified/:user/episode/:id/download   the audio of one of them, for the import
  *
  * Writes, signed:
  *   POST /podcasts/subscribe   { user, urls: [..], titles?: [..], private?: [..], signature, timestamp }
@@ -57,8 +61,9 @@ const crypto = require('crypto');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { ObjectId } = require('mongodb');
-const { getDb } = require('../utils/db');
+const { getDb, getLinksCollection } = require('../utils/db');
 const { verifyHiveAuthority, verifyDelegateVouch } = require('../utils/hiveAuth');
+const { proveProgressUser, PROGRESS_VOUCH_MAX_AGE_MS } = require('../utils/progressVouch');
 const { SIGNATURE_TIMESTAMP_TOLERANCE_MS, AD_SIGNING_DELEGATES } = require('../utils/config');
 const { Transform, pipeline } = require('stream');
 const { checkUrl, safeFetch, safeStream, splitCredentials } = require('../utils/safeFetch');
@@ -631,6 +636,11 @@ function downloadName(url, title) {
 router.get('/episode/:id/download', downloadStarts, downloadRanges, async (req, res) => {
   const ep = await readableEpisode(req, res, { audio_url: 1, mime: 1, title: 1 });
   if (!ep) return;
+  await sendEpisodeAudio(req, res, ep);
+});
+
+/** Passes an episode's audio through (the download above, and the import's below). */
+async function sendEpisodeAudio(req, res, ep) {
   if (downloadsOpen >= DOWNLOADS_AT_ONCE) return res.status(503).json({ success: false, error: 'busy, try again in a minute', code: 'busy' });
   downloadsOpen += 1;
   let released = false;
@@ -686,7 +696,7 @@ router.get('/episode/:id/download', downloadStarts, downloadRanges, async (req, 
     if (err) up.abort();
     release();
   });
-});
+}
 
 
 // ─── Search and trending (Podcast Index) ──────────────────────────────────────
@@ -891,22 +901,8 @@ router.get('/art/:token/:px.jpg', async (req, res) => {
 // from our API (`progress-vouch` over "session") for up to a day and reuses it.
 // A stolen one could only move that person's progress bars.
 
-const PROGRESS_VOUCH_MAX_AGE_MS = 24 * 3600 * 1000;
+// proveProgressUser and its max age: utils/progressVouch.js (shared with Continue watching).
 const progressBrake = new Map();
-
-async function proveProgressUser(b) {
-  const user = userOf(b.user);
-  if (!USER_RE.test(user)) return null;
-  const signature = typeof b.signature === 'string' ? b.signature.slice(0, 200) : '';
-  const timestamp = parseInt(b.timestamp, 10);
-  if (!signature || !Number.isFinite(timestamp) || Math.abs(Date.now() - timestamp) > PROGRESS_VOUCH_MAX_AGE_MS) return null;
-  try {
-    const v = await verifyDelegateVouch({ message: podcastMessage('progress-vouch', user, 'session', timestamp), signature, delegates: AD_SIGNING_DELEGATES });
-    return v.ok ? user : null;
-  } catch (_) {
-    return null;
-  }
-}
 
 const presentProgress = (rows) => Object.fromEntries(rows.map((r) => [r.ep, { pos: r.pos, dur: r.dur, done: !!r.done }]));
 
@@ -1226,6 +1222,110 @@ router.post('/resolve', express.json({ limit: '8kb' }), async (req, res) => {
   } catch (err) {
     console.error('[podcasts] resolve:', err.message);
     res.status(500).json({ success: false, error: 'could not check the show' });
+  }
+});
+
+// ─── Shows their publisher verified (the podcast import) ──────────────────────
+
+/**
+ * The feeds a Hive user has a VERIFIED `rss` social link for (the code was in the
+ * feed, services/platforms/rss.js), each with its row here, so the importer can
+ * page through the episodes (/feed/:id, /feed/:id/older), read the notes and pull
+ * the audio (/episode/:id/download). Public like /verify/links: it only says
+ * which public shows someone publishes. A show we have no row for is fetched now,
+ * exactly that URL (no directory or website lookup: only the verified address
+ * counts), and one nobody follows is re-read when older than VERIFIED_FRESH_MS,
+ * because the worker only polls followed shows. `verified_seen_at` keeps the row
+ * from the clean-up while it is used (services/podcastFeeds.js gc).
+ */
+const VERIFIED_FRESH_MS = 10 * 60 * 1000;
+const MAX_VERIFIED_FEEDS = 10;
+// Per creator (and address): the importer asks from the 3Speak server's one
+// address, for everyone, and its automatic imports ask in the background too.
+const verifiedLimiter = rateLimit({
+  keyGenerator: (req) => `${userOf(req.query.user)}|${rateLimit.ipKeyGenerator(clientIpOf(req))}`, validate: { xForwardedForHeader: false, ip: false },
+  windowMs: 60 * 1000, max: 30, standardHeaders: false, legacyHeaders: false,
+  message: { success: false, error: 'Too many requests' },
+});
+
+router.get('/verified', verifiedLimiter, async (req, res) => {
+  if (!podcastFeeds.enabled()) return disabled(res);
+  const user = userOf(req.query.user);
+  if (!USER_RE.test(user)) return res.status(400).json({ success: false, error: 'invalid user' });
+  try {
+    const links = await getLinksCollection()
+      .find({ hive_username: user, platform: 'rss', verified: true }, { projection: { platform_username: 1, verified_at: 1 } })
+      .sort({ verified_at: -1 }).limit(MAX_VERIFIED_FEEDS).toArray();
+    const feeds = getDb().collection(FEEDS);
+    const out = [];
+    for (const link of links) {
+      const url = String(link.platform_username || '');
+      const key = urlKey(url);
+      const entry = { url, verified_at: link.verified_at || null };
+      out.push(entry);
+      if (!key || splitCredentials(url).auth) { entry.code = 'bad_url'; continue; }
+      if (internalOwner(key)) { entry.code = 'internal_feed'; continue; }
+      let feed = await feeds.findOne({ $or: [{ url_key: key }, { alt_keys: key }], private: { $ne: true } });
+      const followed = feed && ((feed.subscribers || 0) > 0 || (feed.playlist_refs || 0) > 0);
+      const stale = feed && Date.now() - new Date(feed.last_fetch_at || feed.last_ok_at || 0).getTime() > VERIFIED_FRESH_MS;
+      if (!feed || !feed.last_ok_at || (!followed && stale)) {
+        const r = await podcastFeeds.ask('probe', { url, fresh_ms: followed ? 0 : VERIFIED_FRESH_MS }, 35000);
+        if (!r.ok) {
+          if (!feed || !feed.last_ok_at) { entry.code = r.code || 'error'; continue; }
+        } else {
+          feed = await feeds.findOne({ _id: new ObjectId(r.feed_id) });
+          if (!feed) { entry.code = 'error'; continue; }
+        }
+      }
+      await feeds.updateOne({ _id: feed._id }, { $set: { verified_seen_at: new Date() } });
+      await fillMissingArt([feed]);
+      entry.feed = presentFeed(feed, { subscribers: feed.subscribers || 0 });
+    }
+    res.set('Cache-Control', 'no-store');
+    res.json({ success: true, user, feeds: out });
+  } catch (err) {
+    console.error('[podcasts] verified:', err.message);
+    res.status(500).json({ success: false, error: 'could not load the verified shows' });
+  }
+});
+
+/** url_keys of the feeds a Hive user has a verified `rss` link for. */
+async function verifiedFeedKeys(user) {
+  const links = await getLinksCollection()
+    .find({ hive_username: user, platform: 'rss', verified: true }, { projection: { platform_username: 1 } })
+    .limit(MAX_VERIFIED_FEEDS).toArray();
+  return links.map((l) => urlKey(String(l.platform_username || ''))).filter(Boolean);
+}
+
+/**
+ * GET /podcasts/verified/:user/episode/:id/download: an episode's audio for the
+ * podcast import, only when the episode's show is one the user verified. The
+ * public download allows a dozen starts an hour per address, and every import
+ * comes from the 3Speak server's one address, so this has its own limit per
+ * creator (and address). Everything else is the public download's.
+ */
+const importDownloads = rateLimit({
+  keyGenerator: (req) => `${userOf(req.params.user)}|${rateLimit.ipKeyGenerator(clientIpOf(req))}`,
+  validate: { xForwardedForHeader: false, ip: false },
+  windowMs: 60 * 60 * 1000, max: 30, skip: continuesDownload, standardHeaders: false, legacyHeaders: false,
+  message: { success: false, error: 'Too many downloads, try again later' },
+});
+
+router.get('/verified/:user/episode/:id/download', importDownloads, async (req, res) => {
+  const user = userOf(req.params.user);
+  const id = String(req.params.id);
+  if (!USER_RE.test(user) || !EPISODE_RE.test(id)) return res.status(400).json({ success: false, error: 'invalid user or episode' });
+  try {
+    const db = getDb();
+    const ep = await db.collection(EPISODES).findOne({ _id: id }, { projection: { audio_url: 1, mime: 1, title: 1, feed_id: 1, private: 1 } });
+    const feed = ep && !ep.private ? await db.collection(FEEDS).findOne({ _id: ep.feed_id }, { projection: { url_key: 1, alt_keys: 1, private: 1 } }) : null;
+    const keys = feed && !feed.private ? await verifiedFeedKeys(user) : [];
+    const own = feed && [feed.url_key, ...(feed.alt_keys || [])].some((k) => keys.includes(k));
+    if (!own) return res.status(404).json({ success: false, error: 'not found' });
+    await sendEpisodeAudio(req, res, ep);
+  } catch (err) {
+    console.error('[podcasts] verified download:', err.message);
+    if (!res.headersSent) res.status(500).json({ success: false, error: 'could not load the episode' });
   }
 });
 

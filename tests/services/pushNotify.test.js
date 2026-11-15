@@ -187,3 +187,20 @@ test('a failed following lookup with nothing cached notifies that person of noth
 
   expect(await runOnce()).toEqual({ candidates: 1, sent: 0 });
 });
+
+test('per-creator levels: Highlights drops shorts, Off drops the creator', async () => {
+  follows.set('fan', ['creator']);
+  follows.set('light', ['creator']);
+  follows.set('muted', ['creator']);
+  await db().collection('notify_levels').insertMany([
+    { user: 'light', creator: 'creator', level: 'highlights' },
+    { user: 'muted', creator: 'creator', level: 'off' },
+  ]);
+  await db().collection('embed-video').insertMany([embed('creator', 'vid'), embed('creator', 'clip', { short: true })]);
+
+  await runOnce();
+
+  expect(pushed.filter((p) => p.username === 'fan')).toHaveLength(2);
+  expect(pushed.filter((p) => p.username === 'light').map((p) => p.payload.tag)).toEqual(['videos:creator/vid']);
+  expect(pushed.filter((p) => p.username === 'muted')).toEqual([]);
+});

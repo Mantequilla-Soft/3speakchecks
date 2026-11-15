@@ -4,7 +4,7 @@
  * encodings it is stored in.
  */
 const { Binary } = require('mongodb');
-const { categoryToKind, kindFromCategories, storedPlaylistType } = require('../../utils/playlistType');
+const { categoryToKind, kindFromCategories, storedPlaylistType, isSeriesPlaylist } = require('../../utils/playlistType');
 
 // The site sends json_metadata as a JSON string; the indexer keeps those bytes.
 const jm = (obj) => new Binary(Buffer.from(JSON.stringify(JSON.stringify(obj))));
@@ -43,5 +43,19 @@ describe('storedPlaylistType', () => {
 
   test('an unknown kind is ignored', () => {
     expect(storedPlaylistType({ type: 'audio', audio_kind: 'opera' })).toEqual({ type: 'audio', kind: null });
+  });
+});
+
+describe('isSeriesPlaylist', () => {
+  test('a video playlist marked series in json_metadata, in every encoding', () => {
+    expect(isSeriesPlaylist({ type: 'video', json_metadata: jm({ type: 'video', series: true }) })).toBe(true);
+    expect(isSeriesPlaylist({ type: 'video', json_metadata: JSON.stringify({ series: true }) })).toBe(true);
+    expect(isSeriesPlaylist({ type: 'video', json_metadata: jm({ type: 'video' }) })).toBe(false);
+    expect(isSeriesPlaylist({ type: 'video', json_metadata: jm({ series: 'yes' }) })).toBe(false);
+    expect(isSeriesPlaylist(null)).toBe(false);
+  });
+
+  test('an audio playlist is never a series (albums are numbered as albums)', () => {
+    expect(isSeriesPlaylist({ type: 'audio', audio_kind: 'podcast', json_metadata: jm({ type: 'audio', series: true }) })).toBe(false);
   });
 });

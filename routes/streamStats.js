@@ -14,6 +14,10 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const { getDb } = require('../utils/db');
+const { recordClipsReady, streamClipSource } = require('../services/streamClipNotices');
+
+// Ready stream clips in the bell (routes/notify.js).
+require('./notify').addSource(streamClipSource);
 
 const SECRET = process.env.STREAM_STATS_SECRET || '';
 
@@ -164,6 +168,20 @@ router.post('/stream-stats/boost', async (req, res) => {
   } catch (e) {
     console.error('POST /stream-stats/boost failed:', e.message);
     res.status(500).json({ error: 'failed to log boost' });
+  }
+});
+
+// POST /stream-stats/clips-ready: the clips of a stream are cut (H13). Body:
+// { room, host, title?, total, clippers: [{ user, count }] }. Tells the host and
+// each clipper in the bell and by push (services/streamClipNotices.js).
+router.post('/stream-stats/clips-ready', async (req, res) => {
+  try {
+    const out = await recordClipsReady(req.body || {});
+    if (!out) return res.status(400).json({ error: 'room, host and total are required' });
+    res.json({ ok: true, ...out });
+  } catch (e) {
+    console.error('POST /stream-stats/clips-ready failed:', e.message);
+    res.status(500).json({ error: 'failed to record clips' });
   }
 });
 

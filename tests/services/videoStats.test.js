@@ -161,6 +161,22 @@ describe('the background drain', () => {
     ]);
   });
 
+  test('replies by muted accounts (stored by the comment-count sync) are taken off the card count', async () => {
+    await db().collection('video-comment-counts').insertMany([
+      { _id: 'badadib/p1', comments: 2, mutedComments: 3 },
+      { _id: 'badadib/p2', comments: 0, mutedComments: 5 },
+    ]);
+    await attachVideoStats(['p1', 'p2', 'p3'].map((p) => ({ author: 'badadib', permlink: p })));
+    hiveAnswers({
+      'badadib/p1': { reward: 1, votes: 2, comments: 5 },
+      'badadib/p2': { reward: 0, votes: 0, comments: 4 },
+      'badadib/p3': { reward: 0, votes: 0, comments: 7 },
+    });
+    await drainVideoStats();
+    const byId = Object.fromEntries((await stats().find().toArray()).map((r) => [r._id, r.comments]));
+    expect(byId).toEqual({ 'badadib/p1': 2, 'badadib/p2': 0, 'badadib/p3': 7 });
+  });
+
   test('a key Hive did not answer keeps its old row instead of being zeroed', async () => {
     await stats().insertOne({ _id: 'alice/p', author: 'alice', permlink: 'p', reward: 9, votes: 9, comments: 9, updatedAt: new Date(NOW - 60 * MINUTE) });
     await attachVideoStats([{ author: 'alice', permlink: 'p' }]);

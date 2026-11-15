@@ -15,6 +15,7 @@
  */
 const { getDb } = require('../utils/db');
 const { fetchCommentReplyCounts } = require('../utils/hive');
+const { getMutedSet } = require('../utils/commentMutes');
 const {
   COMMENT_SYNC_ENABLED, COMMENT_SYNC_INTERVAL_MIN, COMMENT_SYNC_MAX_AGE_DAYS,
   COMMENT_SYNC_MAX_VIDEOS, COMMENT_NATIVE_MULT, ENABLE_MONGO_WRITES,
@@ -74,7 +75,12 @@ async function syncCommentCounts() {
 
     // Fetch from Hive (batched). Posts whose batch failed are absent → we skip them
     // (keep the old stored value) rather than zeroing a count on a transient error.
-    const counts = await fetchCommentReplyCounts(authorPerms);
+    // Accounts on the global comment mutelist (bots) count for nothing: not as a
+    // comment, not as a commenter, so they can't lift a video in discover or the
+    // suggested creators. How many of their replies were left out is stored as
+    // `mutedComments` so the feed-card count (services/videoStats.js) can drop them too.
+    const muted = await getMutedSet(db);
+    const counts = await fetchCommentReplyCounts(authorPerms, { exclude: muted });
 
     const ops = [];
     const refreshed = new Set();
@@ -94,6 +100,7 @@ async function syncCommentCounts() {
             comments: c.comments, native3Speak: c.native3Speak,
             commenters: c.commenters, nativeCommenters: c.nativeCommenters,
             effective: Math.round(effective * 100) / 100,
+            ...(typeof c.muted === 'number' ? { mutedComments: c.muted } : {}),
             updatedAt: runAt,
           } },
           upsert: true,

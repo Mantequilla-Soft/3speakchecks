@@ -6,6 +6,8 @@ const instagram = require('./instagram');
 const bitchute = require('./bitchute');
 // Reads the About page through RUMBLE_FETCH_PROXY (Cloudflare refuses this server).
 const rumble = require('./rumble');
+// Podcast RSS feeds: the code in the feed header or its newest episode (rss.js).
+const rss = require('./rss');
 
 const platforms = {
     [youtube.name]: youtube,
@@ -14,13 +16,15 @@ const platforms = {
     [instagram.name]: instagram,
     [bitchute.name]: bitchute,
     [rumble.name]: rumble,
+    [rss.name]: rss,
 };
 
 // Which platforms people may LINK (verify) right now: one switch each,
 // VERIFY_<NAME>=true|false in .env. Default: only YouTube and SoundCloud (owner's
 // call 2026-10-06). A switched-off platform still unlinks and its existing links
-// stay readable; only new verifications are refused.
-const DEFAULT_ON = new Set(['youtube', 'soundcloud']);
+// stay readable; only new verifications are refused. RSS feeds on by default
+// (owner 2026-11-14: verified feeds are what the podcast import works from).
+const DEFAULT_ON = new Set(['youtube', 'soundcloud', 'rss']);
 function isLinkEnabled(name) {
     const key = String(name || '').trim().toLowerCase();
     if (!platforms[key]) return false;

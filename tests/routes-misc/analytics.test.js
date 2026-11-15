@@ -300,6 +300,19 @@ describe('GET /creator-stats/hive-year (HafSQL)', () => {
     expect(rewardCall[1]).toEqual(['alice', (BigInt(sinceBlock) << 32n).toString()]);
   });
 
+  test('accounts on the comment mutelist are no fans', async () => {
+    require('../../utils/commentMutes')._test.reset();
+    await db().collection('comment_mutes').insertOne({ _id: 'spambot', reason: 'bot', at: new Date() });
+    hafsql.query.mockImplementation(async (sql) => {
+      if (/operation_comment_view/.test(sql)) return [{ account: 'fan', n: 1 }, { account: 'ai-agent-hunter', n: 40 }, { account: 'spambot', n: 9 }];
+      if (/operation_vote_view/.test(sql)) return [{ account: 'spambot', n: 50 }];
+      return answer(sql);
+    });
+    const res = await request(app).get('/creator-stats/hive-year?username=badadib').expect(200);
+    expect(res.body.fans.map((f) => f.account)).toEqual(['fan']);
+    require('../../utils/commentMutes')._test.reset();
+  });
+
   test('one answer per account and window is kept for 30 minutes', async () => {
     hafsql.query.mockImplementation(async (sql) => answer(sql));
     await request(app).get('/creator-stats/hive-year?username=cached&days=90').expect(200);
@@ -397,5 +410,56 @@ describe('GET /analytics/demographics: privacy rules', () => {
     expect(res.body.whenHeatmap).toHaveLength(7);
     expect(res.body.whenHeatmap[0][10]).toBe(2); // Sunday 10:00 UTC
     expect(res.body.whenHeatmap[6][12]).toBe(4); // Saturday 12:00 UTC, the other four
+  });
+});
+
+describe('content filters: streams, audio and podcasts', () => {
+  /** One listening session as routes/audioListen.js writes it. */
+  const listen = (id, extra = {}) => {
+    sid += 1;
+    return {
+      sid: `l${sid}`, owner: 'alice', kind: 'audio', id, contentSeconds: 30, listenedSeconds: 30, listenedPct: 25,
+      duration: 120, avgRate: 1, startPosition: 0, lastPosition: 30, maxPosition: 30,
+      updatedAt: ago(DAY), startedAt: ago(DAY), source: '3speak', ...extra,
+    };
+  };
+
+  beforeEach(async () => {
+    await db().collection('embed-video').insertOne({ owner: 'alice', permlink: 'room1', is_openpod_stream: true, hive_title: 'Live Q&A', duration: 900 });
+    await db().collection('embed-video').insertOne({ owner: 'alice', permlink: 'room2', originalFilename: 'stream-room2-900s.mp4', duration: 900 });
+    await db().collection('embed-audio').insertMany([
+      { owner: 'alice', permlink: 'pod1', category: 'podcast', title: 'Episode 1', post_permlink: 'episode-1', duration: 120 },
+      { owner: 'alice', permlink: 'song1', category: 'song', title: 'A song', post_permlink: 'a-song', duration: 120 },
+    ]);
+    await addSessions(session('v1'), session('room1'), session('room2'), session('room2'));
+    await db().collection('listen-durations').insertMany([listen('pod1'), listen('pod1'), listen('song1'), listen('ep', { kind: 'podcast', owner: null })]);
+  });
+
+  test('streams: only the recordings of live streams', async () => {
+    const res = await request(app).get('/creator-stats/overview?username=alice&content=streams').expect(200);
+    expect(res.body.videos.map((v) => [v.permlink, v.sessions])).toEqual([['room2', 2], ['room1', 1]]);
+  });
+
+  test('podcasts and audio read the listening sessions, with the upload as title', async () => {
+    const pods = await request(app).get('/creator-stats/overview?username=alice&content=podcasts').expect(200);
+    expect(pods.body.videos.map((v) => [v.permlink, v.title, v.sessions, v.audio])).toEqual([['pod1', 'Episode 1', 2, true]]);
+    expect(pods.body.totals).toMatchObject({ videos: 1, sessions: 2, watchSeconds: 60, avgPct: 25 });
+    const audio = await request(app).get('/creator-stats/overview?username=alice&content=audio').expect(200);
+    expect(audio.body.videos.map((v) => v.permlink)).toEqual(['song1']);
+    const ts = await request(app).get('/creator-stats/timeseries?username=alice&days=7&content=podcasts').expect(200);
+    expect(ts.body.series.reduce((n, d) => n + d.views, 0)).toBe(2);
+    const demo = await request(app).get('/creator-stats/demographics?username=alice&days=28&content=audio').expect(200);
+    expect(demo.body.totalSessions).toBe(1);
+  });
+
+  test('an audio upload\'s detail: retention from its listening and its listen heatmap', async () => {
+    await db().collection('listen-heatmaps').insertOne({ kind: 'audio', id: 'pod1', owner: 'alice', bucketCount: 4, buckets: [2, 1, 0, 0] });
+    const has = await request(app).get('/creator-stats/has-data?username=alice&permlink=pod1&kind=audio').expect(200);
+    expect(has.body).toMatchObject({ hasData: true, sessions: 2 });
+    const res = await request(app).get('/creator-stats/video?username=alice&permlink=pod1&kind=audio').expect(200);
+    expect(res.body).toMatchObject({ sessions: 2, duration: 120, watchSeconds: 60, avgPct: 25 });
+    expect(res.body.retention[0]).toBe(100);
+    expect(res.body.retention[30]).toBe(0);
+    expect(res.body.replay.normalized).toEqual([1, 0.5, 0, 0]);
   });
 });

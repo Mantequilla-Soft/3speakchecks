@@ -11,7 +11,16 @@
  *   GET /analytics/demographics   → country + device/browser + time-of-day
  *   GET /analytics/has-data       → does a video have any records (gates the Stats button)
  *
- * Common query params: days (7|28|90|365|0=all), content (all|videos|shorts).
+ * Common query params: days (7|28|90|365|0=all),
+ * content (all|videos|shorts|streams|audio|podcasts).
+ *
+ * Audio and podcasts are LISTENING sessions (listen-durations, written by
+ * routes/audioListen.js), read through the same pipelines: LISTEN_NORM renames
+ * their fields to the watch-log names (id -> permlink, listenedPct -> watchedPct,
+ * duration -> videoDuration). Podcasts = the creator's embed-audio uploads with
+ * category 'podcast'; audio = the rest of their uploads. Streams = the recordings
+ * of their live streams (embed-video stamped is_openpod_stream, or the recorder's
+ * stream-<room> filename), watched like any video.
  *
  * PRIVACY (2026-07-14): the player stores no viewer IP and no persistent per-browser
  * id. `country` is resolved on ingest and the IP discarded, so everything here is an
@@ -32,6 +41,12 @@ const HIVE_RE = /^[a-z][a-z0-9.-]{2,15}$/;
 const ID_RE = /^[a-z0-9._-]+$/i;
 const WATCH_LOG = process.env.WATCH_LOG_COLLECTION || 'view-durations';
 const WATCH_HEATMAP = process.env.WATCH_HEATMAP_COLLECTION || 'view-heatmaps';
+const LISTEN_LOG = 'listen-durations';
+const LISTEN_HEATMAP = 'listen-heatmaps';
+const AUDIO_CONTENT = new Set(['audio', 'podcasts']);
+// A listen-durations row in the watch log's field names.
+const LISTEN_NORM = [{ $addFields: { permlink: '$id', watchedPct: '$listenedPct', videoDuration: '$duration' } }];
+const STREAM_MATCH = { $or: [{ is_openpod_stream: true }, { originalFilename: { $regex: '^stream-' } }] };
 
 // Watched seconds: prefer contentSeconds (speed-correct); fall back to
 // watchedSeconds for rows written before that field existed.
@@ -71,12 +86,32 @@ function dateMatch(days) {
 // Videos vs Shorts filter → a match fragment on permlink (shorts live in
 // embed-video with short:true).
 async function contentMatch(db, username, content) {
+  if (content === 'streams') {
+    const vods = await db.collection('embed-video')
+      .find({ owner: username, ...STREAM_MATCH }, { projection: { permlink: 1 } }).toArray();
+    return { permlink: { $in: vods.map((v) => v.permlink) } };
+  }
   if (content !== 'videos' && content !== 'shorts') return {};
   const shorts = await db.collection('embed-video')
     .find({ owner: username, short: true }, { projection: { permlink: 1 } }).toArray();
   const set = shorts.map((s) => s.permlink);
   if (content === 'shorts') return { permlink: { $in: set } };
   return { permlink: { $nin: set } }; // videos = everything that isn't a short
+}
+
+// Where a content filter's sessions live: { coll, match, norm, audio }. `match`
+// already holds the owner; `norm` goes right after the $match of every pipeline.
+async function contentScope(db, username, content) {
+  if (AUDIO_CONTENT.has(content)) {
+    const pods = await db.collection('embed-audio')
+      .find({ owner: username, category: 'podcast' }, { projection: { permlink: 1 } }).toArray();
+    const set = pods.map((p) => p.permlink);
+    return {
+      coll: LISTEN_LOG, audio: true, norm: LISTEN_NORM,
+      match: { owner: username, kind: 'audio', id: content === 'podcasts' ? { $in: set } : { $nin: set } },
+    };
+  }
+  return { coll: WATCH_LOG, audio: false, norm: [], match: { owner: username, ...(await contentMatch(db, username, content)) } };
 }
 
 // First few words of a post body (stripped of markdown/HTML/URLs) — used as a
@@ -113,9 +148,10 @@ function parseUA(ua) {
 
 // Aggregate per-video watch stats for an owner, scoped by an extra match (date +
 // content filters).
-async function watchStatsByVideo(db, username, extra = {}) {
-  return db.collection(WATCH_LOG).aggregate([
-    { $match: { owner: username, ...extra } },
+async function watchStatsByVideo(db, scope, extra = {}) {
+  return db.collection(scope.coll).aggregate([
+    { $match: { ...scope.match, ...extra } },
+    ...scope.norm,
     { $group: {
       _id: '$permlink',
       sessions: { $sum: 1 },
@@ -180,6 +216,31 @@ async function resolveVideoMeta(db, username, permlinks) {
       duration: l.duration || 0,
       createdAt: l.created || l.createdAt || null,
       views: l.views || 0,
+    };
+  }
+  return meta;
+}
+
+// Audio uploads in the shape resolveVideoMeta gives videos.
+async function resolveAudioMeta(db, username, ids) {
+  const rows = await db.collection('embed-audio').find(
+    { owner: username, permlink: { $in: ids } },
+    { projection: { permlink: 1, title: 1, thumbnail_url: 1, post_permlink: 1, duration: 1, createdAt: 1 } },
+  ).toArray();
+  const meta = {};
+  for (const a of rows) {
+    meta[a.permlink] = {
+      hiveTitle: a.title || null,
+      short: false,
+      audio: true,
+      docSnippet: '',
+      filename: '',
+      thumbnail: a.thumbnail_url || null,
+      hiveAuthor: username,
+      hivePermlink: a.post_permlink || null,
+      duration: a.duration || 0,
+      createdAt: a.createdAt || null,
+      views: 0,
     };
   }
   return meta;
@@ -269,6 +330,7 @@ function fmtVideo(v, meta, eng) {
     title,
     thumbnail: m.thumbnail || null,
     short: !!m.short,
+    audio: !!m.audio,
     // v.duration is the TRACKED (client-reported) duration from view-durations;
     // m.duration is the video's real stored duration. Prefer the tracked value
     // (it's what the viewer's timeline actually was) EXCEPT when it looks
@@ -297,22 +359,23 @@ router.get(['/analytics/overview', '/creator-stats/overview'], async (req, res) 
     const db = getDb();
     const days = parseDays(req);
     const content = req.query.content;
-    const extra = { ...dateMatch(days), ...(await contentMatch(db, username, content)) };
+    const scope = await contentScope(db, username, content);
+    const extra = dateMatch(days);
 
-    const perVideo = await watchStatsByVideo(db, username, extra);
+    const perVideo = await watchStatsByVideo(db, scope, extra);
     const emptyTotals = { videos: 0, sessions: 0, viewers: 0, watchSeconds: 0, avgViewDuration: 0, avgPct: 0, avgRate: 1, engagementRate: 0, payout: 0 };
     if (!perVideo.length) {
       return res.json({ success: true, username, days, content: content || 'all', totals: emptyTotals, videos: [], best: { byWatchTime: [], byVotes: [], byComments: [] } });
     }
     const permlinks = perVideo.map((v) => v.permlink);
-    const meta = await resolveVideoMeta(db, username, permlinks);
+    const meta = scope.audio ? await resolveAudioMeta(db, username, permlinks) : await resolveVideoMeta(db, username, permlinks);
     const refs = perVideo.map((v) => meta[v.permlink]).filter((m) => m && m.hivePermlink)
       .map((m) => ({ hiveAuthor: m.hiveAuthor, hivePermlink: m.hivePermlink }));
     const eng = await fetchHiveEngagement(refs);
 
     const videos = perVideo.map((v) => fmtVideo(v, meta, eng));
-    const uniqueViewers = (await db.collection(WATCH_LOG).aggregate([
-      { $match: { owner: username, ...extra } },
+    const uniqueViewers = (await db.collection(scope.coll).aggregate([
+      { $match: { ...scope.match, ...extra } },
       { $group: { _id: VIEWER_KEY } },
       { $count: 'n' },
     ]).toArray())[0]?.n || 0;
@@ -362,10 +425,10 @@ router.get(['/analytics/timeseries', '/creator-stats/timeseries'], async (req, r
     const db = getDb();
     const days = parseDays(req) || 28; // default to a 28-day trend
     const content = req.query.content;
-    const extra = { ...dateMatch(days), ...(await contentMatch(db, username, content)) };
+    const scope = await contentScope(db, username, content);
 
-    const rows = await db.collection(WATCH_LOG).aggregate([
-      { $match: { owner: username, ...extra } },
+    const rows = await db.collection(scope.coll).aggregate([
+      { $match: { ...scope.match, ...dateMatch(days) } },
       { $group: {
         _id: { $dateToString: { format: '%Y-%m-%d', date: '$updatedAt' } },
         watchSeconds: { $sum: WATCH_SEC },
@@ -527,9 +590,11 @@ async function loadHiveYear(username, days) {
     hafsql.query(`select amount::float as amount, symbol, memo from hafsql.operation_transfer_table
       where to_account = $1 and id >= $2 and memo like '3Speak ad revenue share%'`, [username, minId]),
   ]);
+  // Accounts on the global comment mutelist (bots, utils/commentMutes.js) are no fans either.
+  const muted = await require('../utils/commentMutes').getMutedSet();
   const fans = new Map();
   const add = (rows, key) => rows.forEach((r) => {
-    if (NOT_FANS.includes(r.account)) return;
+    if (NOT_FANS.includes(r.account) || muted.has(String(r.account || '').toLowerCase())) return;
     if (!fans.has(r.account)) fans.set(r.account, { account: r.account, votes: 0, comments: 0 });
     fans.get(r.account)[key] = r.n;
   });
@@ -579,8 +644,9 @@ router.get(['/analytics/has-data', '/creator-stats/has-data'], async (req, res) 
       return res.status(400).json({ success: false, error: 'invalid username/permlink' });
     }
     const db = getDb();
-    const assetPermlink = await resolveAssetPermlink(db, username, permlink);
-    const sessions = await db.collection(WATCH_LOG).countDocuments({ owner: username, permlink: assetPermlink });
+    const sessions = req.query.kind === 'audio'
+      ? await db.collection(LISTEN_LOG).countDocuments({ owner: username, kind: 'audio', id: permlink })
+      : await db.collection(WATCH_LOG).countDocuments({ owner: username, permlink: await resolveAssetPermlink(db, username, permlink) });
     res.json({ success: true, hasData: sessions > 0, sessions });
   } catch (err) {
     console.error('analytics/has-data error:', err);
@@ -588,7 +654,8 @@ router.get(['/analytics/has-data', '/creator-stats/has-data'], async (req, res) 
   }
 });
 
-// GET /analytics/video?username=X&permlink=Y  (all-time; retention + most-replayed)
+// GET /analytics/video?username=X&permlink=Y[&kind=audio]  (all-time; retention + most-replayed)
+// kind=audio reads an audio upload's listening sessions and its listen heatmap.
 router.get(['/analytics/video', '/creator-stats/video'], async (req, res) => {
   try {
     const username = String(req.query.username || '').toLowerCase();
@@ -597,11 +664,16 @@ router.get(['/analytics/video', '/creator-stats/video'], async (req, res) => {
       return res.status(400).json({ success: false, error: 'invalid username/permlink' });
     }
     const db = getDb();
-    const assetPermlink = await resolveAssetPermlink(db, username, permlink);
+    const audio = req.query.kind === 'audio';
+    const assetPermlink = audio ? permlink : await resolveAssetPermlink(db, username, permlink);
 
-    const rows = await db.collection(WATCH_LOG)
-      .find({ owner: username, permlink: assetPermlink }, { projection: { sid: 1, viewerId: 1, ip: 1, watchedSeconds: 1, contentSeconds: 1, watchedPct: 1, startPosition: 1, lastPosition: 1, maxPosition: 1, videoDuration: 1, avgRate: 1 } })
-      .toArray();
+    const rows = audio
+      ? (await db.collection(LISTEN_LOG)
+        .find({ owner: username, kind: 'audio', id: permlink }, { projection: { sid: 1, contentSeconds: 1, listenedSeconds: 1, listenedPct: 1, startPosition: 1, lastPosition: 1, maxPosition: 1, duration: 1, avgRate: 1 } })
+        .toArray()).map((r) => ({ ...r, watchedPct: r.listenedPct, videoDuration: r.duration, watchedSeconds: r.listenedSeconds }))
+      : await db.collection(WATCH_LOG)
+        .find({ owner: username, permlink: assetPermlink }, { projection: { sid: 1, viewerId: 1, ip: 1, watchedSeconds: 1, contentSeconds: 1, watchedPct: 1, startPosition: 1, lastPosition: 1, maxPosition: 1, videoDuration: 1, avgRate: 1 } })
+        .toArray();
     if (!rows.length) return res.json({ success: true, username, permlink: assetPermlink, sessions: 0 });
 
     // $max across rows self-heals when only SOME rows carry the mis-tracked
@@ -611,7 +683,9 @@ router.get(['/analytics/video', '/creator-stats/video'], async (req, res) => {
     // real stored duration and prefer that when the tracked max looks
     // implausibly short next to it.
     const trackedDuration = rows.reduce((m, r) => Math.max(m, r.videoDuration || 0), 0) || 1;
-    const realDuration = await realDurationFor(db, username, assetPermlink);
+    const realDuration = audio
+      ? ((await db.collection('embed-audio').findOne({ owner: username, permlink }, { projection: { duration: 1 } }))?.duration || null)
+      : await realDurationFor(db, username, assetPermlink);
     const duration = healDuration(trackedDuration, realDuration) || 1;
     const sessions = rows.length;
     // Mirrors VIEWER_KEY: `sid` now, with the legacy viewerId/ip fallback for rows
@@ -633,7 +707,9 @@ router.get(['/analytics/video', '/creator-stats/video'], async (req, res) => {
     }
     const retentionPct = retention.map((c) => Math.round((c / sessions) * 1000) / 10);
 
-    const hm = await db.collection(WATCH_HEATMAP).findOne({ owner: username, permlink: assetPermlink });
+    const hm = audio
+      ? await db.collection(LISTEN_HEATMAP).findOne({ kind: 'audio', id: permlink, owner: username })
+      : await db.collection(WATCH_HEATMAP).findOne({ owner: username, permlink: assetPermlink });
     let replay = { bucketCount: N, normalized: [] };
     if (hm && Array.isArray(hm.buckets)) {
       const max = hm.buckets.reduce((m, x) => Math.max(m, Number(x) || 0), 0);
@@ -663,11 +739,12 @@ router.get(['/analytics/demographics', '/creator-stats/demographics'], async (re
     const db = getDb();
     const days = parseDays(req);
     const content = req.query.content;
-    const extra = { ...dateMatch(days), ...(await contentMatch(db, username, content)) };
-    const match = { owner: username, ...extra };
+    const scope = await contentScope(db, username, content);
+    const match = { ...scope.match, ...dateMatch(days) };
+    const LOG = scope.coll;
 
     // Watch SESSIONS (see VIEWER_KEY) — the denominator for the country split.
-    const perViewer = await db.collection(WATCH_LOG).aggregate([
+    const perViewer = await db.collection(LOG).aggregate([
       { $match: match },
       { $group: { _id: VIEWER_KEY, sessions: { $sum: 1 } } },
     ]).toArray();
@@ -675,7 +752,7 @@ router.get(['/analytics/demographics', '/creator-stats/demographics'], async (re
     // Country demographics read the `country` field, which the player resolves from
     // the IP ON INGEST and then discards. Private-mode rows carry no country and so
     // never appear on the map (by design).
-    const perCountry = await db.collection(WATCH_LOG).aggregate([
+    const perCountry = await db.collection(LOG).aggregate([
       { $match: { ...match, country: { $ne: null, $exists: true } } },
       { $group: { _id: '$country', sessions: { $sum: 1 }, viewers: { $addToSet: VIEWER_KEY } } },
     ]).toArray();
@@ -692,7 +769,7 @@ router.get(['/analytics/demographics', '/creator-stats/demographics'], async (re
     // Geolocate those on read so the map doesn't go blank mid-rollout. Once
     // migrate-drop-ips.cjs has run and every player is restarted this matches
     // nothing and costs one indexed count.
-    const legacyPerIp = await db.collection(WATCH_LOG).aggregate([
+    const legacyPerIp = await db.collection(LOG).aggregate([
       { $match: { ...match, country: { $exists: false }, ip: { $ne: null, $exists: true } } },
       { $group: { _id: '$ip', sessions: { $sum: 1 } } },
     ]).toArray();
@@ -712,7 +789,7 @@ router.get(['/analytics/demographics', '/creator-stats/demographics'], async (re
       .sort((a, b) => b.viewers - a.viewers);
 
     // Device / browser from userAgent (parse the distinct UAs, then sum counts).
-    const uaAgg = await db.collection(WATCH_LOG).aggregate([
+    const uaAgg = await db.collection(LOG).aggregate([
       { $match: match },
       { $group: { _id: '$userAgent', sessions: { $sum: 1 } } },
     ]).toArray();
@@ -726,7 +803,7 @@ router.get(['/analytics/demographics', '/creator-stats/demographics'], async (re
 
     // Where the view happened: '3speak' (native site) vs 'player' (embed iframe).
     // Rows predating source tracking have no field → count them as 'player'.
-    const srcAgg = await db.collection(WATCH_LOG).aggregate([
+    const srcAgg = await db.collection(LOG).aggregate([
       { $match: match },
       { $group: { _id: { $ifNull: ['$source', 'player'] }, sessions: { $sum: 1 } } },
     ]).toArray();
@@ -735,7 +812,7 @@ router.get(['/analytics/demographics', '/creator-stats/demographics'], async (re
       .sort((a, b) => b.sessions - a.sessions);
 
     // When viewers watch: 7×24 (day-of-week × hour, UTC) session matrix.
-    const dowHour = await db.collection(WATCH_LOG).aggregate([
+    const dowHour = await db.collection(LOG).aggregate([
       { $match: match },
       { $group: { _id: { dow: { $dayOfWeek: '$startedAt' }, hour: { $hour: '$startedAt' } }, sessions: { $sum: 1 } } },
     ]).toArray();

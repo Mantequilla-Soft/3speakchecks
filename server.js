@@ -5,7 +5,7 @@ const { handleRouteError } = require('./utils/asyncErrors');
 const cors = require('cors');
 const cron = require('node-cron');
 
-const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, BADGE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN, THUMBNAIL_FRAME_ENABLED, THUMBNAIL_FRAME_INTERVAL_MIN, VIDEO_HIVE_SYNC_ENABLED, VIDEO_HIVE_SYNC_INTERVAL_MIN, DURATION_SYNC_ENABLED, DURATION_SYNC_INTERVAL_MIN, AD_INVENTORY_ENABLED, AD_INVENTORY_INTERVAL_H, BACKGROUND_JOBS } = require('./utils/config');
+const { PORT, TRENDING_INTERVAL_MIN, COMMUNITY_SYNC_DELAY_H, COMMUNITY_SYNC_INTERVAL_H, PROFILE_SYNC_DELAY_H, PROFILE_SYNC_INTERVAL_H, BADGE_SYNC_INTERVAL_H, THUMBNAIL_SYNC_ENABLED, THUMBNAIL_SYNC_INTERVAL_MIN, THUMBNAIL_FRAME_ENABLED, THUMBNAIL_FRAME_INTERVAL_MIN, VIDEO_HIVE_SYNC_ENABLED, VIDEO_HIVE_SYNC_INTERVAL_MIN, DURATION_SYNC_ENABLED, DURATION_SYNC_INTERVAL_MIN, AD_INVENTORY_ENABLED, AD_INVENTORY_INTERVAL_H, BACKGROUND_JOBS, LIVE_NOTIFY_ENABLED } = require('./utils/config');
 const { connectToMongo, getDb } = require('./utils/db');
 const { calculateAndFlagTrendingVideos } = require('./services/trending');
 const { syncHiveCommunities } = require('./services/communitySync');
@@ -117,12 +117,15 @@ app.use('/', promoteRoutes);
 app.use('/', shortsRoutes);
 app.use('/audio/listen', require('./routes/audioListen')); // listening time for all audio, like video watch time
 app.use('/audio', audioRoutes);
+app.use('/sounds', require('./routes/sounds')); // sound pages: a sound and the Shorts using it (before the streamStats gate)
+app.use('/feeds', require('./routes/continueWatching')); // POST /feeds/continue-watching (+ /hide), the home strip
 app.use('/feeds', feedsRoutes);
 app.use('/feeds', watchedFeedRoutes);              // /feeds/watched/:username (history as cards)
 app.use('/rss', rssRoutes);
 app.use('/client-errors', require('./routes/clientErrors')); // frontend route-error reports (before the streamStats gate)
 app.use('/verify', verifyRoutes);
 app.use('/scheduled-posts', scheduledPostsRoutes);
+app.use('/premieres', require('./routes/premieres')); // premiere countdown, Notify me, live chat; before the streamStats gate
 app.use('/', communitiesRoutes);
 app.use('/', analyticsRoutes);
 app.use('/', require('./routes/galaxy')); // galaxy follow graph from HafSQL; before the streamStats gate
@@ -144,6 +147,12 @@ app.use('/', subtitleEditRoutes);          // author caption edits; same orderin
 app.use('/', require('./routes/commentPins')); // author pins comments on own video; same ordering rule
 app.use('/podcasts', require('./routes/podcasts')); // outside podcast feeds (External on /audio); same ordering rule (before streamStats)
 app.use('/', require('./routes/supports'));    // every tip on a video (profile Supporters); same ordering rule
+app.use('/', require('./routes/cardReach'));   // cards seen / opened per surface, creator stats reach; same ordering rule
+app.use('/', require('./routes/commentInbox')); // creator comment inbox (vouched); same ordering rule
+app.use('/', require('./routes/clipIdeas'));  // Shorts from this video: clip ranges for the owner (vouched); same ordering rule
+app.use('/', require('./routes/creatorEarnings')); // creator earnings per day and source; same ordering rule
+app.use('/', require('./routes/curation'));    // GET /curation/:user, the curator page; same ordering rule
+app.use('/', require('./routes/boosts'));      // GET /boosts/:author/:permlink, a post's boost wall; same ordering rule
 app.use('/advertise', advertiseRoutes);   // same reason as above: must precede streamStatsRoutes
 app.use('/advertise', adCampaignRoutes);  // booking + payment, same mount, same ordering rule
 app.use('/advertise', adSelfPromoRoutes); // a creator promoting their OWN video, same mount
@@ -158,6 +167,9 @@ app.use('/badges', badgeRoutes);          // same ordering rule as above
 app.use('/', announcementRoutes);         // same ordering rule as above
 app.use('/', require('./routes/stories')); // 24h stories row + follower notifications; same ordering rule
 app.use('/pulse', require('./routes/pulse')); // Video Pulse hot set (#93); same ordering rule
+app.use('/', require('./routes/polls'));   // poll votes on community snaps (one per account); same ordering rule
+app.use('/', require('./routes/collabs')); // collab post invites (accept / decline); same ordering rule
+app.use('/', require('./routes/notify'));  // per-creator notification levels + the bell's "went live" feed; same ordering rule
 app.use('/', streamStatsRoutes);
 
 // Last: any error a route did not answer itself becomes a JSON 500.
@@ -481,6 +493,15 @@ async function startServer() {
         console.log('Push notifications disabled (no VAPID keys)');
     }
 
+    // "Went live" notifications: polls the streaming servers' public /streams,
+    // records each stream that went live, pushes it to followers. One row per
+    // stream, so it writes shared data: background-jobs instance only.
+    if (LIVE_NOTIFY_ENABLED) require('./services/liveNotify').schedule();
+
+    // Premiere reminders: a web push to each viewer who pressed "Notify me", once,
+    // when the premiere starts. Marks shared rows: background-jobs instance only.
+    require('./services/premiereNotify').schedule();
+
     // Ad inventory forecast. Reads only aggregate watch data and writes one cached
     // document; cheap enough to run on the main thread, unlike the retention worker.
     if (AD_INVENTORY_ENABLED) {
@@ -567,6 +588,14 @@ async function startServer() {
     // stamp them into video-comment-counts, so the feeds can apply a comment boost
     // cheaply. In-process (network I/O, not CPU) — see services/commentCounts.js.
     scheduleCommentCounts();
+
+    // Continue watching: copy opted-in viewers' player sessions into viewer_progress
+    // before they expire. See services/viewerProgress.js.
+    require('./services/viewerProgress').scheduleViewerProgress();
+
+    // Sound pages: which Shorts use which sound (json_metadata.video.sound, remixes,
+    // else the Short's own audio), backfilled and kept current. See services/soundIndex.js.
+    if (require('./utils/config').SOUND_INDEX_ENABLED) require('./services/soundIndex').scheduleSoundIndex();
 
     listen();
 }

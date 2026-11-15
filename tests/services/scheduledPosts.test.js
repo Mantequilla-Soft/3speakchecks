@@ -101,6 +101,19 @@ describe('publishing only what is due', () => {
     expect((await byPermlink('later')).status).toBe('posted');
   });
 
+  test('a premiere goes out a cron interval early, so its video is ready when the countdown ends', async () => {
+    const { PREMIERE_PUBLISH_LEAD_MIN } = require('../../utils/config');
+    await posts().insertOne(post('premiere', { premiere: true, scheduledOn: ahead((PREMIERE_PUBLISH_LEAD_MIN - 1) * MINUTE) }));
+    await posts().insertOne(post('plain', { scheduledOn: ahead((PREMIERE_PUBLISH_LEAD_MIN - 1) * MINUTE) }));
+    await posts().insertOne(post('far', { premiere: true, scheduledOn: ahead((PREMIERE_PUBLISH_LEAD_MIN + 1) * MINUTE) }));
+
+    await scheduled.runOnce();
+
+    expect((await byPermlink('premiere')).status).toBe('posted');
+    expect((await byPermlink('plain')).status).toBe('scheduled');
+    expect((await byPermlink('far')).status).toBe('scheduled');
+  });
+
   test('due posts go out oldest first, at most ten per tick', async () => {
     await posts().insertMany(Array.from({ length: 12 }, (_, i) => post(`p${String(i).padStart(2, '0')}`, {
       scheduledOn: ago((20 - i) * MINUTE),
@@ -313,6 +326,18 @@ describe('after the broadcast', () => {
 
     expect(await db().collection('ad_video_optouts').findOne({ _id: 'alice/noads' }))
       .toMatchObject({ owner: 'alice', permlink: 'noads', mode: 'off', hiveAuthor: 'alice' });
+  });
+
+  test('a collaborator in the metadata gets a pending collab invite with its beneficiary weight', async () => {
+    await posts().insertOne(post('collab', {
+      jsonMetadata: { app: '3speak/embed', collaborators: ['fan'] },
+      beneficiaries: [{ account: 'fan', weight: 4450 }],
+    }));
+
+    await scheduled.runOnce();
+
+    expect(await db().collection('collabs').findOne({ _id: 'alice/collab|fan' }))
+      .toMatchObject({ status: 'pending', author: 'alice', collaborator: 'fan', weight: 4450 });
   });
 });
 

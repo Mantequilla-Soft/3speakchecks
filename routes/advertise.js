@@ -55,6 +55,7 @@ const {
   AD_CREATOR_PREFS_COLLECTION,
   AD_VIEWER_PREFS_COLLECTION,
   AD_VIEWER_WATCH_COLLECTION,
+  VIEWER_PROGRESS_COLLECTION,
   AD_LISTENER_LISTEN_COLLECTION,
   HIVE_AUTH_REQUIRED,
   SIGNATURE_TIMESTAMP_TOLERANCE_MS,
@@ -1243,6 +1244,8 @@ router.post('/viewer/prefs', featureVisible, express.json({ limit: '8kb' }), asy
     if (!rewardsEnabled) {
       const r = await getDb().collection(AD_VIEWER_WATCH_COLLECTION).deleteMany({ viewer: name });
       removed = r.deletedCount || 0;
+      // Continue watching rows exist under the same consent, so they go too.
+      await getDb().collection(VIEWER_PROGRESS_COLLECTION).deleteMany({ viewer: name });
     }
 
     res.json({ success: true, account: name, rewardsEnabled, decided: true, removedWatchRows: removed });

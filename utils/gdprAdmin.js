@@ -28,11 +28,18 @@ const OWNED = [
   // has to reach it, and the opt-in row that authorised it, or we would be holding
   // identified watch data for someone who asked to be forgotten.
   { coll: 'ad_viewer_watch', field: 'viewer' },
+  // Continue watching: where they left each video, under the same opt-in.
+  { coll: 'viewer_progress', field: 'viewer' },
+  // Sound pages: each Short's sound, under its Hive author (public post data, rebuilt from Hive).
+  { coll: 'sound_uses', field: 'author' },
   { coll: 'ad_viewer_prefs', field: '_id' },
   // Listener rewards: listening tied to a name, only for people who agreed.
   { coll: 'ad_listener_listen', field: 'listener' },
   { coll: 'podcastsettings', field: 'owner' },
   { coll: 'scheduled-posts', field: 'owner' },
+  // Premieres: chat messages sent in one, and "Notify me" reminders (services/premieres.js).
+  { coll: 'premiere_chat', field: 'user' },
+  { coll: 'premiere_reminders', field: 'user' },
   { coll: 'audio-listen-log', field: 'username' },
   { coll: 'hiveprofiles', field: 'username' },
   { coll: 'users', field: 'username' },
@@ -48,6 +55,16 @@ const OWNED = [
   // personal token) and how far it listened (services/podcastFeeds.js).
   { coll: 'podcast_subs', field: 'user' },
   { coll: 'podcast_progress', field: 'user' },
+  // Comment inbox: which comments on their content a creator marked done.
+  { coll: 'comment_inbox_done', field: 'user' },
+  // Social: per-creator notification levels (utils/notifyLevels.js), poll votes
+  // (routes/polls.js) and collab invites, both sides (routes/collabs.js).
+  { coll: 'notify_levels', field: 'user' },
+  { coll: 'poll_votes', field: 'voter' },
+  { coll: 'collabs', field: 'collaborator' },
+  { coll: 'collabs', field: 'author' },
+  // "Your stream clips are ready" notices (services/streamClipNotices.js).
+  { coll: 'stream_clip_notices', field: 'user' },
 ];
 // watch_history keys by a compound _id "user:owner:permlink" — matched by prefix.
 const WATCH_HISTORY = 'watch_history';

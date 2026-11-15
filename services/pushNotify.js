@@ -13,6 +13,7 @@
 const { getDb } = require('../utils/db');
 const { getFollowingList } = require('../utils/hive');
 const push = require('../utils/webPush');
+const { getLevelsFor, levelOf, levelAllows } = require('../utils/notifyLevels');
 
 const STATE_COLLECTION = 'push-state';
 const STATE_ID = 'new-uploads';
@@ -123,10 +124,15 @@ async function runOnce() {
   let sent = 0;
   if (items.length) {
     const subscribers = await push.listSubscribers();
+    // Per-creator levels (All / Highlights / Off) narrow it further: Highlights
+    // drops shorts, Off drops the creator altogether.
+    const levels = await getLevelsFor(subscribers);
     for (const username of subscribers) {
       const [following, prefs] = await Promise.all([followingOf(username), push.getPrefs(username)]);
+      const mine = levels.get(username);
       const theirs = items
         .filter((i) => prefs[i.kind] !== false && following.has(i.author))
+        .filter((i) => levelAllows(levelOf(mine, i.author), i.kind))
         .slice(0, MAX_PER_SUBSCRIBER);
       for (const item of theirs) {
         const res = await push.sendToUser(username, {
@@ -151,4 +157,4 @@ async function runOnce() {
   return { candidates: items.length, sent };
 }
 
-module.exports = { runOnce };
+module.exports = { runOnce, followingOf };

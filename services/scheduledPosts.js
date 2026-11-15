@@ -17,7 +17,7 @@
 const { Client, PrivateKey } = require('@hiveio/dhive');
 const { ObjectId } = require('mongodb');
 const { getDb } = require('../utils/db');
-const { HIVE_RPC_ENDPOINTS } = require('../utils/config');
+const { HIVE_RPC_ENDPOINTS, PREMIERE_PUBLISH_LEAD_MIN } = require('../utils/config');
 const { hiveRpcBatch } = require('../utils/hive');
 const { applyVideoAdFlag } = require('../utils/videoAdOptOut');
 
@@ -128,7 +128,54 @@ function buildOperations(doc) {
         },
     ]);
 
+    // An audio post headed for one of the owner's playlists: the same op the
+    // uploader puts in its own transaction (3speak.tv AudioUploadModal playlistAddOp).
+    const pa = doc.playlistAdd;
+    if (pa && typeof pa.playlist_id === 'string' && pa.playlist_id) {
+        ops.push([
+            'custom_json',
+            {
+                required_auths: [],
+                required_posting_auths: [doc.owner],
+                id: '3speak_playlist_add',
+                json: JSON.stringify({
+                    playlist_id: pa.playlist_id,
+                    author: doc.owner,
+                    permlink: doc.permlink,
+                    position: Number.isInteger(pa.position) ? pa.position : 0,
+                }),
+            },
+        ]);
+    }
+
     return ops;
+}
+
+/**
+ * A scheduled AUDIO post is out: point its upload (embed-audio, by the uploader's
+ * own permlink) at the post, as the uploader's link call does for one published
+ * at once, and show it again (it was held back as "scheduled" while it waited).
+ * Only a row of the same owner that is not linked to another post yet.
+ * Non-fatal, but logged: nothing else links it later.
+ */
+async function linkAudioToHivePost(doc) {
+    if (!doc.audioPermlink) return;
+    try {
+        // routes/scheduledPosts.js held it back as "scheduled" until now.
+        const r = await getDb().collection('embed-audio').updateOne(
+            {
+                owner: doc.owner,
+                permlink: doc.audioPermlink,
+                status: { $in: ['scheduled', 'published'] },
+                $or: [{ post_permlink: null }, { post_permlink: '' }, { post_permlink: { $exists: false } }, { post_permlink: doc.permlink }],
+            },
+            { $set: { post_permlink: doc.permlink, post_author: doc.owner, status: 'published' }, $unset: { scheduled_post: '' } },
+        );
+        if (r.matchedCount) console.log(`[scheduledPosts] linked audio ${doc.audioPermlink} -> @${doc.owner}/${doc.permlink}`);
+        else console.warn(`[scheduledPosts] audio ${doc.audioPermlink} of @${doc.owner} not found or linked elsewhere`);
+    } catch (err) {
+        console.warn(`[scheduledPosts] audio link failed for ${doc.owner}/${doc.permlink}:`, err.message || err);
+    }
 }
 
 async function broadcastPost(doc) {
@@ -234,10 +281,17 @@ async function claimNextDuePost(coll, skipIds = []) {
     // are due (scheduledOn elapsed), still under the attempt cap, AND have non-empty
     // string owner/permlink. The owner/permlink check is defense-in-depth so a
     // malformed doc can never become a broadcast op.
+    // A premiere goes out PREMIERE_PUBLISH_LEAD_MIN early: its countdown runs to
+    // scheduledOn on the watch page, and the video has to be linked and playable
+    // by then, not up to one cron interval later (services/premieres.js).
+    const premiereDue = new Date(now.getTime() + PREMIERE_PUBLISH_LEAD_MIN * 60 * 1000);
     const res = await coll.findOneAndUpdate(
         {
             status: 'scheduled',
-            scheduledOn: { $lte: now },
+            $or: [
+                { scheduledOn: { $lte: now } },
+                { premiere: true, scheduledOn: { $lte: premiereDue } },
+            ],
             attempts: { $lt: MAX_ATTEMPTS },
             owner: { $type: 'string', $ne: '' },
             permlink: { $type: 'string', $ne: '' },
@@ -391,6 +445,7 @@ async function earlierAttemptLanded(doc) {
  */
 async function afterPosted(doc) {
     await linkEmbedVideoToHivePost(doc);
+    await linkAudioToHivePost(doc);
     await reblogToBlog(doc);
     // Per-video ad opt-out. The uploader cannot sync this one itself, the post
     // did not exist yet. Taken from the metadata just broadcast rather than
@@ -399,6 +454,16 @@ async function afterPosted(doc) {
         await applyVideoAdFlag(doc.owner, doc.permlink, doc.jsonMetadata);
     } catch (flagErr) {
         console.error(`[scheduledPosts] video ad flag failed for ${doc.owner}/${doc.permlink}:`, flagErr && flagErr.message);
+    }    // Collab invites (routes/collabs.js): from the metadata just broadcast, as
+    // above, with the beneficiaries this post carries. Never fails the post.
+    try {
+        const benes = ((doc.beneficiaries) || []).map((b) => ({ account: b.account, weight: b.weight }));
+        const meta = typeof doc.jsonMetadata === 'string' ? doc.jsonMetadata : JSON.stringify(doc.jsonMetadata || {});
+        await require('../routes/collabs').registerFromPost({
+            author: doc.owner, permlink: doc.permlink, title: doc.title, json_metadata: meta, beneficiaries: benes,
+        });
+    } catch (collabErr) {
+        console.error(`[scheduledPosts] collab invites failed for ${doc.owner}/${doc.permlink}:`, collabErr && collabErr.message);
     }
 }
 
@@ -660,4 +725,4 @@ function schedule() {
     }, 30 * 1000);
 }
 
-module.exports = { schedule, runOnce, COLLECTION, hasThreespeakPostingAuthority, requeueStuckPosts, isPostOnChain };
+module.exports = { schedule, runOnce, COLLECTION, hasThreespeakPostingAuthority, requeueStuckPosts, isPostOnChain, buildOperations };

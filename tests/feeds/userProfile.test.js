@@ -320,8 +320,19 @@ describe('POST /check-hidden', () => {
   test('answers which of the named accounts are hidden creators', async () => {
     await F.hideCreator(db(), 'hush');
     const res = await request(app).post('/check-hidden').send({ usernames: ['fine', 'HUSH', null] }).expect(200);
-    expect(res.body).toEqual({ hidden: ['hush'] });
-    expect((await request(app).post('/check-hidden').send({}).expect(200)).body).toEqual({ hidden: [] });
+    expect(res.body).toEqual({ hidden: ['hush'], muted: [] });
+    expect((await request(app).post('/check-hidden').send({}).expect(200)).body).toEqual({ hidden: [], muted: [] });
+  });
+
+  test('also answers which are on the comment mutelist (repo list + comment_mutes), hidden unchanged', async () => {
+    require('../../utils/commentMutes')._test.reset();
+    await F.hideCreator(db(), 'hush');
+    await db().collection('comment_mutes').insertOne({ _id: 'spambot', reason: 'bot', at: new Date() });
+    const res = await request(app).post('/check-hidden')
+      .send({ usernames: ['fan', 'AI-Agent-Hunter', 'spambot', 'hush', 'badadib'] }).expect(200);
+    expect(res.body.hidden).toEqual(['hush']);
+    expect(res.body.muted.sort()).toEqual(['ai-agent-hunter', 'spambot']);
+    require('../../utils/commentMutes')._test.reset();
   });
 });
 
