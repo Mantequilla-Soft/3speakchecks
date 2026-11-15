@@ -114,6 +114,26 @@ async function findPremiere(owner, permlink, now = Date.now()) {
   return publicShape(doc, media.get(keyOf(owner, permlink)), now);
 }
 
+// The chat is polled every few seconds by everyone watching, so its premiere
+// lookups share one read per video for a few seconds (the state itself is
+// recomputed from the clock on every call).
+const CACHE_MS = 5000;
+const cache = new Map();
+async function findPremiereCached(owner, permlink, now = Date.now()) {
+  const key = keyOf(owner, permlink);
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < CACHE_MS) return hit.doc ? publicShape(hit.doc, hit.media, now) : null;
+  const doc = await POSTS().findOne(
+    { owner, permlink, premiere: true, status: { $in: LISTED } },
+    { projection: { owner: 1, permlink: 1, title: 1, thumbnail: 1, scheduledOn: 1, embedPermlink: 1 } },
+  );
+  const media = doc ? (await durationsFor([doc])).get(key) : null;
+  cache.set(key, { doc, media, at: Date.now() });
+  if (cache.size > 2000) cache.delete(cache.keys().next().value);
+  return doc ? publicShape(doc, media, now) : null;
+}
+const clearCache = () => cache.clear();
+
 /** Premieres not over yet (upcoming or live), soonest first; one creator's with `owner`. */
 async function listOpen({ owner = null, limit = 12, now = Date.now() } = {}) {
   const q = {
@@ -253,6 +273,8 @@ module.exports = {
   windowOf,
   publicShape,
   findPremiere,
+  findPremiereCached,
+  clearCache,
   listOpen,
   reminderInfo,
   setReminder,

@@ -133,7 +133,7 @@ router.get('/:owner/:permlink/chat', async (req, res) => {
   if (!v) return undefined;
   const after = Math.max(0, parseInt(asText(req.query.after), 10) || 0);
   try {
-    const p = await premieres.findPremiere(v.owner, v.permlink);
+    const p = await premieres.findPremiereCached(v.owner, v.permlink);
     if (!p) return res.status(404).json({ success: false, error: 'not a premiere' });
     const { messages, removed } = await premieres.chatSince(v.owner, v.permlink, after);
     res.set('Cache-Control', p.state === 'ended' ? 'public, max-age=60' : 'no-store');
@@ -159,7 +159,7 @@ router.post('/:owner/:permlink/chat', express.json({ limit: '4kb' }), async (req
     return res.status(429).json({ success: false, error: 'slow down' });
   }
   try {
-    const p = await premieres.findPremiere(v.owner, v.permlink, now);
+    const p = await premieres.findPremiereCached(v.owner, v.permlink, now);
     if (!p) return res.status(404).json({ success: false, error: 'not a premiere' });
     if (p.state !== 'live') return res.status(409).json({ success: false, error: p.state === 'upcoming' ? 'not started' : 'chat closed' });
     lastMessageAt.set(user, now);

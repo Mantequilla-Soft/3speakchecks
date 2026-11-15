@@ -31,7 +31,7 @@ const video = (permlink, duration) => db().collection('embed-video').insertOne({
   owner: 'badadib', permlink: `asset-${permlink}`, duration, status: 'published',
 });
 
-beforeEach(() => pinClock());
+beforeEach(() => { pinClock(); premieres.clearCache(); });
 afterEach(() => jest.useRealTimers());
 
 describe('one premiere', () => {
@@ -227,10 +227,45 @@ describe('the chat', () => {
   });
 });
 
+describe('the chat\'s premiere lookups', () => {
+  test('share one read for a few seconds, then read again', async () => {
+    await seed('k1', { scheduledOn: at(-MIN), status: 'posted' });
+    const first = await premieres.findPremiereCached('badadib', 'k1');
+    expect(first.state).toBe('live');
+    await db().collection('scheduled-posts').updateOne({ permlink: 'k1' }, { $set: { title: 'Renamed' } });
+    expect((await premieres.findPremiereCached('badadib', 'k1')).title).toBe('Premiere k1');
+    jest.setSystemTime(Date.now() + 6000);
+    expect((await premieres.findPremiereCached('badadib', 'k1')).title).toBe('Renamed');
+    expect(await premieres.findPremiereCached('badadib', 'none')).toBeNull();
+  });
+});
+
 describe('scheduled posts carry the opt-in', () => {
   test('windowOf with no known length uses the default length', () => {
     const w = premieres.windowOf(NOW, 0, NOW.getTime());
     expect(w.state).toBe('live');
     expect(w.chatUntil - w.start).toBeGreaterThan(PREMIERE_GRACE_MIN * MIN);
+  });
+});
+
+describe('a database failure is a 500, never a crash', () => {
+  test.each([
+    ['get', '/premieres/upcoming', null],
+    ['get', '/premieres/badadib/x', null],
+    ['get', '/premieres/badadib/x/chat', null],
+    ['post', '/premieres/reminders', {}],
+    ['post', '/premieres/badadib/x/remind', {}],
+    ['post', '/premieres/badadib/x/chat', { text: 'hi' }],
+    ['post', '/premieres/badadib/x/chat/remove', { id: '0123456789abcdef01234567' }],
+  ])('%s %s', async (method, path, body) => {
+    const { Collection } = require('mongodb');
+    for (const fn of ['find', 'findOne', 'updateOne', 'countDocuments']) {
+      jest.spyOn(Collection.prototype, fn).mockImplementation(() => { throw new Error('down'); });
+    }
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    jest.setSystemTime(Date.now() + 60 * 1000);
+    const req = request(app)[method](path);
+    const res = body ? await req.send({ ...vouch(`err${path.length}`), ...body }) : await req;
+    expect(res.status).toBe(500);
   });
 });
