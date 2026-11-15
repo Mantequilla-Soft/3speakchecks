@@ -13,6 +13,7 @@ const dhive = require('@hiveio/dhive');
 const { getDb } = require('../utils/db');
 const { HIVE_RPC_ENDPOINTS } = require('../utils/config');
 const { getFollowingList, fetchFollowerCounts } = require('../utils/hive');
+const { parsePoll } = require('../utils/polls');
 
 const router = express.Router();
 const client = new dhive.Client(HIVE_RPC_ENDPOINTS);
@@ -140,7 +141,15 @@ router.post('/snaps', async (req, res) => {
       created: post.created ? new Date(`${post.created}Z`) : new Date(),
       indexedAt: new Date(),
     };
-    await getDb().collection(COLLECTION).updateOne({ _id }, { $set: doc }, { upsert: true });
+    // A poll (utils/polls.js) is fixed when the snap is first indexed: an edit
+    // that changes the options after people voted must not move their votes.
+    const poll = parsePoll(meta, doc.created);
+    const update = poll ? { $set: doc, $setOnInsert: { poll } } : { $set: doc };
+    await getDb().collection(COLLECTION).updateOne({ _id }, update, { upsert: true });
+    if (poll) {
+      const stored = await getDb().collection(COLLECTION).findOne({ _id }, { projection: { poll: 1 } });
+      if (stored && stored.poll) doc.poll = stored.poll;
+    }
     dropCache(SNAPS_KEY);      // a new snap must appear immediately, not in a minute
     res.json({ success: true, snap: { _id, ...doc } });
   } catch (err) {
