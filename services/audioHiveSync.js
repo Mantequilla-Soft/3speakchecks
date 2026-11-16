@@ -259,6 +259,7 @@ async function syncAudioHiveLinks() {
 const TITLE_BATCH_SIZE = 200;
 const TITLE_RECHECK_MS = 60 * 60 * 1000;
 const TITLE_RECENT_MS = 7 * 24 * 60 * 60 * 1000;
+const TITLE_PROJECTION = { owner: 1, post_author: 1, post_permlink: 1, title: 1, upload_title: 1 };
 
 async function syncAudioPostTitles(now = new Date()) {
     const audioCol = getDb().collection('embed-audio');
@@ -272,7 +273,7 @@ async function syncAudioPostTitles(now = new Date()) {
                 hive_title_checked_at: { $lt: new Date(now.getTime() - TITLE_RECHECK_MS) },
             },
         ],
-    }, { projection: { owner: 1, post_author: 1, post_permlink: 1, title: 1, upload_title: 1 } })
+    }, { projection: TITLE_PROJECTION })
         .sort({ createdAt: -1 })
         .limit(TITLE_BATCH_SIZE)
         .toArray();
@@ -280,30 +281,58 @@ async function syncAudioPostTitles(now = new Date()) {
     let retitled = 0;
     let errors = 0;
     for (const row of rows) {
-        let post;
-        try {
-            post = await hiveRpc('condenser_api.get_content', [row.post_author || row.owner, row.post_permlink]);
-        } catch {
-            errors++; // a failed read is retried next run, never stamped as checked
-            continue;
-        }
-        const $set = { hive_title_checked_at: now };
-        const $unset = {};
-        if (post && post.author) numbersUpdate(post.json_metadata, $set, $unset);
-        const title = post && post.author ? String(post.title || '').trim() : '';
-        if (title) {
-            $set.hive_title = title;
-            if (title !== row.title) {
-                $set.title = title;
-                if (row.upload_title === undefined) $set.upload_title = row.title ?? null;
-                retitled++;
-            }
-        }
-        const update = Object.keys($unset).length ? { $set, $unset } : { $set };
-        if (ENABLE_MONGO_WRITES) await audioCol.updateOne({ _id: row._id }, update);
+        const r = await readPostTitle(audioCol, row, now);
+        if (r === 'error') errors++;
+        if (r === 'retitled') retitled++;
     }
     if (rows.length) console.log(`[audioHiveSync] Titles: ${rows.length} checked, ${retitled} retitled, ${errors} errors`);
     return { checked: rows.length, retitled, errors };
 }
 
-module.exports = { syncAudioHiveLinks, syncAudioPostTitles };
+// One row against its linked post: 'retitled', 'checked' or 'error'.
+async function readPostTitle(audioCol, row, now) {
+    let post;
+    try {
+        post = await hiveRpc('condenser_api.get_content', [row.post_author || row.owner, row.post_permlink]);
+    } catch {
+        return 'error'; // a failed read is retried next run, never stamped as checked
+    }
+    const $set = { hive_title_checked_at: now };
+    const $unset = {};
+    let result = 'checked';
+    if (post && post.author) numbersUpdate(post.json_metadata, $set, $unset);
+    const title = post && post.author ? String(post.title || '').trim() : '';
+    if (title) {
+        $set.hive_title = title;
+        if (title !== row.title) {
+            $set.title = title;
+            if (row.upload_title === undefined) $set.upload_title = row.title ?? null;
+            result = 'retitled';
+        }
+    }
+    const update = Object.keys($unset).length ? { $set, $unset } : { $set };
+    if (ENABLE_MONGO_WRITES) await audioCol.updateOne({ _id: row._id }, update);
+    return result;
+}
+
+// The audio edit dialog calls this right after an edit (POST /audio/resync), so
+// a retitled episode of any age reaches cards, search and RSS at once instead of
+// only in its first week. It reads the title from Hive, never from the caller.
+async function resyncAudioPost(author, permlink, now = new Date()) {
+    const audioCol = getDb().collection('embed-audio');
+    const rows = await audioCol.find({
+        status: 'published',
+        post_permlink: permlink,
+        $or: [{ post_author: author }, { post_author: { $in: [null, ''] }, owner: author }],
+    }, { projection: TITLE_PROJECTION }).limit(5).toArray();
+    let retitled = 0;
+    let errors = 0;
+    for (const row of rows) {
+        const r = await readPostTitle(audioCol, row, now);
+        if (r === 'error') errors++;
+        if (r === 'retitled') retitled++;
+    }
+    return { checked: rows.length, retitled, errors };
+}
+
+module.exports = { syncAudioHiveLinks, syncAudioPostTitles, resyncAudioPost };
