@@ -5,11 +5,18 @@
  * posts they voted on (their "picks"), the curation rewards those votes paid, and
  * a "found it early" badge where their vote came before the crowd.
  *
- * Everything is public Hive data, so there is no sign-in: votes and rewards come
- * from the account's own history (`vote` ops it cast, `curation_reward` virtual ops
- * it received), the post's votes from get_active_votes, and "is this a 3Speak post"
- * from our own collections (embed-video, legacy videos, embed-audio). Posts of
- * hidden or reward-blocked creators are left out.
+ * Votes and rewards come from the account's own Hive history (`vote` ops it cast,
+ * `curation_reward` virtual ops it received), the post's votes from
+ * get_active_votes, and "is this a 3Speak post" from our own collections
+ * (embed-video, legacy videos, embed-audio). Posts of hidden or reward-blocked
+ * creators are left out.
+ *
+ * Only votes CAST ON 3SPEAK count: a Hive vote carries no app, so the frontend
+ * reports each vote it broadcasts (POST /curation/vote, with the voter's session
+ * vouch, utils/progressVouch.js) and we keep that in CURATION_VOTES_COLLECTION.
+ * A post shows only when both agree: the report (it was cast here) and the
+ * chain history (it is really there, at that weight). Nothing before the
+ * reports started counts, so a curator page fills from then on.
  *
  * Found it early (documented for the page): the votes cast BEFORE yours carried at
  * most CURATION_EARLY_SHARE (10%) of the post's total upvote weight (rshares), and
@@ -26,6 +33,7 @@ const rateLimit = require('express-rate-limit');
 const { getDb } = require('../utils/db');
 const { historySince, hiveRpcBatch } = require('../utils/hive');
 const { isHiddenSync } = require('../utils/hiddenCreators');
+const { proveProgressUser } = require('../utils/progressVouch');
 const {
   CURATION_DAYS, CURATION_CACHE_MIN, CURATION_MAX_PICKS, CURATION_EARLY_SHARE, CURATION_EARLY_MIN_VOTES,
   AD_REWARD_FLAG_COLLECTION,
@@ -39,9 +47,42 @@ const VOTE_FILTER = 1; // op 0
 const CURATION_FILTER = 2 ** 52; // virtual op 52
 const VOTES_BATCH = 20;
 const CACHE_MAX = 500;
+const PERMLINK_RE = /^[a-z0-9-]{1,255}$/;
+// Votes cast on 3Speak (POST /curation/vote): { voter, author, permlink, weight, at }.
+const CURATION_VOTES_COLLECTION = 'curation-site-votes';
+// Kept a while past the page's window, so a reward paid a week after the vote
+// still finds its vote.
+const SITE_VOTE_KEEP_S = (CURATION_DAYS + 14) * 24 * 3600;
 
 const tsMs = (raw) => Date.parse(/Z$/.test(raw) ? raw : `${raw}Z`);
 const key = (author, permlink) => `${author}/${permlink}`;
+
+// A busy curator votes fast: room for that, still a cap per IP.
+const voteLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: false,
+  legacyHeaders: false,
+  message: { success: false, error: 'Too many requests' },
+});
+
+let indexesReady = null;
+function siteVotes(db) {
+  const coll = db.collection(CURATION_VOTES_COLLECTION);
+  if (!indexesReady) {
+    indexesReady = (async () => {
+      await coll.createIndex({ voter: 1, author: 1, permlink: 1 }, { unique: true });
+      await coll.createIndex({ at: 1 }, { expireAfterSeconds: SITE_VOTE_KEEP_S });
+    })().catch((err) => { indexesReady = null; console.error('[curation] indexes:', err && err.message); });
+  }
+  return coll;
+}
+
+/** The posts this account voted on while on 3Speak: Set of 'author/permlink'. */
+async function siteVoteKeys(db, user) {
+  const rows = await siteVotes(db).find({ voter: user }, { projection: { author: 1, permlink: 1 } }).toArray();
+  return new Set(rows.map((r) => key(r.author, r.permlink)));
+}
 
 const limiter = rateLimit({
   windowMs: 60 * 1000,
@@ -199,6 +240,10 @@ async function build(user, now = Date.now()) {
   ]);
   const votes = votesFrom(voteEntries, user, sinceMs);
   const rewards = rewardsFrom(rewardEntries, user, sinceMs);
+  // Only what was voted on 3Speak (see the top of this file).
+  const site = await siteVoteKeys(getDb(), user);
+  for (const k of [...votes.keys()]) if (!site.has(k)) votes.delete(k);
+  for (const k of [...rewards.keys()]) if (!site.has(k)) rewards.delete(k);
 
   const all = new Map();
   for (const [k, v] of votes) all.set(k, { author: v.author, permlink: v.permlink });
@@ -283,5 +328,31 @@ router.get('/curation/:user', limiter, async (req, res) => {
   }
 });
 
+// POST /curation/vote { user, signature, timestamp, author, permlink, weight }:
+// the frontend reports a vote it just broadcast for `user` (the session vouch
+// proves who is asking). An upvote is kept, an unvote or downvote (weight <= 0)
+// removes the post. The page re-reads on its next visit.
+router.post('/curation/vote', voteLimiter, async (req, res) => {
+  const voter = await proveProgressUser(req.body || {});
+  if (!voter) return res.status(401).json({ success: false, error: 'Not signed in' });
+  const author = String(req.body.author || '').trim().toLowerCase();
+  const permlink = String(req.body.permlink || '').trim().toLowerCase();
+  const weight = Number(req.body.weight);
+  if (!ACCOUNT_RE.test(author) || !PERMLINK_RE.test(permlink) || !Number.isInteger(weight) || Math.abs(weight) > 10000) {
+    return res.status(400).json({ success: false, error: 'Invalid vote' });
+  }
+  try {
+    const coll = siteVotes(getDb());
+    const q = { voter, author, permlink };
+    if (weight > 0) await coll.updateOne(q, { $set: { weight, at: new Date() } }, { upsert: true });
+    else await coll.deleteOne(q);
+    cache.delete(voter);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[curation] vote record failed:', err && err.message);
+    res.status(500).json({ success: false, error: 'Could not record the vote' });
+  }
+});
+
 module.exports = router;
-module.exports._test = { votesFrom, rewardsFrom, standing, threeSpeakPosts, build, cache };
+module.exports._test = { votesFrom, rewardsFrom, standing, threeSpeakPosts, build, cache, siteVoteKeys, CURATION_VOTES_COLLECTION };

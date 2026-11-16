@@ -5,9 +5,11 @@
 jest.mock('../utils/db', () => ({ getDb: jest.fn() }));
 jest.mock('../utils/hive', () => ({ historySince: jest.fn(), hiveRpcBatch: jest.fn() }));
 jest.mock('../utils/hiddenCreators', () => ({ isHiddenSync: jest.fn((u) => u === 'hiddenone') }));
+jest.mock('../utils/progressVouch', () => ({ proveProgressUser: jest.fn() }));
 const express = require('express');
 const request = require('supertest');
 const { getDb } = require('../utils/db');
+const { proveProgressUser } = require('../utils/progressVouch');
 const { historySince, hiveRpcBatch } = require('../utils/hive');
 const router = require('../routes/curation');
 const { votesFrom, rewardsFrom, standing, cache } = router._test;
@@ -69,8 +71,10 @@ describe('GET /curation/:user', () => {
       videos: [],
       'embed-audio': [{ owner: 'badadib', post_author: 'badadib', post_permlink: 'song', title: 'A song' }],
       contentcreators: [],
+      // Both cast on 3Speak; 'notours' was not.
+      'curation-site-votes': [{ voter: 'fan', author: 'badadib', permlink: 'vid' }, { voter: 'fan', author: 'badadib', permlink: 'song' }],
     };
-    getDb.mockReturnValue({ collection: (n) => ({ find: () => ({ toArray: async () => coll[n] || [] }) }) });
+    getDb.mockReturnValue({ collection: (n) => ({ find: () => ({ toArray: async () => coll[n] || [] }), createIndex: async () => {} }) });
     historySince.mockImplementation(async (account, since, filter) => (filter === 1
       ? [vote('fan', 'badadib', 'vid', 10000, 30 * H), vote('fan', 'badadib', 'song', 2500, 20 * H), vote('fan', 'someone', 'notours', 10000, 10 * H)]
       : [reward('fan', 'badadib', 'vid', '2000.000000', 2 * H)]));
@@ -95,6 +99,20 @@ describe('GET /curation/:user', () => {
     expect(res.body.picks.find((p) => p.permlink === 'notours')).toBeUndefined();
   });
 
+  it('lists only votes cast on 3Speak: a vote from elsewhere and its reward stay out', async () => {
+    getDb.mockReturnValue({ collection: (n) => ({
+      find: () => ({ toArray: async () => ({
+        'embed-video': [{ owner: 'badadib', permlink: 'asset1', hive_author: 'badadib', hive_permlink: 'vid', hive_title: 'My video' }],
+        'embed-audio': [{ owner: 'badadib', post_author: 'badadib', post_permlink: 'song', title: 'A song' }],
+        'curation-site-votes': [{ voter: 'fan', author: 'badadib', permlink: 'song' }],
+      }[n] || []) }),
+      createIndex: async () => {},
+    }) });
+    const res = await request(app).get('/curation/fan');
+    expect(res.body.picks.map((p) => p.permlink)).toEqual(['song']);
+    expect(res.body.totals).toMatchObject({ picks: 1, earnedHp: 0, rewardedPosts: 0 });
+  });
+
   it('caches per account', async () => {
     await request(app).get('/curation/fan');
     await request(app).get('/curation/fan');
@@ -117,5 +135,46 @@ describe('GET /curation/:user', () => {
   it('502 when Hive history fails', async () => {
     historySince.mockRejectedValue(new Error('down'));
     expect((await request(app).get('/curation/fan')).status).toBe(502);
+  });
+});
+
+describe('POST /curation/vote', () => {
+  let app;
+  let updateOne;
+  let deleteOne;
+  beforeEach(() => {
+    cache.clear();
+    jest.clearAllMocks();
+    updateOne = jest.fn(async () => ({}));
+    deleteOne = jest.fn(async () => ({}));
+    getDb.mockReturnValue({ collection: () => ({ updateOne, deleteOne, createIndex: async () => {} }) });
+    app = express();
+    app.use(express.json());
+    app.use('/', router);
+  });
+  const body = (extra = {}) => ({ user: 'fan', signature: 'sig', timestamp: Date.now(), author: 'badadib', permlink: 'vid', weight: 5000, ...extra });
+
+  it('keeps an upvote for the vouched voter', async () => {
+    proveProgressUser.mockResolvedValue('fan');
+    const res = await request(app).post('/curation/vote').send(body());
+    expect(res.status).toBe(200);
+    expect(updateOne).toHaveBeenCalledWith({ voter: 'fan', author: 'badadib', permlink: 'vid' }, { $set: { weight: 5000, at: expect.any(Date) } }, { upsert: true });
+  });
+
+  it('an unvote or downvote takes the post off', async () => {
+    proveProgressUser.mockResolvedValue('fan');
+    await request(app).post('/curation/vote').send(body({ weight: 0 }));
+    await request(app).post('/curation/vote').send(body({ weight: -10000 }));
+    expect(deleteOne).toHaveBeenCalledTimes(2);
+    expect(updateOne).not.toHaveBeenCalled();
+  });
+
+  it('refuses without a session vouch, and a bad vote', async () => {
+    proveProgressUser.mockResolvedValue(null);
+    expect((await request(app).post('/curation/vote').send(body())).status).toBe(401);
+    proveProgressUser.mockResolvedValue('fan');
+    expect((await request(app).post('/curation/vote').send(body({ weight: 20000 }))).status).toBe(400);
+    expect((await request(app).post('/curation/vote').send(body({ permlink: 'Bad Permlink!' }))).status).toBe(400);
+    expect(updateOne).not.toHaveBeenCalled();
   });
 });
