@@ -1078,6 +1078,10 @@ module.exports = {
     // same list the ad gate asks about rooms (utils/liveRoom.js).
     LIVE_STREAMS_API_URLS: String(process.env.LIVE_STREAMS_API_URLS || process.env.LIVE_ROOM_API_URLS || 'https://live.3speak.tv')
         .split(',').map((u) => u.trim().replace(/\/+$/, '')).filter(Boolean),
+    // Hosts whose streams never reach the bell or a push (3speak.tv shows their
+    // streams nowhere either: frontend VITE_FEED_EXCLUDED_HOSTS). Comma list.
+    LIVE_EXCLUDED_HOSTS: String(process.env.LIVE_EXCLUDED_HOSTS ?? 'badadib,ashenadib')
+        .split(',').map((u) => u.trim().toLowerCase()).filter(Boolean),
     // How long a "went live" stays in the bell after it started.
     LIVE_NOTIFY_FEED_HOURS: parseFloat(process.env.LIVE_NOTIFY_FEED_HOURS) || 24,
     // Polls on community snaps: one vote per account (routes/polls.js).

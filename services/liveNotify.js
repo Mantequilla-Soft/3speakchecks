@@ -25,11 +25,14 @@
  * pushes nothing, so a deploy in the middle of a stream does not announce it
  * late; the same goes for a stream seen after a gap (the row already exists).
  *
+ * Hosts in LIVE_EXCLUDED_HOSTS are never recorded, so they reach no bell or push.
+ *
  * Fails quiet: a server that does not answer is skipped for this pass.
  */
 const { getDb } = require('../utils/db');
 const {
   LIVE_EVENTS_COLLECTION, LIVE_EVENTS_TTL_DAYS, LIVE_STREAMS_API_URLS, LIVE_NOTIFY_INTERVAL_SEC,
+  LIVE_EXCLUDED_HOSTS,
 } = require('../utils/config');
 const push = require('../utils/webPush');
 const { followingOf } = require('./pushNotify');
@@ -77,6 +80,7 @@ async function fetchLiveStreams(bases = LIVE_STREAMS_API_URLS) {
       const host = String(s.host || '').toLowerCase();
       const room = String(s.name || '');
       if (!HOST_RE.test(host) || !ROOM_RE.test(room)) continue;
+      if (LIVE_EXCLUDED_HOSTS.includes(host)) continue;
       const key = `${host}/${room}`;
       if (out.has(key)) continue;
       out.set(key, {
