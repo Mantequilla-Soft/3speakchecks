@@ -690,6 +690,18 @@ module.exports = {
     // hidden, banned), keyed by a lowercase `username`.
     AD_REWARD_FLAG_COLLECTION: process.env.AD_REWARD_FLAG_COLLECTION || 'contentcreators',
 
+    // Accounts whose Hive reputation is BELOW this are not paid ad money, in any role
+    // (creator, community, viewer, listener, referrer). Owner 2026-11-18. Read at
+    // settlement time from hivemind (bridge.get_profile), as the human score (25 = new).
+    // ⚠️ `??`, not `||`: an explicitly EMPTY value switches the check off; unset = 15.
+    // A number, not "0 = off", because reputation can be negative.
+    AD_PAYOUT_MIN_REPUTATION: (() => {
+        const raw = (process.env.AD_PAYOUT_MIN_REPUTATION ?? '15').trim();
+        if (raw === '') return null;
+        const n = parseFloat(raw);
+        return Number.isFinite(n) ? n : 15;
+    })(),
+
     // ─── "Follow these" creator suggestions (/feeds/suggested-creators) ───────
     // A who-to-follow rail for the discover / interests feeds: creators who posted
     // interest-matching videos in the last SUGGEST_WINDOW_DAYS, ranked by the
@@ -1078,6 +1090,10 @@ module.exports = {
     // same list the ad gate asks about rooms (utils/liveRoom.js).
     LIVE_STREAMS_API_URLS: String(process.env.LIVE_STREAMS_API_URLS || process.env.LIVE_ROOM_API_URLS || 'https://live.3speak.tv')
         .split(',').map((u) => u.trim().replace(/\/+$/, '')).filter(Boolean),
+    // Hosts whose streams never reach the bell or a push (3speak.tv shows their
+    // streams nowhere either: frontend VITE_FEED_EXCLUDED_HOSTS). Comma list.
+    LIVE_EXCLUDED_HOSTS: String(process.env.LIVE_EXCLUDED_HOSTS ?? 'badadib,ashenadib')
+        .split(',').map((u) => u.trim().toLowerCase()).filter(Boolean),
     // How long a "went live" stays in the bell after it started.
     LIVE_NOTIFY_FEED_HOURS: parseFloat(process.env.LIVE_NOTIFY_FEED_HOURS) || 24,
     // Polls on community snaps: one vote per account (routes/polls.js).

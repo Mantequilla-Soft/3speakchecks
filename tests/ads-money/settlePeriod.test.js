@@ -33,6 +33,8 @@ beforeEach(() => {
 afterEach(() => jest.useRealTimers());
 
 const periodDoc = (key = period.key) => F.cols(db()).periods.findOne({ _id: key });
+// The post lookups only, not the reputation reads rewardBlockedSet also batches.
+const contentCalls = () => hiveRpcBatch.mock.calls.filter(([batch]) => batch[0]?.method === 'condenser_api.get_content');
 
 describe('the defaults this file is written against', () => {
   test('creator 50, viewer 10 (listeners share it), referrer 2, encoder 5, nobody shares with a community', () => {
@@ -40,6 +42,7 @@ describe('the defaults this file is written against', () => {
       .toEqual([50, 10, 2, 5]);
     expect(cfg.AD_DEFAULT_COMMUNITY_PCT).toBe(0);
     expect(cfg.AD_EXCLUDED_ACCOUNTS).toEqual(['badadib']);
+    expect(cfg.AD_PAYOUT_MIN_REPUTATION).toBe(15);
     expect(period).toEqual({
       key: '2026-10-01', start: new Date('2026-10-01T07:00:00Z'), end: new Date('2026-10-04T07:00:00Z'),
     });
@@ -304,7 +307,64 @@ describe('accounts that must not be paid', () => {
     expect((await F.payoutsOf(db(), period.key))['creator-x'].hbd).toBe(25);
     expect(await F.cols(db()).payouts.countDocuments({ kind: 'creator' })).toBe(1);
     // Only the owned video was looked up on chain.
-    expect(hiveRpcBatch.mock.calls.flatMap(([batch]) => batch.map((r) => r.params))).toEqual([['creator-x', 'video']]);
+    expect(contentCalls().flatMap(([batch]) => batch.map((r) => r.params))).toEqual([['creator-x', 'video']]);
+  });
+
+  test('a creator below reputation 15 is withheld; 15 itself is paid; the rate does not move', async () => {
+    hiveRpcBatch.mockImplementation(F.contentChain({}, { 'creator-low': 14.9, 'creator-x': 15 }));
+    const c = await F.seedCampaign(db(), period);
+    await F.seedImpressions(db(), c, 2, { owner: 'creator-low', period });
+    await F.seedImpressions(db(), c, 2, { owner: 'creator-x', period });
+    await P.settlePeriod(db(), period);
+    const doc = await periodDoc();
+    expect(doc.ratePerImpression).toBe(12.5);
+    const paid = await F.payoutsOf(db(), period.key);
+    expect(paid['creator-x'].hbd).toBe(25);
+    expect(paid['creator-low']).toBeUndefined();
+    expect(doc).toMatchObject({ withheldHbd: 25, withheldFrom: ['creator-low'] });
+  });
+
+  test('a viewer below reputation 15 leaves the viewer pool, and their row is claimed', async () => {
+    hiveRpcBatch.mockImplementation(F.contentChain({}, { 'viewer-low': -2 }));
+    const c = await F.seedCampaign(db(), period);
+    await F.seedImpressions(db(), c, 1, { owner: 'creator-x', period });
+    const [lowRow] = await F.seedWatches(db(), [['viewer-low', 600]]);
+    await F.seedWatches(db(), [['viewer-a', 600]]);
+    await P.settlePeriod(db(), period);
+    const paid = await F.payoutsOf(db(), period.key);
+    expect(paid['viewer-a'].hbd).toBe(10);
+    expect(paid['viewer-low']).toBeUndefined();
+    expect((await F.cols(db()).watch.findOne({ _id: lowRow._id })).payoutId).toBe(period.key);
+  });
+
+  test('an account hivemind says does not exist is not withheld for reputation', async () => {
+    hiveRpcBatch.mockImplementation(F.contentChain({}, { 'creator-x': null }));
+    const c = await F.seedCampaign(db(), period);
+    await F.seedImpressions(db(), c, 1, { owner: 'creator-x', period });
+    await P.settlePeriod(db(), period);
+    expect((await F.payoutsOf(db(), period.key))['creator-x'].hbd).toBe(50);
+  });
+
+  test('reputation that cannot be read stops the settlement before anything is written', async () => {
+    const chain = F.contentChain();
+    hiveRpcBatch.mockImplementation(async (batch) => (batch[0].method === 'bridge.get_profile' ? [] : chain(batch)));
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    const c = await F.seedCampaign(db(), period);
+    await F.seedImpressions(db(), c, 2, { owner: 'creator-x', period });
+    await expect(P.settlePeriod(db(), period)).rejects.toThrow('could not read Hive reputation');
+    expect(await periodDoc()).toBeNull();
+    expect(await F.cols(db()).payouts.countDocuments({})).toBe(0);
+    expect(await F.cols(db()).impressions.countDocuments({ payoutId: null })).toBe(2);
+  });
+
+  test('platform accounts are not looked up for reputation', async () => {
+    const c = await F.seedCampaign(db(), period);
+    await F.seedImpressions(db(), c, 1, { owner: 'badadib', period });
+    await F.seedImpressions(db(), c, 1, { owner: 'creator-x', period });
+    await P.settlePeriod(db(), period);
+    const looked = hiveRpcBatch.mock.calls.flatMap(([batch]) => batch)
+      .filter((r) => r.method === 'bridge.get_profile').map((r) => r.params.account);
+    expect(looked).toEqual(['creator-x']);
   });
 });
 
@@ -387,7 +447,7 @@ describe('the community split', () => {
     await F.seedImpressions(db(), c, 1, { owner: CREATOR, period });
     await P.settlePeriod(db(), period);
     expect((await F.payoutsOf(db(), period.key))[CREATOR].hbd).toBe(50);
-    expect(hiveRpcBatch).not.toHaveBeenCalled();
+    expect(contentCalls()).toEqual([]);
   });
 
   test('a post the chain says does not exist has no community', async () => {
@@ -416,8 +476,8 @@ describe('the community split', () => {
     const c = await F.seedCampaign(db(), period);
     for (let i = 0; i < 30; i += 1) await F.seedImpressions(db(), c, 1, { owner: CREATOR, permlink: `v${i}`, period });
     await P.settlePeriod(db(), period);
-    expect(hiveRpcBatch.mock.calls.map(([batch]) => batch.length)).toEqual([25, 5]);
-    expect(hiveRpcBatch.mock.calls[0][0][0]).toMatchObject({ method: 'condenser_api.get_content', params: [CREATOR, 'v0'] });
+    expect(contentCalls().map(([batch]) => batch.length)).toEqual([25, 5]);
+    expect(contentCalls()[0][0][0]).toMatchObject({ method: 'condenser_api.get_content', params: [CREATOR, 'v0'] });
   });
 });
 
@@ -444,7 +504,9 @@ describe('when Hive is unreachable', () => {
   });
 
   test('a video with a stored community falls back to it rather than halting everyone', async () => {
-    hiveRpcBatch.mockResolvedValue([]);
+    // Post lookups fail; reputation reads (hivemind) still answer.
+    const chain = F.contentChain();
+    hiveRpcBatch.mockImplementation(async (batch) => (batch[0].method === 'bridge.get_profile' ? chain(batch) : []));
     await F.cols(db()).prefs.insertOne({ _id: 'creator-x', communitySharePct: 25 });
     await F.cols(db()).embedVideo.insertOne({
       owner: 'creator-x', permlink: 'video', category: 'hive-111111', hive_author: 'creator-x', hive_permlink: 'post',

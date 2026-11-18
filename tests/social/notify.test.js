@@ -6,6 +6,9 @@
  * followers whose level and push switch allow it. The vouch check, the following
  * lists and web push are stand-ins; Mongo is the test database.
  */
+// badadib streams in these tests, so only the one hidden host the job must skip.
+process.env.LIVE_EXCLUDED_HOSTS = 'hidden.host';
+
 jest.mock('../../utils/hiveAuth', () => ({
   verifyHiveAuthority: jest.fn(async () => ({ ok: false })),
   verifyDelegateVouch: jest.fn(async ({ signature }) => ({ ok: signature === 'good' })),
@@ -97,12 +100,13 @@ describe('the live job', () => {
     });
   });
 
-  test('skips conference rooms, not-live, unlisted and odd hosts', async () => {
+  test('skips conference rooms, not-live, unlisted, odd and hidden hosts', async () => {
     streams = [
       stream('badadib', 'a', { mode: 'conference' }),
       stream('badadib', 'b', { live: false }),
       stream('badadib', 'c', { visibility: 'unlisted' }),
       stream('Bad Host', 'd'),
+      stream('Hidden.Host', 'f'),
       stream('badadib', 'e'),
     ];
     expect(await run()).toMatchObject({ live: 1 });

@@ -35,7 +35,7 @@ const { getDb } = require('../utils/db');
 const {
   HIVE_RPC_ENDPOINTS, AD_CAMPAIGNS_COLLECTION, AD_IMPRESSIONS_COLLECTION,
   AD_PAYOUTS_COLLECTION, AD_PAYOUT_PERIODS_COLLECTION, AD_CREATOR_POOL_PCT,
-  AD_EXCLUDED_ACCOUNTS, AD_REWARD_FLAG_COLLECTION,
+  AD_EXCLUDED_ACCOUNTS, AD_REWARD_FLAG_COLLECTION, AD_PAYOUT_MIN_REPUTATION,
   AD_DEFAULT_COMMUNITY_PCT, AD_CREATOR_PREFS_COLLECTION, AD_PAYMENT_ACCOUNT,
   AD_PAYOUTS_ENABLED, AD_PAYOUT_INTERVAL_H, AD_PAYOUT_MIN_HBD, AD_CREDIT_MIN_HBD, AD_PAYOUT_PERIOD_DAYS, AD_PAYOUT_PERIOD_OFFSET_MIN, AD_PAYMENTS_COLLECTION, AD_BOOKING_EXPIRY_DAYS,
   AD_VIEWER_POOL_PCT, AD_VIEWER_WATCH_COLLECTION, AD_REFERRAL_POOL_PCT,
@@ -622,6 +622,9 @@ async function resolveCommunities(db, pairs) {
  *
  * The flag is read as `=== true`, so a malformed value cannot silently withhold
  * somebody's money — this decides whether a real person gets paid.
+ *
+ * Since 2026-11-18 a third source: accounts whose Hive reputation is below
+ * AD_PAYOUT_MIN_REPUTATION (15) at settlement time, see lowReputationSet().
  */
 async function rewardBlockedSet(db, accounts) {
   const blocked = new Set(AD_EXCLUDED_ACCOUNTS);
@@ -641,7 +644,59 @@ async function rewardBlockedSet(db, accounts) {
     console.error(`[adPayout] could not read reward flags: ${err && err.message}`);
     throw err;
   }
+  // Throws when the chain cannot answer, for the same reason as the flag read above.
+  const low = await lowReputationSet(names.filter((n) => !blocked.has(n)));
+  if (low.size) {
+    console.log(`[adPayout] ${low.size} account(s) below reputation ${AD_PAYOUT_MIN_REPUTATION} are not paid: ${[...low].slice(0, 20).join(', ')}${low.size > 20 ? ', …' : ''}`);
+    for (const n of low) blocked.add(n);
+  }
   return blocked;
+}
+
+const REPUTATION_BATCH = 50;
+// hivemind's answer for a name that cannot hold money anyway. Not a reason to
+// refuse the settlement: such a row is no different from before this check.
+const NO_SUCH_ACCOUNT = /does not exist|invalid account/i;
+
+/**
+ * Accounts whose Hive reputation (the human score, 25 for a new account) is below
+ * AD_PAYOUT_MIN_REPUTATION. Owner 2026-11-18: "let us not pay users with hive
+ * reputation below 15 anymore for ad revenue".
+ *
+ * Read from hivemind (`bridge.get_profile`), because `condenser_api.get_accounts`
+ * reports 0 for everybody since reputation moved out of hived.
+ *
+ * Fails CLOSED, like the flag read: if any account's reputation cannot be read, the
+ * whole settlement is refused and the next run retries. Paying on a guess is the
+ * thing this check exists to stop, and the money is not going anywhere.
+ */
+async function lowReputationSet(names) {
+  const low = new Set();
+  if (AD_PAYOUT_MIN_REPUTATION === null || AD_PAYOUT_MIN_REPUTATION === undefined) return low;
+  const unknown = [];
+  for (let i = 0; i < names.length; i += REPUTATION_BATCH) {
+    const chunk = names.slice(i, i + REPUTATION_BATCH);
+    const results = await hiveRpcBatch(chunk.map((account, n) => ({
+      jsonrpc: '2.0', id: n, method: 'bridge.get_profile', params: { account },
+    })));
+    const byId = new Map((results || []).filter(Boolean).map((r) => [r.id, r]));
+    chunk.forEach((account, n) => {
+      const r = byId.get(n);
+      const rep = r && r.result && r.result.reputation;
+      if (typeof rep === 'number' && Number.isFinite(rep)) {
+        if (rep < AD_PAYOUT_MIN_REPUTATION) low.add(account);
+        return;
+      }
+      if (r && r.error && NO_SUCH_ACCOUNT.test(String(r.error.message || ''))) return;
+      unknown.push(account);
+    });
+  }
+  if (unknown.length) {
+    const msg = `could not read Hive reputation for ${unknown.length} account(s) (${unknown.slice(0, 3).join(', ')}${unknown.length > 3 ? ', …' : ''})`;
+    console.error(`[adPayout] ${msg}; not settling on a guess, retrying next run`);
+    throw new Error(msg);
+  }
+  return low;
 }
 
 async function communitySharePctOf(db, owner) {

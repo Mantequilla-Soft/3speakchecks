@@ -27,3 +27,27 @@ describe('LIVE_NOTIFY_ENABLED', () => {
     expect(load('1')).toBe(false);
   });
 });
+
+describe('LIVE_EXCLUDED_HOSTS', () => {
+  const saved = process.env.LIVE_EXCLUDED_HOSTS;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.LIVE_EXCLUDED_HOSTS;
+    else process.env.LIVE_EXCLUDED_HOSTS = saved;
+    jest.resetModules();
+  });
+  const load = (value) => {
+    jest.resetModules();
+    if (value === undefined) delete process.env.LIVE_EXCLUDED_HOSTS;
+    else process.env.LIVE_EXCLUDED_HOSTS = value;
+    return require('../../utils/config').LIVE_EXCLUDED_HOSTS;
+  };
+
+  it('hides badadib and ashenadib when not set', () => {
+    expect(load(undefined)).toEqual(['badadib', 'ashenadib']);
+  });
+
+  it('takes a comma list, and empty hides nobody', () => {
+    expect(load(' Badadib , x ')).toEqual(['badadib', 'x']);
+    expect(load('')).toEqual([]);
+  });
+});
