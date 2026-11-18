@@ -155,11 +155,19 @@ function stubDeps({ referrers = {}, referrals = {}, real = [] } = {}) {
  * implementation for a mocked utils/hive.hiveRpcBatch.
  *
  *   posts: { 'author/permlink': 'hive-123456' | 'general' | null }
+ *   reputations: { account: 12.3 | null } for bridge.get_profile (default 50)
  * A key absent from `posts` is a post that exists with no community. `null` is a
  * post that does not exist on chain.
  */
-function contentChain(posts = {}) {
+function contentChain(posts = {}, reputations = {}) {
   return async (batch) => batch.map((req) => {
+    // Reputation check in rewardBlockedSet: everyone is a healthy 50 unless named.
+    // `null` answers like hivemind for an account that does not exist.
+    if (req.method === 'bridge.get_profile') {
+      const { account } = req.params;
+      if (reputations[account] === null) return { id: req.id, error: { code: -32602, message: `Assert Exception:[{"${account}": "account does not exist"}]` } };
+      return { id: req.id, result: { name: account, reputation: account in reputations ? reputations[account] : 50 } };
+    }
     const [author, permlink] = req.params;
     const key = `${author}/${permlink}`;
     if (key in posts && posts[key] === null) return { id: req.id, result: { author: '', permlink: '' } };

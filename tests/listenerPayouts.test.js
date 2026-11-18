@@ -4,6 +4,13 @@
  * writePayoutRows), against an in-memory database.
  * Nothing here talks to Mongo or Hive.
  */
+// Reputation reads (rewardBlockedSet): everyone is 50 except `lowrep`.
+jest.mock('../utils/hive', () => ({
+  ...jest.requireActual('../utils/hive'),
+  hiveRpcBatch: jest.fn(async (batch) => batch.map((r) => ({
+    id: r.id, result: { name: r.params.account, reputation: r.params.account === 'lowrep' ? 10 : 50 },
+  }))),
+}));
 const { ObjectId } = require('mongodb');
 
 // A tiny stand-in for the few collection calls the payout code makes.
@@ -70,6 +77,13 @@ describe('listeners in the viewer pool', () => {
     });
     const res = await pay(db, period, 2, null, { defer: true });
     expect(res.rows.map((r) => [r.account, r.hbd])).toEqual([['alice', 2]]);
+  });
+
+  test('a listener below reputation 15 leaves the denominator and is not paid', async () => {
+    const db = fakeDb({ ad_listener_listen: [row('alice', 'audio', 1000), row('lowrep', 'podcast', 1000)] });
+    const res = await pay(db, period, 2, null, { defer: true });
+    expect(res.rows.map((r) => [r.account, r.hbd])).toEqual([['alice', 2]]);
+    expect(db.data.ad_listener_listen.every((r) => r.payoutId === period.key)).toBe(true);
   });
 
   test('a settlement run twice pays a listen once', async () => {

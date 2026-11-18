@@ -690,6 +690,18 @@ module.exports = {
     // hidden, banned), keyed by a lowercase `username`.
     AD_REWARD_FLAG_COLLECTION: process.env.AD_REWARD_FLAG_COLLECTION || 'contentcreators',
 
+    // Accounts whose Hive reputation is BELOW this are not paid ad money, in any role
+    // (creator, community, viewer, listener, referrer). Owner 2026-11-18. Read at
+    // settlement time from hivemind (bridge.get_profile), as the human score (25 = new).
+    // ⚠️ `??`, not `||`: an explicitly EMPTY value switches the check off; unset = 15.
+    // A number, not "0 = off", because reputation can be negative.
+    AD_PAYOUT_MIN_REPUTATION: (() => {
+        const raw = (process.env.AD_PAYOUT_MIN_REPUTATION ?? '15').trim();
+        if (raw === '') return null;
+        const n = parseFloat(raw);
+        return Number.isFinite(n) ? n : 15;
+    })(),
+
     // ─── "Follow these" creator suggestions (/feeds/suggested-creators) ───────
     // A who-to-follow rail for the discover / interests feeds: creators who posted
     // interest-matching videos in the last SUGGEST_WINDOW_DAYS, ranked by the
