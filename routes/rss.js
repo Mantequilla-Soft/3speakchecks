@@ -71,6 +71,13 @@ const FEED_LIMIT = parseInt(process.env.RSS_FEED_LIMIT, 10) || 30;
 // A playlist feed is the whole series (someone subscribing to a 30-day
 // challenge wants every day), so it carries far more than a channel feed.
 const PLAYLIST_FEED_LIMIT = parseInt(process.env.RSS_PLAYLIST_FEED_LIMIT, 10) || 300;
+// A playlist with outside shows in it (utils/playlistFeeds.js) mixes up to 25 of
+// them, often daily ones, so 300 would reach back only a few weeks. Their items
+// are small (notes cut to 400 characters, no Hive read), about 1 kB each.
+const PLAYLIST_SHOWS_FEED_LIMIT = parseInt(process.env.RSS_PLAYLIST_SHOWS_FEED_LIMIT, 10) || 1000;
+
+/** How many items a playlist's feed carries. */
+const playlistFeedLimit = (playlist) => (playlistFeedRefs(playlist).length ? PLAYLIST_SHOWS_FEED_LIMIT : PLAYLIST_FEED_LIMIT);
 
 // At most this many feeds build at once, with a short queue behind them (see
 // utils/concurrencyGate.js): a podcast-index crawl must never take the whole
@@ -1135,11 +1142,12 @@ router.get('/cover/playlist/:id.jpg', async (req, res) => {
  * Null when it does not exist or is private (Watch Later included): neither a
  * feed nor a link preview may show it. `blocked` when its owner is banned or
  * hidden, who takes the whole playlist with them; anyone else just loses their
- * own items (`live` is what is left).
+ * own items (`live` is what is left). `limit`: how many items its feed carries.
  */
 async function loadPublicPlaylist(db, id) {
     const playlist = await db.collection('playlists').findOne({ _id: id });
     if (!playlist || playlist.access !== 'public' || !playlist.owner) return null;
+    const limit = playlistFeedLimit(playlist);
 
     const owner = playlist.owner;
     const refs = (playlist.items || [])
@@ -1153,7 +1161,7 @@ async function loadPublicPlaylist(db, id) {
             .project({ username: 1 }).toArray()
         ).map((c) => c.username)
     );
-    if (blocked.has(owner)) return { playlist, blocked: true, live: [], episodes: [] };
+    if (blocked.has(owner)) return { playlist, blocked: true, live: [], episodes: [], limit };
     const live = refs.filter((i) => !blocked.has(i.author));
 
     let episodes = [];
@@ -1172,9 +1180,9 @@ async function loadPublicPlaylist(db, id) {
                 })
                 .toArray(),
         ]);
-        episodes = await withHivePosts(mergeEpisodes({ embedRaw, legacyRaw, audioRaw }, PLAYLIST_FEED_LIMIT));
+        episodes = await withHivePosts(mergeEpisodes({ embedRaw, legacyRaw, audioRaw }, limit));
     }
-    return { playlist, blocked: false, live, episodes };
+    return { playlist, blocked: false, live, episodes, limit };
 }
 
 /**
@@ -1374,9 +1382,9 @@ router.get('/playlist/:id.xml', feedGate, async (req, res) => {
         const [itunesAuthor, ownerSettings, outside] = await Promise.all([
             fetchItunesAuthor(owner),
             fetchPodcastSettings(db, owner),
-            loadOutsideEpisodes(db, playlist, PLAYLIST_FEED_LIMIT),
+            loadOutsideEpisodes(db, playlist, loaded.limit),
         ]);
-        const episodes = mergeOutside(loaded.episodes, outside, PLAYLIST_FEED_LIMIT);
+        const episodes = mergeOutside(loaded.episodes, outside, loaded.limit);
         numberByPosition(playlist, loaded.live, episodes);
         await withFeedExtras(db, episodes);
 

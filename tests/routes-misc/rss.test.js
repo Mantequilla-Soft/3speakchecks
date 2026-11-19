@@ -518,6 +518,16 @@ describe('GET /rss/playlist/:id.xml with outside shows in the playlist', () => {
     expect(asList(doc.rss.channel['podcast:value']).map((v) => v['@_type'])).toEqual(['lightning', 'HBD']);
   });
 
+  test('with outside shows the feed carries up to 1000 items, not 300', async () => {
+    await db().collection('playlists').insertOne(withFeeds([{ url: 'https://feeds.example.com/show.xml' }], { items: [] }));
+    await db().collection('podcast_feeds').insertOne(show());
+    await db().collection('podcast_episodes').insertMany(Array.from({ length: 1005 }, (_, n) => outsideEp(n, { published_at: new Date(NOW - n * 3600 * 1000) })));
+    const items = itemsOf((await feed(`/rss/playlist/${PLAYLIST_ID}.xml`)).doc);
+    expect(items).toHaveLength(1000);
+    expect(items[0].title).toBe('Outside 0');
+    expect(items[999].title).toBe('Outside 999');
+  });
+
   test('a playlist of outside shows only is a podcast feed', async () => {
     await db().collection('playlists').insertOne(withFeeds([{ url: 'https://feeds.example.com/show.xml' }], { items: [] }));
     await db().collection('podcast_feeds').insertOne(show());

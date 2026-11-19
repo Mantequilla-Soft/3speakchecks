@@ -189,6 +189,41 @@ describe('POST /podcasts/bundle', () => {
     expect(third.body.next_cursor).toBeNull();
   });
 
+  test('feed_id lists one show, with its seasons; season narrows it further', async () => {
+    await db().collection('podcast_episodes').updateMany({ _id: { $in: [`${FEED_B.toHexString()}:${'1'.padStart(16, 'x')}`] } }, { $set: { season: 2 } });
+    await db().collection('podcast_episodes').updateMany({ _id: { $in: [`${FEED_B.toHexString()}:${'2'.padStart(16, 'x')}`, `${FEED_B.toHexString()}:${'3'.padStart(16, 'x')}`] } }, { $set: { season: 1 } });
+    await db().collection('podcast_episodes').updateOne({ _id: `${FEED_A.toHexString()}:${'1'.padStart(16, 'x')}` }, { $set: { season: 7 } });
+    const urls = [urlOf(FEED_A), urlOf(FEED_B)];
+
+    const one = await bundle({ urls, feed_id: FEED_B.toHexString() }).expect(200);
+    expect(one.body.feeds.map((f) => f.title)).toEqual(['Show a', 'Show b']);
+    expect(one.body.episodes.map((e) => e.title)).toEqual(['b1', 'b2', 'b3']);
+    expect(one.body.total).toBe(3);
+    expect(one.body.seasons).toEqual([1, 2]);
+
+    const s1 = await bundle({ urls, feed_id: FEED_B.toHexString(), season: 1, limit: 1 }).expect(200);
+    expect(s1.body.episodes.map((e) => e.title)).toEqual(['b2']);
+    expect(s1.body.total).toBe(2);
+    const s1next = await bundle({ urls, feed_id: FEED_B.toHexString(), season: 1, limit: 1, cursor: s1.body.next_cursor }).expect(200);
+    expect(s1next.body.episodes.map((e) => e.title)).toEqual(['b3']);
+    expect(s1next.body.seasons).toBeUndefined();
+
+    // Without feed_id: every show, no season list.
+    const all = await bundle({ urls }).expect(200);
+    expect(all.body.total).toBe(6);
+    expect(all.body.seasons).toBeUndefined();
+  });
+
+  test('a feed_id outside the playlist lists nothing; a bad one or a season alone is a 400', async () => {
+    const urls = [urlOf(FEED_A)];
+    const other = await bundle({ urls, feed_id: FEED_B.toHexString() }).expect(200);
+    expect(other.body).toMatchObject({ episodes: [], total: 0, seasons: [] });
+    await bundle({ urls, feed_id: 'nope' }).expect(400);
+    await bundle({ urls, season: 1 }).expect(400);
+    await bundle({ urls, feed_id: FEED_A.toHexString(), season: -1 }).expect(400);
+    await bundle({ urls, feed_id: FEED_A.toHexString(), season: 1.5 }).expect(400);
+  });
+
   test('no shows: an empty answer; bad input: 400', async () => {
     const empty = await bundle({ urls: [] }).expect(200);
     expect(empty.body).toMatchObject({ feeds: [], episodes: [], missing: [], next_cursor: null });

@@ -83,6 +83,66 @@ describe('YouTube', () => {
     expect(new URL(global.fetch.calls[0].url).searchParams.get('id')).toBe(ID);
   });
 
+  test.each([
+    ['https://www.youtube.com/@seckorama3789', 'forHandle', 'seckorama3789'],
+    ['www.youtube.com/@seckorama3789/videos', 'forHandle', 'seckorama3789'],
+    ['youtube.com/@seckorama3789?si=abc', 'forHandle', 'seckorama3789'],
+    ['https://m.youtube.com/@seckorama3789/featured', 'forHandle', 'seckorama3789'],
+    ['@seckorama3789/videos', 'forHandle', 'seckorama3789'],
+    ['seckorama3789', 'forHandle', 'seckorama3789'],
+    ['https://www.youtube.com/@%E3%81%82%E3%81%84', 'forHandle', 'あい'],
+    [`https://www.youtube.com/channel/${ID}`, 'id', ID],
+    [`https://youtube.com/channel/${ID}/about?view_as=subscriber`, 'id', ID],
+    [`<https://www.youtube.com/channel/${ID}>`, 'id', ID],
+    ['https://www.youtube.com/user/OldName', 'forUsername', 'OldName'],
+    ['https://www.youtube.com/c/Vanity', 'forHandle', 'Vanity'],
+    ['https://www.youtube.com/Vanity', 'forHandle', 'Vanity'],
+  ])('%s is looked up by %s', async (input, param, value) => {
+    api(() => ({ body: { items: [{ id: ID, snippet: { title: 'S' } }] } }));
+    await expect(youtube.fetchProfile(input)).resolves.toEqual({ canonical_username: ID, text: 'S' });
+    expect(global.fetch.calls).toHaveLength(1);
+    expect(new URL(global.fetch.calls[0].url).searchParams.get(param)).toBe(value);
+  });
+
+  test('a legacy /user/ name that is not a username any more falls back to the handle', async () => {
+    api((url) => ({ body: { items: new URL(url).searchParams.get('forHandle') ? [{ id: ID, snippet: {} }] : [] } }));
+    await expect(youtube.fetchProfile('youtube.com/user/OldName')).resolves.toEqual({ canonical_username: ID, text: '' });
+    expect(global.fetch.calls.map((c) => [...new URL(c.url).searchParams.keys()].find((k) => k.startsWith('for'))))
+      .toEqual(['forUsername', 'forHandle']);
+  });
+
+  test.each([
+    'https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s',
+    'https://youtu.be/dQw4w9WgXcQ?si=x',
+    'https://www.youtube.com/shorts/dQw4w9WgXcQ',
+    'https://www.youtube.com/live/dQw4w9WgXcQ',
+  ])('a video link (%s) resolves to its channel', async (input) => {
+    global.fetch = fakeFetch([
+      ['https://www.googleapis.com/youtube/v3/videos', () => ({ body: { items: [{ id: 'dQw4w9WgXcQ', snippet: { channelId: ID } }] } })],
+      ['https://www.googleapis.com/youtube/v3/channels', () => ({ body: { items: [{ id: ID, snippet: { description: 'hash' } }] } })],
+    ]);
+    await expect(youtube.fetchProfile(input)).resolves.toEqual({ canonical_username: ID, text: 'hash' });
+    expect(new URL(global.fetch.calls[0].url).searchParams.get('id')).toBe('dQw4w9WgXcQ');
+    expect(new URL(global.fetch.calls[1].url).searchParams.get('id')).toBe(ID);
+  });
+
+  test('a link to a missing video is CHANNEL_NOT_FOUND', async () => {
+    global.fetch = fakeFetch([['https://www.googleapis.com/youtube/v3/videos', () => ({ body: { items: [] } })]]);
+    await expect(failure(youtube.fetchProfile('https://youtu.be/dQw4w9WgXcQ'))).resolves.toBe('CHANNEL_NOT_FOUND');
+    expect(global.fetch.calls).toHaveLength(1);
+  });
+
+  test.each([
+    'https://www.youtube.com/',
+    'https://www.youtube.com/feed/subscriptions',
+    'https://www.youtube.com/channel/not-an-id',
+    'https://www.youtube.com/watch?v=short',
+  ])('a YouTube link that names no channel (%s) is CHANNEL_NOT_FOUND without a request', async (input) => {
+    api(() => ({ body: {} }));
+    await expect(failure(youtube.fetchProfile(input))).resolves.toBe('CHANNEL_NOT_FOUND');
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
   test('no items is CHANNEL_NOT_FOUND', async () => {
     api(() => ({ body: { items: [] } }));
     await expect(failure(youtube.fetchProfile('@ghost'))).resolves.toBe('CHANNEL_NOT_FOUND');
