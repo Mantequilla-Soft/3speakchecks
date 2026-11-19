@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
 const { feedAgeMatch } = require('../utils/feedAge');
+const { isStreamVod } = require('../utils/streamVod');
 const { confirmAndBan, reinstateVideo, unavailableCount, unavailableMatch } = require('../utils/unavailable');
 const { hiddenFromFeedMatch } = require('../utils/hiddenFromFeed');
 const { nsfwFilter, nsfwFilterTags, nsfwFilterHiveTags, BANNED_FILTER } = require('../utils/filters');
@@ -155,6 +156,7 @@ router.get('/videos/tag/:tag', async (req, res) => {
                     video_v2: ev.permlink,
                     play_url: ev.manifest_cid ? `https://ipfs.3speak.tv/ipfs/${ev.manifest_cid}` : null
                 },
+                streamVod: isStreamVod(ev),
                 short: !!ev.short,
                 _source: 'embed',
             }));
@@ -196,6 +198,7 @@ router.get('/videos/tag/:tag', async (req, res) => {
                     video_v2: ev.permlink,
                     play_url: ev.manifest_cid ? `https://ipfs.3speak.tv/ipfs/${ev.manifest_cid}` : null
                 },
+                streamVod: isStreamVod(ev),
                 short: !!ev.short,
                 _source: 'embed',
                 _embedPermlink: ev.permlink,   // asset id — retention/interest key

@@ -27,6 +27,7 @@
  */
 const { getCached } = require('./feedCache');
 const { feedAgeMatch } = require('./feedAge');
+const { isStreamVod } = require('./streamVod');
 const { unavailableMatch } = require('./unavailable');
 const { hiddenFromFeedMatch } = require('./hiddenFromFeed');
 const { nsfwFilterTags, nsfwFilterHiveTags } = require('./filters');
@@ -163,6 +164,7 @@ async function loadTrendingPool(db, nsfwAllowed) {
                     num_comments: 0
                 },
                 views: ev.views || 0,
+                streamVod: isStreamVod(ev),
                 base_score,
                 _source: 'embed',
                 _embedPermlink: ev.permlink
@@ -267,6 +269,7 @@ async function loadNewSources(db, nsfwAllowed, n) {
             video_v2: ev.permlink,
             play_url: ev.manifest_cid ? `https://ipfs.3speak.tv/ipfs/${ev.manifest_cid}` : null
         },
+        streamVod: isStreamVod(ev),
         _source: 'embed',
         _sortDate: new Date(ev.createdAt || 0).getTime()
     }));

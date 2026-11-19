@@ -12,6 +12,7 @@
 const { getDb } = require('./db');
 const { followingOf } = require('./incubationHosted');
 const { feedAgeMatch } = require('./feedAge');
+const { isStreamVod } = require('./streamVod');
 const { unavailableMatch } = require('./unavailable');
 const { hiddenFromFeedMatch } = require('./hiddenFromFeed');
 const { nsfwFilterTags, nsfwFilterHiveTags } = require('./filters');
@@ -161,6 +162,7 @@ async function buildFollowFeed(req, username, { allowFallback = true, chronologi
             video_v2: ev.permlink,
             play_url: ev.manifest_cid ? `https://ipfs.3speak.tv/ipfs/${ev.manifest_cid}` : null
         },
+        streamVod: isStreamVod(ev),
         _source: 'embed',
         _embedPermlink: ev.permlink,   // asset id — retention/view-durations key
         _sortDate: new Date(ev.createdAt || 0).getTime()
