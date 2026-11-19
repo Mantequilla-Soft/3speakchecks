@@ -9,6 +9,7 @@
  */
 const { DISCOVER_POOL_COLLECTION, DISCOVER_POOL_CACHE_MS } = require('./config');
 const { recommendAgeMatch } = require('./feedAge');
+const { isStreamVod } = require('./streamVod');
 const { unavailableMatch } = require('./unavailable');
 const { hiddenFromFeedMatch, isHiddenFromFeed } = require('./hiddenFromFeed');
 const { filterHiddenDocs } = require('./hiddenCreators');
@@ -112,6 +113,7 @@ async function hydrate(db, entries) {
         // is what actually enforces access, so this is presentation only and
         // safe to expose. Normalised to a boolean because this object is built
         // field by field rather than spread, so anything not named here is lost.
+        streamVod: isStreamVod(ev),
         gated: ev.gated === true,
         _pool: e,
       });

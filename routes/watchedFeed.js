@@ -4,6 +4,7 @@ const { getDb } = require('../utils/db');
 const { ObjectId } = require('mongodb');
 const { ENABLE_MONGO_WRITES } = require('../utils/config');
 const { artToken } = require('../utils/podcastArt');
+const { isStreamVod } = require('../utils/streamVod');
 
 /* ────────────────────────────────────────────────────────────────────
  * GET /feeds/watched/:username?type=videos|shorts&since=<unix s>&page=&limit=
@@ -177,6 +178,7 @@ function embedCard(ev) {
       video_v2: ev.permlink,
       play_url: ev.manifest_cid ? `https://ipfs.3speak.tv/ipfs/${ev.manifest_cid}` : null,
     },
+    streamVod: isStreamVod(ev),
     gated: ev.gated === true,
     ...(short ? { _short: true } : {}),
     ...(!short && !ev.hive_permlink ? { _unlinked: true } : {}),

@@ -10,6 +10,7 @@ const { COLLECTION_NAME } = require('../utils/config');
 const { BANNED_FILTER } = require('../utils/filters');
 const { validateApiKey } = require('../utils/middleware');
 const { ENABLE_MONGO_WRITES } = require('../utils/config');
+const { isStreamVod } = require('../utils/streamVod');
 
 const HIVE_ACCOUNT_RE = /^[a-z][a-z0-9.-]{2,15}$/;
 
@@ -537,10 +538,10 @@ router.get('/api/my-videos', async (req, res) => {
         // unlisted videos still appear (badged) and can be re-listed. Every
         // other surface keeps the default listed_on_3speak:true filter.
         const includeUnlisted = req.query.include_unlisted === '1' || req.query.include_unlisted === 'true';
-        // `openpod=1` narrows to OpenPods stream recordings (the VOD published
-        // when a live session ends). Matched either by the flag we stamp at
-        // publish time, or by the recorder's `stream-<room>-<n>s.<ext>`
-        // filename so sessions recorded before the flag existed still show up.
+        // `openpod=1` narrows to stream recordings (the VOD published when a
+        // live session ends), matched the way utils/streamVod.js tells them:
+        // uploaded by the live server, flagged by the old studio path, or the
+        // recorder's `stream-<room>-<n>s.<ext>` filename from before the flag.
         const openpodOnly = req.query.openpod === '1' || req.query.openpod === 'true';
 
         if (!username) {
@@ -569,6 +570,7 @@ router.get('/api/my-videos', async (req, res) => {
         if (openpodOnly) {
             embedQuery.$or = [
                 { is_openpod_stream: true },
+                { frontend_app: '3speak-hangouts' },
                 { originalFilename: { $regex: '^stream-' } },
             ];
         }
@@ -653,10 +655,10 @@ router.get('/api/my-videos', async (req, res) => {
                     // NSFW = explicit doc flag OR the Hive `nsfw` tag.
                     isNsfwContent: ev.isNsfwContent === true || (Array.isArray(ev.hive_tags) && ev.hive_tags.some(t => String(t).toLowerCase() === 'nsfw')),
                     promotedUntil: ev.promotedUntil || null,
-                    // OpenPods stream recording (flagged at publish time, or
-                    // recognised by the recorder's stream-<room>-<n>s filename).
-                    isOpenpodStream: ev.is_openpod_stream === true
-                        || /^stream-/.test(String(ev.originalFilename || '')),
+                    // Stream recording (utils/streamVod.js). `streamVod` is the
+                    // card badge, `isOpenpodStream` the Streams tab's older name.
+                    isOpenpodStream: isStreamVod(ev),
+                    streamVod: isStreamVod(ev),
                     openpodRoom: ev.openpod_room || null,
                     _sortDate: new Date(ev.createdAt || 0).getTime()
                 };

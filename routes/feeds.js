@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../utils/db');
 const { feedAgeMatch, recommendAgeMatch } = require('../utils/feedAge');
+const { isStreamVod } = require('../utils/streamVod');
 const { unavailableMatch } = require('../utils/unavailable');
 const { hiddenFromFeedMatch } = require('../utils/hiddenFromFeed');
 const { isNsfwAllowed, nsfwFilterTags, nsfwFilterHiveTags } = require('../utils/filters');
@@ -1080,6 +1081,7 @@ router.get('/firstUploads', async (req, res) => {
                 video_v2: ev.permlink,
                 play_url: ev.manifest_cid ? `https://ipfs.3speak.tv/ipfs/${ev.manifest_cid}` : null
             },
+            streamVod: isStreamVod(ev),
             _source: 'embed',
             _embedPermlink: ev.permlink,   // asset id — retention/interest key
             _sortDate: new Date(ev.createdAt || 0).getTime()
@@ -1172,6 +1174,7 @@ function transformEmbedVideoToLegacy(ev) {
         },
         // 🔐 Supporters-only. Card renders a lock badge; the gate is what
         // enforces access, so this is presentation only.
+        streamVod: isStreamVod(ev),
         gated: ev.gated === true,
         _source: 'embed',
         _embedPermlink: ev.permlink,   // asset id — retention/interest key
