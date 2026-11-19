@@ -22,8 +22,9 @@
  *   GET  /podcasts/art/:token/:px.jpg              cover art, see utils/podcastArt.js
  *   GET  /podcasts/progress?user=&ids=|&feed=      how far the user got in episodes
  *   POST /podcasts/progress                        save that (session vouch, below)
- *   POST /podcasts/bundle   { urls, cursor?, limit? }   the shows a 3Speak playlist names
- *                           and their episodes merged by date (utils/playlistFeeds.js)
+ *   POST /podcasts/bundle   { urls, cursor?, limit?, feed_id?, season? }   the shows a
+ *                           3Speak playlist names and their episodes merged by date
+ *                           (utils/playlistFeeds.js); feed_id/season narrow to one show
  *   GET  /podcasts/verified?user=                  the shows a Hive user proved they publish
  *                           (a verified `rss` link, routes/verify.js): the podcast import
  *                           reads their episodes through the reads above
@@ -1337,11 +1338,21 @@ const CURSOR_RE = /^(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\|([0-9a-f]{24}:[A-Za-z0-9_-]{16
  * The outside shows of a 3Speak playlist and their episodes, newest first. The page
  * sends the playlist's feed URLs (it has read the playlist, private or not); a URL
  * we have no row for yet comes back in `missing` (the next playlist sync adds it).
+ *
+ * `feed_id` (one of those shows) lists only that show's episodes, and the first
+ * page then names its `seasons`; `season` (with `feed_id`) only that season's.
+ * `feeds` always lists every show, so the page can offer the others.
  */
 router.post('/bundle', express.json({ limit: '64kb' }), async (req, res) => {
   const b = req.body || {};
   if (!Array.isArray(b.urls) || b.urls.length > MAX_PLAYLIST_FEEDS * 2) {
     return res.status(400).json({ success: false, error: `urls must be a list of at most ${MAX_PLAYLIST_FEEDS} feed URLs` });
+  }
+  const onlyFeed = b.feed_id == null || b.feed_id === '' ? null : String(b.feed_id);
+  if (onlyFeed !== null && !ID_RE.test(onlyFeed)) return res.status(400).json({ success: false, error: 'invalid feed_id' });
+  const season = b.season == null || b.season === '' || b.season === 0 ? null : Number(b.season);
+  if (season !== null && (!onlyFeed || !Number.isInteger(season) || season < 1 || season > 100000)) {
+    return res.status(400).json({ success: false, error: 'season needs feed_id and a whole number from 1' });
   }
   const limit = Math.min(60, Math.max(1, parseInt(b.limit, 10) || BUNDLE_PAGE));
   let after = null;
@@ -1355,13 +1366,17 @@ router.post('/bundle', express.json({ limit: '64kb' }), async (req, res) => {
     const byKey = await findFeedsFor(getDb(), refs);
     const rows = [...new Map([...byKey.values()].map((f) => [f._id.toHexString(), f])).values()];
     await fillMissingArt(rows);
-    const ids = rows.map((f) => f._id);
-    const q = { feed_id: { $in: ids } };
+    // A feed_id that is not one of this playlist's shows lists nothing.
+    const ids = rows.map((f) => f._id).filter((id) => !onlyFeed || id.toHexString() === onlyFeed);
+    const match = { feed_id: { $in: ids } };
+    if (season !== null) match.season = season;
+    const q = { ...match };
     if (after) q.$or = [{ published_at: { $lt: after.at } }, { published_at: after.at, _id: { $lt: after.id } }];
     const col = getDb().collection(EPISODES);
-    const [eps, total] = await Promise.all([
+    const [eps, total, seasons] = await Promise.all([
       ids.length ? col.find(q, { projection: EPISODE_LIST }).sort({ published_at: -1, _id: -1 }).limit(limit).toArray() : [],
-      ids.length && !after ? col.countDocuments({ feed_id: { $in: ids } }) : null,
+      !after ? (ids.length ? col.countDocuments(match) : 0) : null,
+      onlyFeed && !after ? (ids.length ? col.distinct('season', { feed_id: ids[0] }) : []) : null,
     ]);
     const shown = new Set();
     const feedsOut = [];
@@ -1377,6 +1392,7 @@ router.post('/bundle', express.json({ limit: '64kb' }), async (req, res) => {
       feeds: feedsOut,
       episodes: eps.map(presentEpisode),
       ...(total !== null ? { total } : {}),
+      ...(seasons !== null ? { seasons: seasons.filter((n) => Number.isInteger(n) && n > 0).sort((x, y) => x - y) } : {}),
       next_cursor: last && last.published_at ? `${last.published_at.toISOString()}|${last._id}` : null,
       missing: refs.filter((r) => !byKey.has(r.key)).map((r) => r.url),
     });
