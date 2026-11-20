@@ -19,7 +19,13 @@ const app = buildApp(['/', router]);
 const { isQuestion, reset } = router._test;
 
 const vouch = (over = {}) => ({ user: 'badadib', signature: 'good', timestamp: Date.now(), ...over });
-const at = (h) => new Date(Date.now() - h * 3600 * 1000);
+// One clock reading for the whole file: the route matches a comment's `created`
+// against the author's first comment to the millisecond (firstTime), so two
+// `at(2)` calls must give the same instant. With Date.now() read per call, a
+// millisecond tick between them flipped firstTime and failed main's Tests run
+// on 2026-11-20 (and with it the deploy).
+const NOW = Date.now();
+const at = (h) => new Date(NOW - h * 3600 * 1000);
 
 // What HafSQL answers, by the query asked.
 function hafsqlFor({ comments, replies = [], firsts = [], voters = [], roots = [] }) {
