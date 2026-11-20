@@ -1606,6 +1606,91 @@ router.get('/communities/activity', async (req, res) => {
     }
 });
 
+// ─── /feeds/stream-vods ─────────────────────────────────────────────────────
+// The newest stream recording (VOD) of each creator, newest first: what the
+// Home activity panel's Live tab lists while nobody is live. A recording is
+// told apart the way utils/streamVod.js does it. Viewer-independent, so built
+// once per nsfw variant and cached; hidden creators and the viewer's own
+// dismissals are applied per request. Hosts in LIVE_EXCLUDED_HOSTS (house and
+// test accounts) are left out, as their streams are everywhere else.
+const STREAM_VODS_WINDOW_DAYS = 180;
+const STREAM_VODS_SCAN = 500;          // newest recordings looked at before grouping
+const STREAM_VODS_MAX = 24;
+const STREAM_VODS_TTL_MS = 5 * 60 * 1000;
+
+async function loadStreamVods(nsfwReq) {
+    const db = getDb();
+    const { LIVE_EXCLUDED_HOSTS } = require('../utils/config');
+    const hidden = [...HIDDEN_AUTHORS, ...hiddenListSync(), ...LIVE_EXCLUDED_HOSTS];
+    const since = new Date(Date.now() - STREAM_VODS_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+    const rows = await db.collection('embed-video').aggregate([
+        {
+            $match: {
+                ...unavailableMatch(), ...hiddenFromFeedMatch(),
+                createdAt: { $gte: since },
+                status: 'published',
+                short: { $ne: true },
+                listed_on_3speak: true,
+                publishFailed: { $ne: true },
+                hive_author: { $nin: [null, ...hidden] },
+                hive_permlink: { $ne: null },
+                ...nsfwFilterHiveTags(nsfwReq),
+                $or: [
+                    { frontend_app: '3speak-hangouts' },
+                    { is_openpod_stream: true },
+                    { originalFilename: /^stream-/ },
+                ],
+            },
+        },
+        { $sort: { createdAt: -1 } },
+        { $limit: STREAM_VODS_SCAN },
+        { $group: { _id: '$hive_author', doc: { $first: '$$ROOT' } } },
+        { $replaceRoot: { newRoot: '$doc' } },
+        { $sort: { createdAt: -1 } },
+        { $limit: STREAM_VODS_MAX * 2 },
+    ]).toArray();
+    return rows.filter(isStreamVod).map((ev) => ({
+        owner: ev.owner,
+        author: ev.hive_author,
+        permlink: ev.hive_permlink,
+        title: ev.hive_title || ev.originalFilename || '',
+        status: 'published',
+        created: ev.createdAt,
+        created_at: ev.createdAt,
+        duration: ev.duration || 0,
+        tags: ev.hive_tags || [],
+        images: {
+            thumbnail: ev.thumbnail_url || `https://img.3speak.tv/${ev.permlink}/thumbnail.png`,
+            poster: ev.thumbnail_url || `https://img.3speak.tv/${ev.permlink}/poster.jpg`,
+        },
+        spkvideo: {
+            duration: ev.duration || 0,
+            video_v2: ev.permlink,
+            play_url: ev.manifest_cid ? `https://ipfs.3speak.tv/ipfs/${ev.manifest_cid}` : null,
+        },
+        streamVod: true,
+    }));
+}
+
+/** Query: ?limit (1-24, default 8)&currentuser&hidewatched&nsfw */
+router.get('/stream-vods', async (req, res) => {
+    try {
+        const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 8, 1), STREAM_VODS_MAX);
+        const nsfw = isNsfwAllowed(req);
+        const nsfwReq = nsfw ? { query: { nsfw: 'true' }, headers: {} } : { query: {}, headers: {} };
+        const pool = await getCached(`stream-vods:${nsfw ? 'nsfw' : 'sfw'}`, STREAM_VODS_TTL_MS,
+            () => loadStreamVods(nsfwReq), []);
+        // Creators hidden since the pool loaded drop out now. Copies: the pool is shared.
+        const hiddenNow = new Set(hiddenListSync());
+        const fresh = (pool || []).filter((v) => !hiddenNow.has(v.author)).map((v) => ({ ...v }));
+        const videos = (await filterForUser(getDb(), req, fresh)).slice(0, limit);
+        res.json({ success: true, feed: 'stream-vods', limit, videos });
+    } catch (error) {
+        console.error('Error fetching stream VODs:', error);
+        res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+});
+
 // Exposed for scripts/test-gated-feed-flag.js. The card mappers drop any field
 // they do not name explicitly, which is exactly the kind of regression a test
 // should catch rather than a reviewer.
