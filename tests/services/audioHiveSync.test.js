@@ -10,7 +10,7 @@
 process.env.HIVE_RPC_ENDPOINTS = 'http://node-a.test,http://node-b.test';
 
 const testDb = require('../helpers/db');
-const { syncAudioHiveLinks, syncAudioPostTitles } = require('../../services/audioHiveSync');
+const { syncAudioHiveLinks, syncAudioPostTitles, resyncAudioPost } = require('../../services/audioHiveSync');
 
 const db = testDb.use();
 const audio = () => db().collection('embed-audio');
@@ -339,5 +339,41 @@ describe('giving a linked track its post title', () => {
     ]);
     expect(await syncAudioPostTitles(NOW)).toEqual({ checked: 0, retitled: 0, errors: 0 });
     expect(rpc).toHaveLength(0);
+  });
+});
+
+describe('re-reading one post right after an edit', () => {
+  const NOW = new Date('2026-11-16T12:00:00Z');
+  const old = (permlink, title, extra = {}) => track('dj', permlink, {
+    post_permlink: `post-${permlink}`, title, createdAt: new Date('2026-08-01T00:00:00Z'),
+    hive_title_checked_at: new Date('2026-08-02T00:00:00Z'), ...extra,
+  });
+
+  test('gives an old episode its edited title, which the hourly sync no longer reads', async () => {
+    publish({ author: 'dj', permlink: 'post-e1', title: 'Episode 1 (edited)' });
+    await audio().insertOne(old('e1', 'Episode 1'));
+    expect(await syncAudioPostTitles(NOW)).toEqual({ checked: 0, retitled: 0, errors: 0 });
+
+    expect(await resyncAudioPost('dj', 'post-e1', NOW)).toEqual({ checked: 1, retitled: 1, errors: 0 });
+    expect(await get('e1')).toMatchObject({ title: 'Episode 1 (edited)', hive_title: 'Episode 1 (edited)', upload_title: 'Episode 1' });
+  });
+
+  test('matches the post author, not just the uploader, and leaves other posts alone', async () => {
+    publish({ author: 'show', permlink: 'post-e2', title: 'Guest episode' });
+    await audio().insertMany([
+      old('e2', 'raw', { post_author: 'show' }),
+      old('e3', 'other', { post_permlink: 'post-e2' }), // dj's own post-e2, a different post
+    ]);
+    expect(await resyncAudioPost('show', 'post-e2', NOW)).toEqual({ checked: 1, retitled: 1, errors: 0 });
+    expect((await get('e2')).title).toBe('Guest episode');
+    expect((await get('e3')).title).toBe('other');
+  });
+
+  test('an unknown post checks nothing; a failed Hive read changes nothing', async () => {
+    expect(await resyncAudioPost('dj', 'post-none', NOW)).toEqual({ checked: 0, retitled: 0, errors: 0 });
+    fail.add('condenser_api.get_content');
+    await audio().insertOne(old('e4', 'Episode 4'));
+    expect(await resyncAudioPost('dj', 'post-e4', NOW)).toEqual({ checked: 1, retitled: 0, errors: 1 });
+    expect((await get('e4')).title).toBe('Episode 4');
   });
 });

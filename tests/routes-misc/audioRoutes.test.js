@@ -10,7 +10,7 @@
 const crypto = require('crypto');
 const request = require('supertest');
 const testDb = require('../helpers/db');
-const { buildApp } = require('../helpers/app');
+const { buildApp, apiKeyHeader } = require('../helpers/app');
 const { NOW, pinClock } = require('./_fixtures');
 
 jest.mock('../../utils/warmupAudio', () => {
@@ -18,6 +18,8 @@ jest.mock('../../utils/warmupAudio', () => {
   return { ...actual, warmupAudio: jest.fn() };
 });
 const { warmupAudio } = require('../../utils/warmupAudio');
+jest.mock('../../services/audioHiveSync', () => ({ resyncAudioPost: jest.fn(async () => ({ checked: 1, retitled: 1, errors: 0 })) }));
+const { resyncAudioPost } = require('../../services/audioHiveSync');
 const curation = require('../../utils/curation');
 const realDb = require('../../utils/db');
 
@@ -679,5 +681,24 @@ describe('GET /audio/:permlink/subtitles', () => {
     const hit = await request(app).get('/audio/t/subtitles').expect(200);
     expect(hit.body).toMatchObject({ found: true, subtitles: { permlink: 't', subtitles: { en: 'cid' } } });
     expect((await request(app).get('/audio/none/subtitles').expect(200)).body).toEqual({ found: false, subtitles: null });
+  });
+});
+
+describe('POST /audio/resync: an edited post title, read again from Hive', () => {
+  test('needs the API key and a valid post, and never takes a title from the body', async () => {
+    await request(app).post('/audio/resync').send({ author: 'alice', permlink: 'p' }).expect(401);
+    await request(app).post('/audio/resync').set(apiKeyHeader()).send({ author: 'a b', permlink: 'p' }).expect(400);
+    const res = await request(app).post('/audio/resync').set(apiKeyHeader())
+      .send({ author: 'Alice', permlink: 'post-x', title: 'injected' }).expect(200);
+    expect(res.body).toEqual({ success: true, checked: 1, retitled: 1, errors: 0 });
+    expect(resyncAudioPost).toHaveBeenLastCalledWith('alice', 'post-x');
+  });
+
+  test('brakes at ten re-reads of one post an hour', async () => {
+    for (let i = 0; i < 10; i++) {
+      await request(app).post('/audio/resync').set(apiKeyHeader()).send({ author: 'bob', permlink: 'busy' }).expect(200);
+    }
+    await request(app).post('/audio/resync').set(apiKeyHeader()).send({ author: 'bob', permlink: 'busy' }).expect(429);
+    await request(app).post('/audio/resync').set(apiKeyHeader()).send({ author: 'bob', permlink: 'calm' }).expect(200);
   });
 });

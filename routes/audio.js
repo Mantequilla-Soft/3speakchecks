@@ -10,6 +10,8 @@ const { storedPlaylistType, kindFromCategories, AUDIO_KINDS } = require('../util
 const { nsfwFilter } = require('../utils/filters');
 const { excludeHiddenCreators, hiddenCreatorsOf } = require('../utils/userFilters');
 const { asText } = require('../utils/input');
+const { validateApiKey } = require('../utils/middleware');
+const { resyncAudioPost } = require('../services/audioHiveSync');
 
 // Treat docs with no category as `voice_message` — the default snap-style
 // upload doesn't always set the field. Filtering for voice should catch them.
@@ -319,6 +321,43 @@ function tokenMatches(a, b) {
     if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
     try { return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)); } catch { return false; }
 }
+
+// POST /audio/resync — the audio edit dialog after an edit: re-read the linked
+// post's title from Hive (services/audioHiveSync.js), so an edited title reaches
+// cards, search and RSS at once. body: { author, permlink } (the Hive post).
+// The title is never taken from the request, so the worst a caller can do is
+// ask for a re-read of what is on Hive; the brake keeps that from costing much.
+const resyncBrake = new Map();
+const RESYNC_PER_POST_HOUR = 10;
+const RESYNC_ALL_HOUR = 600;
+function tooManyResyncs(key, now = Date.now()) {
+    const hour = 60 * 60 * 1000;
+    const recent = (k) => (resyncBrake.get(k) || []).filter((t) => now - t < hour);
+    const post = recent(key);
+    const all = recent('*');
+    if (post.length >= RESYNC_PER_POST_HOUR || all.length >= RESYNC_ALL_HOUR) return true;
+    resyncBrake.set(key, [...post, now]);
+    resyncBrake.set('*', [...all, now]);
+    if (resyncBrake.size > 5000) resyncBrake.delete([...resyncBrake.keys()].find((k) => k !== '*'));
+    return false;
+}
+
+router.post('/resync', validateApiKey, async (req, res) => {
+    const b = req.body || {};
+    const author = String(b.author || '').trim().toLowerCase();
+    const permlink = String(b.permlink || '').trim();
+    if (!/^[a-z0-9][a-z0-9.-]{1,31}$/.test(author) || !/^[A-Za-z0-9_.-]{1,256}$/.test(permlink)) {
+        return res.status(400).json({ success: false, error: 'invalid post' });
+    }
+    if (tooManyResyncs(`${author}/${permlink}`)) return res.status(429).json({ success: false, error: 'too many updates' });
+    try {
+        const r = await resyncAudioPost(author, permlink);
+        res.json({ success: true, ...r });
+    } catch (err) {
+        console.error('[audio/resync]', err.message);
+        res.status(500).json({ success: false, error: 'resync failed' });
+    }
+});
 
 // POST /audio/play-start — open a measured listen session
 // body: { permlink, username? }   (username only credited if logged in)
