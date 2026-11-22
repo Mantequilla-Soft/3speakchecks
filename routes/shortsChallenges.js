@@ -1,8 +1,10 @@
 /**
- * 🏁 Weekly Shorts challenge (utils/shortsChallenge.js has the model).
+ * 🏁 Weekly Shorts challenge (utils/shortsChallenge.js has the model; weeks run
+ * Sunday to Saturday, UTC).
  *
  * Public:
- *   GET /shorts-challenges                  this week, next week and the 8 before,
+ *   GET /shorts-challenges                  this week, next week and the 8 before
+ *                                           (?past=1..104 for more, the week picker),
  *                                           each with its checked-entry count
  *   GET /shorts-challenges/:week            one week ('2026-W48'), with its count
  *   GET /shorts-challenges/:week/entries    the week's CHECKED entries, newest
@@ -43,6 +45,7 @@ const ACCOUNT_RE = /^[a-z][a-z0-9.-]{2,15}$/;
 const PERMLINK_RE = /^[a-z0-9-]{1,255}$/;
 const THEME_RE = /^[A-Za-z0-9_-]{1,40}$/;
 const PAST_COUNT = 8;
+const PAST_MAX = 104;
 const MAX_LIMIT = 50;
 
 const limiter = rateLimit({
@@ -148,11 +151,12 @@ router.get('/shorts-challenges', limiter, async (req, res) => {
   await ensureReady(db);
   const now = new Date();
   const thisWeek = weekIdOf(now);
+  const pastCount = Math.min(Math.max(parseInt(req.query.past, 10) || PAST_COUNT, 1), PAST_MAX);
   const col = db.collection(CHALLENGES);
   const [current, next, past] = await Promise.all([
     col.findOne({ _id: thisWeek }),
     col.find({ starts_at: { $gt: now } }).sort({ starts_at: 1 }).limit(1).next(),
-    col.find({ ends_at: { $lt: weekStart(thisWeek) } }).sort({ starts_at: -1 }).limit(PAST_COUNT).toArray(),
+    col.find({ ends_at: { $lt: weekStart(thisWeek) } }).sort({ starts_at: -1 }).limit(pastCount).toArray(),
   ]);
   const counts = await checkedCounts(db, [current, ...past].filter(Boolean).map((c) => c.week));
   res.set('Cache-Control', 'public, max-age=60');
