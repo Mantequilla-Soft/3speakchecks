@@ -4,14 +4,15 @@
  * before 3speak.tv registered them: every Hive post behind an embed-video
  * (videos, Shorts, reactions) and an embed-audio (narrations) row, read from
  * Hive and kept when its json_metadata names a source (utils/derivedSource.js).
- * Only adds rows; safe to run again.
+ * Adds rows, and drops the rows of posts that no longer name a source; safe
+ * to run again.
  *
  *   node scripts/backfill-derived.js [--days 400] [--dry-run]
  */
 require('dotenv').config({ quiet: true });
 const { connectToMongo, getDb, closeMongo } = require('../utils/db');
 const { hiveRpcBatch } = require('../utils/hive');
-const { saveDerived, rowFor } = require('../utils/derivedStore');
+const { saveDerived, rowFor, COLLECTION } = require('../utils/derivedStore');
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(`--${name}`);
@@ -55,6 +56,7 @@ async function posts(db) {
     console.log(`[backfill-derived] ${list.length} posts to read (${DAYS} days)${DRY ? ', dry run' : ''}`);
     const kinds = {};
     let found = 0;
+    let removed = 0;
     for (let i = 0; i < list.length; i += BATCH) {
         const chunk = list.slice(i, i + BATCH);
         let results = [];
@@ -67,19 +69,26 @@ async function posts(db) {
             await sleep(2000);
             continue;
         }
+        const stale = [];
         for (const r of results || []) {
             const post = r?.result;
             if (!post?.author) continue;
             const row = rowFor(post);
-            if (!row) continue;
+            if (!row) { stale.push({ author: post.author, permlink: post.permlink }); continue; }
             found += 1;
             kinds[row.kind] = (kinds[row.kind] || 0) + 1;
             if (!DRY) await saveDerived(db, post);
         }
+        // A row from an earlier run whose post no longer names a source (edited,
+        // or a rule here got stricter) goes.
+        if (stale.length && !DRY) {
+            const gone = await db.collection(COLLECTION).deleteMany({ $or: stale });
+            removed += gone.deletedCount || 0;
+        }
         if ((i / BATCH) % 25 === 0) console.log(`[backfill-derived] ${Math.min(i + BATCH, list.length)}/${list.length}, ${found} derived`);
         await sleep(PAUSE_MS);
     }
-    console.log(`[backfill-derived] done: ${found} derived posts`, kinds);
+    console.log(`[backfill-derived] done: ${found} derived posts, ${removed} stale rows removed`, kinds);
     await closeMongo();
 })().catch((err) => {
     console.error('[backfill-derived] failed:', err.message);
