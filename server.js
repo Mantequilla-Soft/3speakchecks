@@ -366,6 +366,10 @@ async function startServer() {
     }, 60 * 1000);
     console.log('Embed category sync scheduled every 15min (first run in 1min)');
 
+    // 🏁 New Shorts challenge entries to the team's Discord (off without
+    // SHORTS_CHALLENGE_DISCORD_WEBHOOK). See services/shortsChallengeNotify.js.
+    require('./services/shortsChallengeNotify').start();
+
     // Backfill thumbnail_url from the Hive post for docs the upstream publisher
     // left empty (livestream VODs, third-party embed-API uploads) — without it
     // the card falls back to a constructed img.3speak.tv URL that 404s.
