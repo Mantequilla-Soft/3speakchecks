@@ -11,9 +11,10 @@
  *
  *   audiogram     '3speak'.audiogram { author, permlink, start?, duration? }
  *                 a Short cut from an audio episode (the audio editor)
- *   stream_clip   video.streamClip { room, host, offset? }: a clip of a live
+ *   stream_clip   video.streamClip { room, host, offset?, recap? }: a clip of a live
  *                 stream; its VOD is the Hive post host/room (hangouts
- *                 lib/streamVodPublish.ts publishes it under the room name)
+ *                 lib/streamVodPublish.ts publishes it under the room name);
+ *                 `recap: true` = the host's recap of several clips
  *   clip / remix  video.remixChain[0] (nearest first) or video.originalAuthor +
  *                 originalPermlink: a Short made from a video. The creator's own
  *                 video is a clip, anybody else's a remix
@@ -95,7 +96,8 @@ function derivedSourceOf(post) {
         });
     } else if (video.streamClip && typeof video.streamClip === 'object') {
         source = cleanSource({
-            kind: 'stream_clip', author: video.streamClip.host, permlink: video.streamClip.room,
+            kind: video.streamClip.recap === true ? 'recap' : 'stream_clip',
+            author: video.streamClip.host, permlink: video.streamClip.room,
             start: video.streamClip.offset,
         });
     } else if ((Array.isArray(video.remixChain) && video.remixChain[0]) || video.originalAuthor) {

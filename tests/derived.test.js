@@ -36,6 +36,11 @@ describe('derivedSourceOf', () => {
         expect(derivedSourceOf(p)).toEqual({ kind: 'stream_clip', author: 'bob', permlink: 'bob-abc123', start: 300 });
     });
 
+    test('the host\'s recap of a stream names its VOD as a recap', () => {
+        const p = post({}, { video: { url: 'u', streamClip: { room: 'bob-abc123', host: 'bob', clipper: null, offset: 60, recap: true } } });
+        expect(derivedSourceOf(p)).toEqual({ kind: 'recap', author: 'bob', permlink: 'bob-abc123', start: 60 });
+    });
+
     test('a Short from your own video is a clip, from someone else\'s a remix', () => {
         const own = post({}, { video: { url: 'u', originalAuthor: 'alice', originalPermlink: 'long-one' } });
         const other = post({}, { video: { url: 'u', originalAuthor: 'bob', originalPermlink: 'long-one' } });
