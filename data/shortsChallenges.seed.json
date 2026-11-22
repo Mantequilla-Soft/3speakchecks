@@ -1,0 +1,5222 @@
+[
+ {
+  "week": "2026-W48",
+  "theme": "workspace",
+  "texts": {
+   "en": {
+    "title": "Your workspace",
+    "prompt": "Show where you create: your desk, studio, kitchen or wherever the magic happens."
+   },
+   "bn": {
+    "title": "আপনার কাজের জায়গা",
+    "prompt": "দেখান আপনি কোথায় তৈরি করেন: ডেস্ক, স্টুডিও, রান্নাঘর বা যেখানেই জাদু ঘটে।"
+   },
+   "de": {
+    "title": "Dein Arbeitsplatz",
+    "prompt": "Zeig, wo du kreativ wirst: Schreibtisch, Studio, Küche oder wo auch immer die Magie passiert."
+   },
+   "es": {
+    "title": "Tu espacio de trabajo",
+    "prompt": "Muestra dónde creas: tu escritorio, estudio, cocina o donde ocurra la magia."
+   },
+   "fil": {
+    "title": "Ang workspace mo",
+    "prompt": "Ipakita kung saan ka gumagawa: mesa, studio, kusina o kahit saan nangyayari ang magic."
+   },
+   "fr": {
+    "title": "Votre espace de travail",
+    "prompt": "Montrez où vous créez : bureau, studio, cuisine ou partout où la magie opère."
+   },
+   "hi": {
+    "title": "आपका वर्कस्पेस",
+    "prompt": "दिखाइए आप कहाँ क्रिएट करते हैं: डेस्क, स्टूडियो, किचन या जहाँ भी जादू होता है।"
+   },
+   "id": {
+    "title": "Ruang kerjamu",
+    "prompt": "Tunjukkan tempatmu berkarya: meja, studio, dapur, atau di mana pun keajaiban terjadi."
+   },
+   "it": {
+    "title": "Il tuo spazio di lavoro",
+    "prompt": "Mostra dove crei: la scrivania, lo studio, la cucina o ovunque nasca la magia."
+   },
+   "ja": {
+    "title": "あなたの作業場",
+    "prompt": "創作している場所を見せてください。デスク、スタジオ、キッチンなど、魔法が生まれる場所ならどこでも。"
+   },
+   "ko": {
+    "title": "나의 작업 공간",
+    "prompt": "창작하는 곳을 보여 주세요. 책상, 스튜디오, 부엌 등 마법이 일어나는 곳이라면 어디든 좋아요."
+   },
+   "nl": {
+    "title": "Jouw werkplek",
+    "prompt": "Laat zien waar je creëert: je bureau, studio, keuken of waar de magie ook gebeurt."
+   },
+   "pl": {
+    "title": "Twoje miejsce pracy",
+    "prompt": "Pokaż, gdzie tworzysz: biurko, studio, kuchnię albo inne miejsce, gdzie dzieje się magia."
+   },
+   "pt": {
+    "title": "Seu espaço de trabalho",
+    "prompt": "Mostre onde você cria: sua mesa, estúdio, cozinha ou onde a mágica acontece."
+   },
+   "ru": {
+    "title": "Ваше рабочее место",
+    "prompt": "Покажите, где вы творите: стол, студия, кухня или любое место, где происходит магия."
+   },
+   "sw": {
+    "title": "Mahali pako pa kazi",
+    "prompt": "Onyesha unapobunia: meza yako, studio, jikoni au popote maajabu yanapotokea."
+   },
+   "th": {
+    "title": "พื้นที่ทำงานของคุณ",
+    "prompt": "พาไปดูที่ที่คุณสร้างสรรค์งาน: โต๊ะ สตูดิโอ ห้องครัว หรือที่ไหนก็ตามที่เวทมนตร์เกิดขึ้น"
+   },
+   "tr": {
+    "title": "Çalışma alanın",
+    "prompt": "Nerede üretiyorsan göster: masan, stüdyon, mutfağın ya da sihrin gerçekleştiği her yer."
+   },
+   "uk": {
+    "title": "Ваше робоче місце",
+    "prompt": "Покажіть, де ви творите: стіл, студія, кухня чи будь-яке місце, де відбувається магія."
+   },
+   "vi": {
+    "title": "Góc làm việc của bạn",
+    "prompt": "Cho mọi người xem nơi bạn sáng tạo: bàn làm việc, studio, căn bếp hay bất cứ đâu phép màu xảy ra."
+   },
+   "zh": {
+    "title": "你的工作空间",
+    "prompt": "展示你创作的地方：书桌、工作室、厨房，或任何奇迹发生的角落。"
+   }
+  }
+ },
+ {
+  "week": "2026-W49",
+  "theme": "oneSkill",
+  "texts": {
+   "en": {
+    "title": "One skill in 60 seconds",
+    "prompt": "Teach one thing you know well in under a minute."
+   },
+   "bn": {
+    "title": "60 সেকেন্ডে একটি দক্ষতা",
+    "prompt": "আপনি ভালো জানেন এমন একটি জিনিস এক মিনিটের কম সময়ে শেখান।"
+   },
+   "de": {
+    "title": "Ein Skill in 60 Sekunden",
+    "prompt": "Bring uns in unter einer Minute etwas bei, das du richtig gut kannst."
+   },
+   "es": {
+    "title": "Una habilidad en 60 segundos",
+    "prompt": "Enseña algo que dominas en menos de un minuto."
+   },
+   "fil": {
+    "title": "Isang skill sa 60 segundo",
+    "prompt": "Magturo ng isang bagay na alam na alam mo sa loob ng wala pang isang minuto."
+   },
+   "fr": {
+    "title": "Un savoir-faire en 60 secondes",
+    "prompt": "Apprenez-nous une chose que vous maîtrisez, en moins d'une minute."
+   },
+   "hi": {
+    "title": "60 सेकंड में एक हुनर",
+    "prompt": "जो चीज़ आप अच्छी तरह जानते हैं, उसे एक मिनट से कम में सिखाइए।"
+   },
+   "id": {
+    "title": "Satu keahlian dalam 60 detik",
+    "prompt": "Ajarkan satu hal yang kamu kuasai dalam waktu kurang dari semenit."
+   },
+   "it": {
+    "title": "Un'abilità in 60 secondi",
+    "prompt": "Insegna una cosa che sai fare bene in meno di un minuto."
+   },
+   "ja": {
+    "title": "60秒でひとつのスキル",
+    "prompt": "得意なことをひとつ、1分以内で教えてください。"
+   },
+   "ko": {
+    "title": "60초 안에 기술 하나",
+    "prompt": "잘 아는 것 하나를 1분 안에 가르쳐 주세요."
+   },
+   "nl": {
+    "title": "Eén vaardigheid in 60 seconden",
+    "prompt": "Leer ons in minder dan een minuut iets wat je goed kunt."
+   },
+   "pl": {
+    "title": "Jedna umiejętność w 60 sekund",
+    "prompt": "Naucz nas w niecałą minutę czegoś, co dobrze umiesz."
+   },
+   "pt": {
+    "title": "Uma habilidade em 60 segundos",
+    "prompt": "Ensine algo que você domina em menos de um minuto."
+   },
+   "ru": {
+    "title": "Один навык за 60 секунд",
+    "prompt": "Научите нас тому, что хорошо умеете, меньше чем за минуту."
+   },
+   "sw": {
+    "title": "Ujuzi mmoja kwa sekunde 60",
+    "prompt": "Fundisha jambo moja unalolijua vizuri kwa chini ya dakika moja."
+   },
+   "th": {
+    "title": "หนึ่งทักษะใน 60 วินาที",
+    "prompt": "สอนสิ่งที่คุณถนัดหนึ่งอย่างในเวลาไม่ถึงนาที"
+   },
+   "tr": {
+    "title": "60 saniyede bir beceri",
+    "prompt": "İyi bildiğin bir şeyi bir dakikadan kısa sürede öğret."
+   },
+   "uk": {
+    "title": "Одна навичка за 60 секунд",
+    "prompt": "Навчіть нас того, що добре вмієте, менш ніж за хвилину."
+   },
+   "vi": {
+    "title": "Một kỹ năng trong 60 giây",
+    "prompt": "Dạy một điều bạn rành trong chưa đầy một phút."
+   },
+   "zh": {
+    "title": "60 秒学一招",
+    "prompt": "用不到一分钟，教大家一件你擅长的事。"
+   }
+  }
+ },
+ {
+  "week": "2026-W50",
+  "theme": "seasonWhereYouAre",
+  "texts": {
+   "en": {
+    "title": "The season where you are",
+    "prompt": "Winter or summer, show what this time of year looks like where you live."
+   },
+   "bn": {
+    "title": "আপনার এলাকার ঋতু",
+    "prompt": "শীত হোক বা গ্রীষ্ম, দেখান বছরের এই সময়ে আপনার এলাকা কেমন দেখায়।"
+   },
+   "de": {
+    "title": "Die Jahreszeit bei dir",
+    "prompt": "Winter oder Sommer: Zeig, wie diese Zeit des Jahres dort aussieht, wo du lebst."
+   },
+   "es": {
+    "title": "La estación donde estás",
+    "prompt": "Invierno o verano, muestra cómo se ve esta época del año donde vives."
+   },
+   "fil": {
+    "title": "Ang panahon sa lugar mo",
+    "prompt": "Taglamig, tag-init o tag-ulan, ipakita ang itsura ng panahong ito kung saan ka nakatira."
+   },
+   "fr": {
+    "title": "La saison chez vous",
+    "prompt": "Hiver ou été, montrez à quoi ressemble cette période de l'année là où vous vivez."
+   },
+   "hi": {
+    "title": "आपके यहाँ का मौसम",
+    "prompt": "सर्दी हो या गर्मी, दिखाइए कि साल के इस समय आपके यहाँ कैसा नज़ारा है।"
+   },
+   "id": {
+    "title": "Musim di tempatmu",
+    "prompt": "Dingin atau panas, hujan atau kemarau, tunjukkan suasana waktu ini di tempat tinggalmu."
+   },
+   "it": {
+    "title": "La stagione da te",
+    "prompt": "Inverno o estate, mostra com'è questo periodo dell'anno dove vivi."
+   },
+   "ja": {
+    "title": "あなたの街の季節",
+    "prompt": "冬でも夏でも、この時期にあなたの住む場所がどんな様子か見せてください。"
+   },
+   "ko": {
+    "title": "내가 사는 곳의 계절",
+    "prompt": "겨울이든 여름이든, 이맘때 사는 곳의 모습을 보여 주세요."
+   },
+   "nl": {
+    "title": "Het seizoen bij jou",
+    "prompt": "Winter of zomer: laat zien hoe deze tijd van het jaar eruitziet waar jij woont."
+   },
+   "pl": {
+    "title": "Pora roku u ciebie",
+    "prompt": "Zima czy lato, pokaż, jak wygląda ta pora roku tam, gdzie mieszkasz."
+   },
+   "pt": {
+    "title": "A estação onde você está",
+    "prompt": "Inverno ou verão, mostre como é esta época do ano onde você mora."
+   },
+   "ru": {
+    "title": "Время года у вас",
+    "prompt": "Зима или лето: покажите, как выглядит это время года там, где вы живёте."
+   },
+   "sw": {
+    "title": "Msimu ulipo",
+    "prompt": "Baridi au joto, mvua au kiangazi, onyesha jinsi kipindi hiki cha mwaka kinavyoonekana unapoishi."
+   },
+   "th": {
+    "title": "ฤดูกาลที่บ้านคุณ",
+    "prompt": "หนาว ร้อน หรือฝน พาไปดูว่าช่วงนี้ของปีในที่ที่คุณอยู่เป็นอย่างไร"
+   },
+   "tr": {
+    "title": "Senin oradaki mevsim",
+    "prompt": "Kış ya da yaz, yaşadığın yerde yılın bu zamanının nasıl göründüğünü göster."
+   },
+   "uk": {
+    "title": "Пора року у вас",
+    "prompt": "Зима чи літо: покажіть, який вигляд має ця пора року там, де ви живете."
+   },
+   "vi": {
+    "title": "Mùa này nơi bạn sống",
+    "prompt": "Đông hay hè, hãy cho thấy thời điểm này trong năm trông thế nào ở nơi bạn sống."
+   },
+   "zh": {
+    "title": "你那里的季节",
+    "prompt": "无论冬夏，展示一年中这个时候你所在的地方是什么样子。"
+   }
+  }
+ },
+ {
+  "week": "2026-W51",
+  "theme": "homemadeGift",
+  "texts": {
+   "en": {
+    "title": "Homemade gift",
+    "prompt": "Make, wrap or show off a gift you made yourself."
+   },
+   "bn": {
+    "title": "ঘরে বানানো উপহার",
+    "prompt": "নিজের হাতে বানানো একটি উপহার তৈরি করুন, মুড়িয়ে দিন বা দেখান।"
+   },
+   "de": {
+    "title": "Selbstgemachtes Geschenk",
+    "prompt": "Bastle, verpacke oder zeig ein Geschenk, das du selbst gemacht hast."
+   },
+   "es": {
+    "title": "Regalo hecho en casa",
+    "prompt": "Crea, envuelve o presume un regalo hecho por ti."
+   },
+   "fil": {
+    "title": "Gawang-bahay na regalo",
+    "prompt": "Gumawa, magbalot o ipakita ang regalong ikaw mismo ang gumawa."
+   },
+   "fr": {
+    "title": "Cadeau fait maison",
+    "prompt": "Fabriquez, emballez ou montrez un cadeau que vous avez fait vous-même."
+   },
+   "hi": {
+    "title": "घर का बना तोहफ़ा",
+    "prompt": "खुद बनाया तोहफ़ा बनाइए, पैक कीजिए या दिखाइए।"
+   },
+   "id": {
+    "title": "Hadiah buatan sendiri",
+    "prompt": "Buat, bungkus, atau pamerkan hadiah yang kamu buat sendiri."
+   },
+   "it": {
+    "title": "Regalo fatto in casa",
+    "prompt": "Crea, incarta o mostra un regalo fatto con le tue mani."
+   },
+   "ja": {
+    "title": "手作りのプレゼント",
+    "prompt": "自分で作ったプレゼントを、作る・包む・披露するところを見せてください。"
+   },
+   "ko": {
+    "title": "손수 만든 선물",
+    "prompt": "직접 만든 선물을 만들거나, 포장하거나, 자랑해 보세요."
+   },
+   "nl": {
+    "title": "Zelfgemaakt cadeau",
+    "prompt": "Maak, verpak of laat een cadeau zien dat je zelf hebt gemaakt."
+   },
+   "pl": {
+    "title": "Prezent własnej roboty",
+    "prompt": "Zrób, zapakuj albo pochwal się prezentem, który przygotowujesz samodzielnie."
+   },
+   "pt": {
+    "title": "Presente feito em casa",
+    "prompt": "Faça, embrulhe ou mostre um presente feito por você."
+   },
+   "ru": {
+    "title": "Подарок своими руками",
+    "prompt": "Сделайте, упакуйте или покажите подарок, который сделали сами."
+   },
+   "sw": {
+    "title": "Zawadi ya kutengeneza mwenyewe",
+    "prompt": "Tengeneza, funga au onyesha zawadi uliyotengeneza mwenyewe."
+   },
+   "th": {
+    "title": "ของขวัญทำเอง",
+    "prompt": "ทำ ห่อ หรืออวดของขวัญที่คุณทำเอง"
+   },
+   "tr": {
+    "title": "El yapımı hediye",
+    "prompt": "Kendi yaptığın bir hediyeyi hazırla, paketle ya da göster."
+   },
+   "uk": {
+    "title": "Подарунок своїми руками",
+    "prompt": "Зробіть, запакуйте або покажіть подарунок, який створили самі."
+   },
+   "vi": {
+    "title": "Quà tự làm",
+    "prompt": "Làm, gói hoặc khoe một món quà do chính tay bạn làm."
+   },
+   "zh": {
+    "title": "手作礼物",
+    "prompt": "制作、包装或展示一份你亲手做的礼物。"
+   }
+  }
+ },
+ {
+  "week": "2026-W52",
+  "theme": "festiveFood",
+  "texts": {
+   "en": {
+    "title": "Festive food",
+    "prompt": "The dish your family makes when it is time to celebrate."
+   },
+   "bn": {
+    "title": "উৎসবের খাবার",
+    "prompt": "উদযাপনের সময় এলে আপনার পরিবার যে খাবার রাঁধে।"
+   },
+   "de": {
+    "title": "Festessen",
+    "prompt": "Das Gericht, das deine Familie kocht, wenn es etwas zu feiern gibt."
+   },
+   "es": {
+    "title": "Comida de fiesta",
+    "prompt": "El plato que prepara tu familia cuando toca celebrar."
+   },
+   "fil": {
+    "title": "Pagkaing pang-handaan",
+    "prompt": "Ang lutong ginagawa ng pamilya mo kapag may okasyon."
+   },
+   "fr": {
+    "title": "Plat de fête",
+    "prompt": "Le plat que votre famille prépare quand vient le moment de célébrer."
+   },
+   "hi": {
+    "title": "त्योहार का खाना",
+    "prompt": "वह पकवान जो आपका परिवार जश्न के मौके पर बनाता है।"
+   },
+   "id": {
+    "title": "Hidangan perayaan",
+    "prompt": "Masakan yang dibuat keluargamu saat tiba waktunya merayakan."
+   },
+   "it": {
+    "title": "Cibo delle feste",
+    "prompt": "Il piatto che la tua famiglia prepara quando c'è da festeggiare."
+   },
+   "ja": {
+    "title": "お祝いの料理",
+    "prompt": "お祝いのときに家族が作る料理。"
+   },
+   "ko": {
+    "title": "잔칫날 음식",
+    "prompt": "축하할 일이 있을 때 가족이 만드는 음식을 보여 주세요."
+   },
+   "nl": {
+    "title": "Feestelijk eten",
+    "prompt": "Het gerecht dat je familie maakt als er iets te vieren valt."
+   },
+   "pl": {
+    "title": "Świąteczne jedzenie",
+    "prompt": "Danie, które twoja rodzina przygotowuje, gdy jest okazja do świętowania."
+   },
+   "pt": {
+    "title": "Comida de festa",
+    "prompt": "O prato que sua família prepara quando é hora de comemorar."
+   },
+   "ru": {
+    "title": "Праздничное блюдо",
+    "prompt": "Блюдо, которое ваша семья готовит, когда пора праздновать."
+   },
+   "sw": {
+    "title": "Chakula cha sherehe",
+    "prompt": "Mlo ambao familia yako hupika wakati wa kusherehekea."
+   },
+   "th": {
+    "title": "อาหารฉลองเทศกาล",
+    "prompt": "เมนูที่ครอบครัวคุณทำเมื่อถึงเวลาเฉลิมฉลอง"
+   },
+   "tr": {
+    "title": "Bayram sofrası",
+    "prompt": "Kutlama zamanı geldiğinde ailenin yaptığı yemek."
+   },
+   "uk": {
+    "title": "Святкова страва",
+    "prompt": "Страва, яку ваша родина готує, коли час святкувати."
+   },
+   "vi": {
+    "title": "Món ăn ngày lễ",
+    "prompt": "Món ăn gia đình bạn nấu mỗi dịp ăn mừng."
+   },
+   "zh": {
+    "title": "节庆美食",
+    "prompt": "每到庆祝的时候，你家都会做的那道菜。"
+   }
+  }
+ },
+ {
+  "week": "2026-W53",
+  "theme": "bestOfYear",
+  "texts": {
+   "en": {
+    "title": "Best of your year",
+    "prompt": "Your favorite moment of this year in one Short."
+   },
+   "bn": {
+    "title": "আপনার বছরের সেরা",
+    "prompt": "এ বছরের আপনার প্রিয় মুহূর্ত, একটি শর্টে।"
+   },
+   "de": {
+    "title": "Das Beste deines Jahres",
+    "prompt": "Dein Lieblingsmoment dieses Jahres in einem Short."
+   },
+   "es": {
+    "title": "Lo mejor de tu año",
+    "prompt": "Tu momento favorito de este año en un Short."
+   },
+   "fil": {
+    "title": "Pinakamaganda sa taon mo",
+    "prompt": "Ang paborito mong sandali ngayong taon sa isang Short."
+   },
+   "fr": {
+    "title": "Le meilleur de votre année",
+    "prompt": "Votre moment préféré de l'année en un Short."
+   },
+   "hi": {
+    "title": "आपके साल का बेस्ट",
+    "prompt": "इस साल का अपना पसंदीदा पल, एक शॉर्ट में।"
+   },
+   "id": {
+    "title": "Momen terbaik tahun ini",
+    "prompt": "Momen favoritmu tahun ini dalam satu Shorts."
+   },
+   "it": {
+    "title": "Il meglio del tuo anno",
+    "prompt": "Il tuo momento preferito di quest'anno in uno Short."
+   },
+   "ja": {
+    "title": "今年のベスト",
+    "prompt": "今年いちばんのお気に入りの瞬間を、ひとつのショートで。"
+   },
+   "ko": {
+    "title": "올해의 베스트",
+    "prompt": "올해 가장 좋았던 순간을 쇼츠 하나에 담아 보세요."
+   },
+   "nl": {
+    "title": "Het beste van jouw jaar",
+    "prompt": "Je favoriete moment van dit jaar in één Short."
+   },
+   "pl": {
+    "title": "Najlepsze z twojego roku",
+    "prompt": "Twój ulubiony moment tego roku w jednym Shorcie."
+   },
+   "pt": {
+    "title": "O melhor do seu ano",
+    "prompt": "Seu momento favorito deste ano em um Short."
+   },
+   "ru": {
+    "title": "Лучшее за год",
+    "prompt": "Ваш любимый момент этого года в одном Short."
+   },
+   "sw": {
+    "title": "Bora wa mwaka wako",
+    "prompt": "Wakati unaoupenda zaidi mwaka huu katika Short moja."
+   },
+   "th": {
+    "title": "ที่สุดของปีคุณ",
+    "prompt": "ช่วงเวลาโปรดของคุณในปีนี้ใน Shorts เดียว"
+   },
+   "tr": {
+    "title": "Yılının en iyisi",
+    "prompt": "Bu yılki en sevdiğin an, tek bir Short'ta."
+   },
+   "uk": {
+    "title": "Найкраще за рік",
+    "prompt": "Ваш улюблений момент цього року в одному Short."
+   },
+   "vi": {
+    "title": "Khoảnh khắc đẹp nhất năm",
+    "prompt": "Khoảnh khắc bạn thích nhất trong năm nay, gói gọn trong một Shorts."
+   },
+   "zh": {
+    "title": "你的年度最佳",
+    "prompt": "用一条短视频记录你今年最喜欢的时刻。"
+   }
+  }
+ },
+ {
+  "week": "2027-W01",
+  "theme": "newYearGoal",
+  "texts": {
+   "en": {
+    "title": "One goal for the new year",
+    "prompt": "Tell us one thing you want to do this year and how you will start."
+   },
+   "bn": {
+    "title": "নতুন বছরের একটি লক্ষ্য",
+    "prompt": "এ বছর আপনি কোন একটি কাজ করতে চান আর কীভাবে শুরু করবেন, আমাদের বলুন।"
+   },
+   "de": {
+    "title": "Ein Ziel fürs neue Jahr",
+    "prompt": "Erzähl uns, was du dieses Jahr vorhast und wie du anfängst."
+   },
+   "es": {
+    "title": "Una meta para el año nuevo",
+    "prompt": "Cuéntanos algo que quieres hacer este año y cómo vas a empezar."
+   },
+   "fil": {
+    "title": "Isang goal sa bagong taon",
+    "prompt": "Sabihin sa amin ang isang bagay na gusto mong gawin ngayong taon at kung paano ka magsisimula."
+   },
+   "fr": {
+    "title": "Un objectif pour la nouvelle année",
+    "prompt": "Dites-nous une chose que vous voulez faire cette année et comment vous allez commencer."
+   },
+   "hi": {
+    "title": "नए साल का एक लक्ष्य",
+    "prompt": "हमें बताइए कि इस साल आप कौन-सी एक चीज़ करना चाहते हैं और शुरुआत कैसे करेंगे।"
+   },
+   "id": {
+    "title": "Satu tujuan untuk tahun baru",
+    "prompt": "Ceritakan satu hal yang ingin kamu lakukan tahun ini dan bagaimana kamu akan memulainya."
+   },
+   "it": {
+    "title": "Un obiettivo per l'anno nuovo",
+    "prompt": "Raccontaci una cosa che vuoi fare quest'anno e come inizierai."
+   },
+   "ja": {
+    "title": "新年の目標をひとつ",
+    "prompt": "今年やりたいことをひとつと、どう始めるかを教えてください。"
+   },
+   "ko": {
+    "title": "새해 목표 하나",
+    "prompt": "올해 하고 싶은 일 하나와 어떻게 시작할지 알려 주세요."
+   },
+   "nl": {
+    "title": "Eén doel voor het nieuwe jaar",
+    "prompt": "Vertel ons wat je dit jaar wilt doen en hoe je begint."
+   },
+   "pl": {
+    "title": "Jeden cel na nowy rok",
+    "prompt": "Powiedz, co chcesz zrobić w tym roku i jak zaczniesz."
+   },
+   "pt": {
+    "title": "Uma meta para o ano novo",
+    "prompt": "Conte algo que você quer fazer este ano e como vai começar."
+   },
+   "ru": {
+    "title": "Одна цель на новый год",
+    "prompt": "Расскажите, что хотите сделать в этом году и с чего начнёте."
+   },
+   "sw": {
+    "title": "Lengo moja la mwaka mpya",
+    "prompt": "Tuambie jambo moja unalotaka kufanya mwaka huu na jinsi utakavyoanza."
+   },
+   "th": {
+    "title": "หนึ่งเป้าหมายสำหรับปีใหม่",
+    "prompt": "เล่าสิ่งหนึ่งที่คุณอยากทำในปีนี้ และคุณจะเริ่มอย่างไร"
+   },
+   "tr": {
+    "title": "Yeni yıl için bir hedef",
+    "prompt": "Bu yıl yapmak istediğin bir şeyi ve nasıl başlayacağını anlat."
+   },
+   "uk": {
+    "title": "Одна мета на новий рік",
+    "prompt": "Розкажіть, що хочете зробити цього року і з чого почнете."
+   },
+   "vi": {
+    "title": "Một mục tiêu cho năm mới",
+    "prompt": "Kể cho chúng tôi một điều bạn muốn làm năm nay và bạn sẽ bắt đầu thế nào."
+   },
+   "zh": {
+    "title": "新年的一个目标",
+    "prompt": "告诉我们你今年想做的一件事，以及你打算怎样开始。"
+   }
+  }
+ },
+ {
+  "week": "2027-W02",
+  "theme": "morningRoutine",
+  "texts": {
+   "en": {
+    "title": "Morning routine",
+    "prompt": "The first 30 minutes of your day."
+   },
+   "bn": {
+    "title": "সকালের রুটিন",
+    "prompt": "আপনার দিনের প্রথম 30 মিনিট।"
+   },
+   "de": {
+    "title": "Morgenroutine",
+    "prompt": "Die ersten 30 Minuten deines Tages."
+   },
+   "es": {
+    "title": "Rutina de mañana",
+    "prompt": "Los primeros 30 minutos de tu día."
+   },
+   "fil": {
+    "title": "Morning routine",
+    "prompt": "Ang unang 30 minuto ng araw mo."
+   },
+   "fr": {
+    "title": "Routine du matin",
+    "prompt": "Les 30 premières minutes de votre journée."
+   },
+   "hi": {
+    "title": "मॉर्निंग रूटीन",
+    "prompt": "आपके दिन के पहले 30 मिनट।"
+   },
+   "id": {
+    "title": "Rutinitas pagi",
+    "prompt": "30 menit pertama harimu."
+   },
+   "it": {
+    "title": "Routine del mattino",
+    "prompt": "I primi 30 minuti della tua giornata."
+   },
+   "ja": {
+    "title": "朝のルーティン",
+    "prompt": "あなたの一日の最初の30分。"
+   },
+   "ko": {
+    "title": "모닝 루틴",
+    "prompt": "하루의 첫 30분을 보여 주세요."
+   },
+   "nl": {
+    "title": "Ochtendroutine",
+    "prompt": "De eerste 30 minuten van je dag."
+   },
+   "pl": {
+    "title": "Poranna rutyna",
+    "prompt": "Pierwsze 30 minut twojego dnia."
+   },
+   "pt": {
+    "title": "Rotina da manhã",
+    "prompt": "Os primeiros 30 minutos do seu dia."
+   },
+   "ru": {
+    "title": "Утренний ритуал",
+    "prompt": "Первые 30 минут вашего дня."
+   },
+   "sw": {
+    "title": "Utaratibu wa asubuhi",
+    "prompt": "Dakika 30 za kwanza za siku yako."
+   },
+   "th": {
+    "title": "กิจวัตรยามเช้า",
+    "prompt": "30 นาทีแรกของวันคุณ"
+   },
+   "tr": {
+    "title": "Sabah rutini",
+    "prompt": "Gününün ilk 30 dakikası."
+   },
+   "uk": {
+    "title": "Ранковий ритуал",
+    "prompt": "Перші 30 хвилин вашого дня."
+   },
+   "vi": {
+    "title": "Thói quen buổi sáng",
+    "prompt": "30 phút đầu tiên trong ngày của bạn."
+   },
+   "zh": {
+    "title": "晨间日常",
+    "prompt": "你一天中的头 30 分钟。"
+   }
+  }
+ },
+ {
+  "week": "2027-W03",
+  "theme": "beforeAfter",
+  "texts": {
+   "en": {
+    "title": "Before and after",
+    "prompt": "Clean, fix, build or change something and show both sides."
+   },
+   "bn": {
+    "title": "আগে ও পরে",
+    "prompt": "কিছু পরিষ্কার করুন, সারান, বানান বা বদলান, আর দুই দিকই দেখান।"
+   },
+   "de": {
+    "title": "Vorher und nachher",
+    "prompt": "Putz, repariere, bau oder verändere etwas und zeig beide Seiten."
+   },
+   "es": {
+    "title": "Antes y después",
+    "prompt": "Limpia, arregla, construye o cambia algo y muestra ambos lados."
+   },
+   "fil": {
+    "title": "Bago at pagkatapos",
+    "prompt": "Maglinis, mag-ayos, bumuo o magbago ng isang bagay at ipakita ang dalawang panig."
+   },
+   "fr": {
+    "title": "Avant / après",
+    "prompt": "Nettoyez, réparez, construisez ou transformez quelque chose et montrez les deux côtés."
+   },
+   "hi": {
+    "title": "पहले और बाद में",
+    "prompt": "कुछ साफ़ करें, ठीक करें, बनाएँ या बदलें, और दोनों रूप दिखाएँ।"
+   },
+   "id": {
+    "title": "Sebelum dan sesudah",
+    "prompt": "Bersihkan, perbaiki, bangun, atau ubah sesuatu, lalu tunjukkan keduanya."
+   },
+   "it": {
+    "title": "Prima e dopo",
+    "prompt": "Pulisci, ripara, costruisci o cambia qualcosa e mostra entrambi i lati."
+   },
+   "ja": {
+    "title": "ビフォーアフター",
+    "prompt": "何かを掃除、修理、制作、または変えて、その前と後を見せてください。"
+   },
+   "ko": {
+    "title": "비포 앤 애프터",
+    "prompt": "무언가를 청소하거나, 고치거나, 만들거나, 바꾸고 전후를 모두 보여 주세요."
+   },
+   "nl": {
+    "title": "Voor en na",
+    "prompt": "Maak iets schoon, repareer, bouw of verander iets en laat beide kanten zien."
+   },
+   "pl": {
+    "title": "Przed i po",
+    "prompt": "Posprzątaj, napraw, zbuduj lub zmień coś i pokaż obie strony."
+   },
+   "pt": {
+    "title": "Antes e depois",
+    "prompt": "Limpe, conserte, construa ou mude algo e mostre os dois lados."
+   },
+   "ru": {
+    "title": "До и после",
+    "prompt": "Уберите, почините, постройте или измените что-то и покажите оба варианта."
+   },
+   "sw": {
+    "title": "Kabla na baada",
+    "prompt": "Safisha, rekebisha, jenga au badilisha kitu, kisha onyesha pande zote mbili."
+   },
+   "th": {
+    "title": "ก่อนและหลัง",
+    "prompt": "ทำความสะอาด ซ่อม สร้าง หรือเปลี่ยนอะไรสักอย่าง แล้วโชว์ทั้งก่อนและหลัง"
+   },
+   "tr": {
+    "title": "Öncesi ve sonrası",
+    "prompt": "Bir şeyi temizle, onar, inşa et ya da değiştir ve iki hâlini de göster."
+   },
+   "uk": {
+    "title": "До і після",
+    "prompt": "Приберіть, полагодьте, збудуйте чи змініть щось і покажіть обидва варіанти."
+   },
+   "vi": {
+    "title": "Trước và sau",
+    "prompt": "Dọn dẹp, sửa chữa, xây dựng hoặc thay đổi một thứ gì đó và cho xem cả trước lẫn sau."
+   },
+   "zh": {
+    "title": "前后对比",
+    "prompt": "打扫、修理、制作或改变一样东西，展示前后的样子。"
+   }
+  }
+ },
+ {
+  "week": "2027-W04",
+  "theme": "hiddenGem",
+  "texts": {
+   "en": {
+    "title": "Hidden gem nearby",
+    "prompt": "A place near you that most people walk right past."
+   },
+   "bn": {
+    "title": "কাছের লুকানো রত্ন",
+    "prompt": "আপনার কাছের এমন একটি জায়গা, যার পাশ দিয়ে বেশিরভাগ মানুষ খেয়াল না করেই চলে যায়।"
+   },
+   "de": {
+    "title": "Geheimtipp in der Nähe",
+    "prompt": "Ein Ort in deiner Nähe, an dem die meisten einfach vorbeilaufen."
+   },
+   "es": {
+    "title": "Un rincón escondido",
+    "prompt": "Un lugar cerca de ti por el que casi todos pasan de largo."
+   },
+   "fil": {
+    "title": "Hidden gem sa malapit",
+    "prompt": "Isang lugar malapit sa iyo na nilalampasan lang ng karamihan."
+   },
+   "fr": {
+    "title": "Une pépite près de chez vous",
+    "prompt": "Un lieu tout proche devant lequel la plupart des gens passent sans le voir."
+   },
+   "hi": {
+    "title": "पास का छिपा खज़ाना",
+    "prompt": "आपके पास की वह जगह जिसके पास से ज़्यादातर लोग बिना ध्यान दिए गुज़र जाते हैं।"
+   },
+   "id": {
+    "title": "Permata tersembunyi di dekatmu",
+    "prompt": "Tempat di dekatmu yang sering dilewati begitu saja oleh kebanyakan orang."
+   },
+   "it": {
+    "title": "Un gioiello nascosto",
+    "prompt": "Un posto vicino a te davanti al quale quasi tutti passano senza notarlo."
+   },
+   "ja": {
+    "title": "近所の穴場",
+    "prompt": "近くにあるのに、ほとんどの人が素通りしてしまう場所。"
+   },
+   "ko": {
+    "title": "동네 숨은 명소",
+    "prompt": "대부분의 사람이 그냥 지나치는 가까운 장소."
+   },
+   "nl": {
+    "title": "Verborgen parel in de buurt",
+    "prompt": "Een plek bij jou in de buurt waar de meeste mensen zo voorbijlopen."
+   },
+   "pl": {
+    "title": "Ukryta perełka w okolicy",
+    "prompt": "Miejsce niedaleko ciebie, obok którego większość ludzi po prostu przechodzi."
+   },
+   "pt": {
+    "title": "Joia escondida por perto",
+    "prompt": "Um lugar perto de você pelo qual quase todo mundo passa sem notar."
+   },
+   "ru": {
+    "title": "Скрытая жемчужина рядом",
+    "prompt": "Место рядом с вами, мимо которого почти все проходят."
+   },
+   "sw": {
+    "title": "Hazina iliyofichika karibu nawe",
+    "prompt": "Mahali karibu nawe ambapo watu wengi hupita tu bila kugundua."
+   },
+   "th": {
+    "title": "ของดีลับใกล้ตัว",
+    "prompt": "สถานที่ใกล้คุณที่คนส่วนใหญ่มักเดินผ่านไปเฉยๆ"
+   },
+   "tr": {
+    "title": "Yakındaki gizli cevher",
+    "prompt": "Yakınında, çoğu insanın önünden geçip gittiği bir yer."
+   },
+   "uk": {
+    "title": "Прихована перлина поруч",
+    "prompt": "Місце неподалік, повз яке майже всі просто проходять."
+   },
+   "vi": {
+    "title": "Viên ngọc ẩn gần bạn",
+    "prompt": "Một nơi gần bạn mà hầu hết mọi người đều đi ngang qua mà không để ý."
+   },
+   "zh": {
+    "title": "身边的宝藏地点",
+    "prompt": "你附近一个大多数人都会直接走过的地方。"
+   }
+  }
+ },
+ {
+  "week": "2027-W05",
+  "theme": "threeIngredients",
+  "texts": {
+   "en": {
+    "title": "Three ingredients",
+    "prompt": "Cook something tasty with only three ingredients."
+   },
+   "bn": {
+    "title": "তিনটি উপকরণ",
+    "prompt": "মাত্র তিনটি উপকরণ দিয়ে সুস্বাদু কিছু রান্না করুন।"
+   },
+   "de": {
+    "title": "Drei Zutaten",
+    "prompt": "Koch etwas Leckeres mit nur drei Zutaten."
+   },
+   "es": {
+    "title": "Tres ingredientes",
+    "prompt": "Cocina algo rico con solo tres ingredientes."
+   },
+   "fil": {
+    "title": "Tatlong sangkap",
+    "prompt": "Magluto ng masarap gamit lang ang tatlong sangkap."
+   },
+   "fr": {
+    "title": "Trois ingrédients",
+    "prompt": "Cuisinez quelque chose de bon avec seulement trois ingrédients."
+   },
+   "hi": {
+    "title": "सिर्फ़ तीन सामग्री",
+    "prompt": "सिर्फ़ तीन सामग्री से कुछ स्वादिष्ट बनाइए।"
+   },
+   "id": {
+    "title": "Tiga bahan",
+    "prompt": "Masak sesuatu yang lezat hanya dengan tiga bahan."
+   },
+   "it": {
+    "title": "Tre ingredienti",
+    "prompt": "Cucina qualcosa di buono con soli tre ingredienti."
+   },
+   "ja": {
+    "title": "材料3つだけ",
+    "prompt": "材料3つだけでおいしい料理を作ってください。"
+   },
+   "ko": {
+    "title": "재료 세 가지",
+    "prompt": "재료 세 가지만으로 맛있는 요리를 만들어 보세요."
+   },
+   "nl": {
+    "title": "Drie ingrediënten",
+    "prompt": "Kook iets lekkers met maar drie ingrediënten."
+   },
+   "pl": {
+    "title": "Trzy składniki",
+    "prompt": "Ugotuj coś pysznego tylko z trzech składników."
+   },
+   "pt": {
+    "title": "Três ingredientes",
+    "prompt": "Cozinhe algo gostoso com apenas três ingredientes."
+   },
+   "ru": {
+    "title": "Три ингредиента",
+    "prompt": "Приготовьте что-то вкусное всего из трёх ингредиентов."
+   },
+   "sw": {
+    "title": "Viungo vitatu",
+    "prompt": "Pika kitu kitamu kwa viungo vitatu tu."
+   },
+   "th": {
+    "title": "สามวัตถุดิบ",
+    "prompt": "ทำอาหารอร่อยๆ ด้วยวัตถุดิบเพียงสามอย่าง"
+   },
+   "tr": {
+    "title": "Üç malzeme",
+    "prompt": "Sadece üç malzemeyle lezzetli bir şey pişir."
+   },
+   "uk": {
+    "title": "Три інгредієнти",
+    "prompt": "Приготуйте щось смачне лише з трьох інгредієнтів."
+   },
+   "vi": {
+    "title": "Ba nguyên liệu",
+    "prompt": "Nấu một món ngon chỉ với ba nguyên liệu."
+   },
+   "zh": {
+    "title": "三种食材",
+    "prompt": "只用三种食材做一道美味。"
+   }
+  }
+ },
+ {
+  "week": "2027-W06",
+  "theme": "whatsInYourBag",
+  "texts": {
+   "en": {
+    "title": "What's in your bag",
+    "prompt": "Empty your bag, pockets or backpack and tell the story of each thing."
+   },
+   "bn": {
+    "title": "আপনার ব্যাগে কী আছে",
+    "prompt": "ব্যাগ, পকেট বা ব্যাকপ্যাক খালি করুন আর প্রতিটি জিনিসের গল্প বলুন।"
+   },
+   "de": {
+    "title": "Was ist in deiner Tasche?",
+    "prompt": "Leer deine Tasche, Hosentaschen oder deinen Rucksack und erzähl die Geschichte zu jedem Teil."
+   },
+   "es": {
+    "title": "¿Qué llevas en la bolsa?",
+    "prompt": "Vacía tu bolso, tus bolsillos o tu mochila y cuenta la historia de cada cosa."
+   },
+   "fil": {
+    "title": "Ano'ng laman ng bag mo",
+    "prompt": "Ilabas ang laman ng bag, bulsa o backpack mo at ikuwento ang bawat isa."
+   },
+   "fr": {
+    "title": "Qu'y a-t-il dans votre sac ?",
+    "prompt": "Videz votre sac, vos poches ou votre sac à dos et racontez l'histoire de chaque objet."
+   },
+   "hi": {
+    "title": "आपके बैग में क्या है",
+    "prompt": "अपना बैग, जेबें या बैकपैक खाली करें और हर चीज़ की कहानी बताएँ।"
+   },
+   "id": {
+    "title": "Isi tasmu",
+    "prompt": "Keluarkan isi tas, saku, atau ranselmu dan ceritakan kisah setiap barangnya."
+   },
+   "it": {
+    "title": "Cosa c'è nella tua borsa",
+    "prompt": "Svuota borsa, tasche o zaino e racconta la storia di ogni oggetto."
+   },
+   "ja": {
+    "title": "カバンの中身",
+    "prompt": "カバン、ポケット、リュックの中身を出して、ひとつずつエピソードを語ってください。"
+   },
+   "ko": {
+    "title": "가방 속 물건",
+    "prompt": "가방, 주머니, 배낭을 비우고 물건마다 얽힌 이야기를 들려주세요."
+   },
+   "nl": {
+    "title": "Wat zit er in je tas?",
+    "prompt": "Maak je tas, zakken of rugzak leeg en vertel het verhaal achter elk ding."
+   },
+   "pl": {
+    "title": "Co masz w torbie?",
+    "prompt": "Opróżnij torbę, kieszenie lub plecak i opowiedz historię każdej rzeczy."
+   },
+   "pt": {
+    "title": "O que tem na sua bolsa",
+    "prompt": "Esvazie sua bolsa, bolsos ou mochila e conte a história de cada coisa."
+   },
+   "ru": {
+    "title": "Что в вашей сумке",
+    "prompt": "Выложите всё из сумки, карманов или рюкзака и расскажите историю каждой вещи."
+   },
+   "sw": {
+    "title": "Kilichomo kwenye begi lako",
+    "prompt": "Toa vitu vyote kwenye begi, mifuko au mkoba wako na usimulie hadithi ya kila kimoja."
+   },
+   "th": {
+    "title": "ในกระเป๋าคุณมีอะไร",
+    "prompt": "เทของในกระเป๋า กระเป๋ากางเกง หรือเป้ของคุณออกมา แล้วเล่าเรื่องของแต่ละชิ้น"
+   },
+   "tr": {
+    "title": "Çantanda ne var?",
+    "prompt": "Çantanı, ceplerini ya da sırt çantanı boşalt ve her şeyin hikâyesini anlat."
+   },
+   "uk": {
+    "title": "Що у вашій сумці",
+    "prompt": "Викладіть усе із сумки, кишень чи рюкзака й розкажіть історію кожної речі."
+   },
+   "vi": {
+    "title": "Trong túi bạn có gì",
+    "prompt": "Dốc hết túi xách, túi quần hay ba lô và kể câu chuyện của từng món."
+   },
+   "zh": {
+    "title": "包里有什么",
+    "prompt": "把包、口袋或背包里的东西倒出来，讲讲每样东西的故事。"
+   }
+  }
+ },
+ {
+  "week": "2027-W07",
+  "theme": "loveYourHobby",
+  "texts": {
+   "en": {
+    "title": "Why I love my hobby",
+    "prompt": "Show the thing you can't stop doing and why it gets you."
+   },
+   "bn": {
+    "title": "কেন আমি আমার শখ ভালোবাসি",
+    "prompt": "যে কাজটা আপনি থামাতেই পারেন না সেটা দেখান, আর কেন সেটা আপনাকে টানে।"
+   },
+   "de": {
+    "title": "Warum ich mein Hobby liebe",
+    "prompt": "Zeig, wovon du nicht lassen kannst, und warum es dich so packt."
+   },
+   "es": {
+    "title": "Por qué amo mi hobby",
+    "prompt": "Muestra eso que no puedes dejar de hacer y por qué te engancha."
+   },
+   "fil": {
+    "title": "Bakit mahal ko ang hobby ko",
+    "prompt": "Ipakita ang bagay na hindi mo mapigilang gawin at kung bakit gustong-gusto mo ito."
+   },
+   "fr": {
+    "title": "Pourquoi j'aime ma passion",
+    "prompt": "Montrez ce que vous ne pouvez pas vous empêcher de faire, et pourquoi ça vous plaît autant."
+   },
+   "hi": {
+    "title": "मुझे अपना शौक क्यों पसंद है",
+    "prompt": "वह चीज़ दिखाइए जिसे आप छोड़ नहीं पाते, और बताइए कि वह आपको इतनी क्यों भाती है।"
+   },
+   "id": {
+    "title": "Kenapa aku suka hobiku",
+    "prompt": "Tunjukkan hal yang tak bisa berhenti kamu lakukan dan kenapa kamu begitu menyukainya."
+   },
+   "it": {
+    "title": "Perché amo il mio hobby",
+    "prompt": "Mostra la cosa che non riesci a smettere di fare e perché ti appassiona."
+   },
+   "ja": {
+    "title": "趣味が好きな理由",
+    "prompt": "やめられないことと、その魅力を見せてください。"
+   },
+   "ko": {
+    "title": "내가 취미를 사랑하는 이유",
+    "prompt": "멈출 수 없는 그 일과 푹 빠진 이유를 보여 주세요."
+   },
+   "nl": {
+    "title": "Waarom ik van mijn hobby houd",
+    "prompt": "Laat zien waar je niet mee kunt stoppen en waarom het je zo pakt."
+   },
+   "pl": {
+    "title": "Dlaczego kocham swoje hobby",
+    "prompt": "Pokaż, od czego nie możesz się oderwać i dlaczego cię to wciąga."
+   },
+   "pt": {
+    "title": "Por que amo meu hobby",
+    "prompt": "Mostre aquilo que você não consegue parar de fazer e por que isso te pega."
+   },
+   "ru": {
+    "title": "За что я люблю своё хобби",
+    "prompt": "Покажите то, от чего не можете оторваться, и чем оно вас цепляет."
+   },
+   "sw": {
+    "title": "Kwa nini napenda hobi yangu",
+    "prompt": "Onyesha jambo usiloweza kuacha kulifanya na kwa nini linakuvutia."
+   },
+   "th": {
+    "title": "ทำไมฉันรักงานอดิเรกนี้",
+    "prompt": "โชว์สิ่งที่คุณหยุดทำไม่ได้ และเหตุผลที่คุณหลงรักมัน"
+   },
+   "tr": {
+    "title": "Hobimi neden seviyorum",
+    "prompt": "Bırakamadığın o şeyi ve seni neden bu kadar sardığını göster."
+   },
+   "uk": {
+    "title": "За що я люблю своє хобі",
+    "prompt": "Покажіть те, від чого не можете відірватися, і чим воно вас захоплює."
+   },
+   "vi": {
+    "title": "Vì sao tôi mê sở thích của mình",
+    "prompt": "Cho xem điều bạn không thể ngừng làm và vì sao nó cuốn hút bạn."
+   },
+   "zh": {
+    "title": "我为什么爱我的爱好",
+    "prompt": "展示你停不下来的那件事，以及它为什么吸引你。"
+   }
+  }
+ },
+ {
+  "week": "2027-W08",
+  "theme": "mythBusted",
+  "texts": {
+   "en": {
+    "title": "Myth busted",
+    "prompt": "A common belief in your field that is wrong, and why."
+   },
+   "bn": {
+    "title": "ভুল ধারণা ভাঙা",
+    "prompt": "আপনার ক্ষেত্রের একটি প্রচলিত ধারণা যা ভুল, এবং কেন।"
+   },
+   "de": {
+    "title": "Mythos entlarvt",
+    "prompt": "Ein verbreiteter Irrtum aus deinem Fachgebiet und warum er falsch ist."
+   },
+   "es": {
+    "title": "Mito desmentido",
+    "prompt": "Una creencia común en tu campo que es falsa, y por qué."
+   },
+   "fil": {
+    "title": "Myth busted",
+    "prompt": "Isang karaniwang paniniwala sa larangan mo na mali pala, at kung bakit."
+   },
+   "fr": {
+    "title": "Idée reçue démontée",
+    "prompt": "Une croyance répandue dans votre domaine qui est fausse, et pourquoi."
+   },
+   "hi": {
+    "title": "मिथक का पर्दाफ़ाश",
+    "prompt": "आपके क्षेत्र की एक आम धारणा जो गलत है, और क्यों।"
+   },
+   "id": {
+    "title": "Mitos terpatahkan",
+    "prompt": "Anggapan umum di bidangmu yang ternyata salah, dan alasannya."
+   },
+   "it": {
+    "title": "Mito sfatato",
+    "prompt": "Una convinzione diffusa nel tuo campo che è sbagliata, e perché."
+   },
+   "ja": {
+    "title": "その常識、間違いです",
+    "prompt": "あなたの分野でよく信じられているけれど間違っていることと、その理由。"
+   },
+   "ko": {
+    "title": "오해 바로잡기",
+    "prompt": "내 분야에서 흔히 믿지만 사실은 틀린 것, 그리고 그 이유."
+   },
+   "nl": {
+    "title": "Mythe ontkracht",
+    "prompt": "Een veelgehoord idee in jouw vakgebied dat niet klopt, en waarom."
+   },
+   "pl": {
+    "title": "Obalony mit",
+    "prompt": "Popularne przekonanie z twojej dziedziny, które jest błędne, i dlaczego."
+   },
+   "pt": {
+    "title": "Mito derrubado",
+    "prompt": "Uma crença comum na sua área que está errada, e por quê."
+   },
+   "ru": {
+    "title": "Миф развенчан",
+    "prompt": "Распространённое заблуждение в вашей сфере и почему оно неверно."
+   },
+   "sw": {
+    "title": "Dhana potofu yavunjwa",
+    "prompt": "Imani ya kawaida katika fani yako ambayo si sahihi, na kwa nini."
+   },
+   "th": {
+    "title": "ไขความเชื่อผิดๆ",
+    "prompt": "ความเชื่อที่คนมักเข้าใจผิดในวงการของคุณ และเพราะอะไร"
+   },
+   "tr": {
+    "title": "Efsane çürütüldü",
+    "prompt": "Alanında yaygın ama yanlış bir inanış ve neden yanlış olduğu."
+   },
+   "uk": {
+    "title": "Міф спростовано",
+    "prompt": "Поширена хибна думка у вашій сфері і чому вона неправильна."
+   },
+   "vi": {
+    "title": "Phá bỏ lầm tưởng",
+    "prompt": "Một quan niệm phổ biến nhưng sai trong lĩnh vực của bạn, và lý do."
+   },
+   "zh": {
+    "title": "破除误区",
+    "prompt": "你所在领域里一个常见但错误的观念，以及原因。"
+   }
+  }
+ },
+ {
+  "week": "2027-W09",
+  "theme": "petCameo",
+  "texts": {
+   "en": {
+    "title": "Pet cameo",
+    "prompt": "Let your pet, or a friend's, be the star."
+   },
+   "bn": {
+    "title": "পোষা প্রাণীর ক্যামিও",
+    "prompt": "আপনার পোষা প্রাণী, বা কোনো বন্ধুর পোষা প্রাণী, হোক আজকের তারকা।"
+   },
+   "de": {
+    "title": "Auftritt fürs Haustier",
+    "prompt": "Lass dein Haustier oder das von Freunden die Hauptrolle spielen."
+   },
+   "es": {
+    "title": "Cameo de mascota",
+    "prompt": "Deja que tu mascota, o la de un amigo, sea la estrella."
+   },
+   "fil": {
+    "title": "Pet cameo",
+    "prompt": "Hayaang ang alaga mo, o ng kaibigan mo, ang maging bida."
+   },
+   "fr": {
+    "title": "Caméo animal",
+    "prompt": "Laissez votre animal, ou celui d'un ami, être la star."
+   },
+   "hi": {
+    "title": "पेट कैमियो",
+    "prompt": "अपने पालतू को, या किसी दोस्त के पालतू को, स्टार बनने दीजिए।"
+   },
+   "id": {
+    "title": "Cameo hewan peliharaan",
+    "prompt": "Jadikan hewan peliharaanmu, atau milik temanmu, sebagai bintangnya."
+   },
+   "it": {
+    "title": "Cameo animale",
+    "prompt": "Lascia che il tuo animale, o quello di un amico, sia la star."
+   },
+   "ja": {
+    "title": "ペットのカメオ出演",
+    "prompt": "あなたのペット、または友だちのペットを主役にしましょう。"
+   },
+   "ko": {
+    "title": "반려동물 카메오",
+    "prompt": "내 반려동물이나 친구의 반려동물을 주인공으로 만들어 주세요."
+   },
+   "nl": {
+    "title": "Huisdier in de hoofdrol",
+    "prompt": "Laat je huisdier, of dat van een vriend, de ster zijn."
+   },
+   "pl": {
+    "title": "Występ pupila",
+    "prompt": "Niech twój zwierzak, albo zwierzak znajomych, będzie gwiazdą."
+   },
+   "pt": {
+    "title": "Participação do pet",
+    "prompt": "Deixe seu pet, ou o de um amigo, ser a estrela."
+   },
+   "ru": {
+    "title": "Питомец в кадре",
+    "prompt": "Пусть ваш питомец, или питомец друга, станет звездой."
+   },
+   "sw": {
+    "title": "Mnyama kipenzi nyota",
+    "prompt": "Mwache mnyama wako kipenzi, au wa rafiki, awe nyota."
+   },
+   "th": {
+    "title": "สัตว์เลี้ยงรับเชิญ",
+    "prompt": "ให้สัตว์เลี้ยงของคุณ หรือของเพื่อน เป็นดาวเด่น"
+   },
+   "tr": {
+    "title": "Konuk yıldız: evcil hayvan",
+    "prompt": "Evcil hayvanın ya da bir arkadaşınınki yıldız olsun."
+   },
+   "uk": {
+    "title": "Улюбленець у кадрі",
+    "prompt": "Нехай ваш улюбленець, або улюбленець друга, стане зіркою."
+   },
+   "vi": {
+    "title": "Thú cưng lên sóng",
+    "prompt": "Để thú cưng của bạn, hoặc của bạn bè, làm ngôi sao."
+   },
+   "zh": {
+    "title": "萌宠客串",
+    "prompt": "让你的宠物，或朋友的宠物，当一回主角。"
+   }
+  }
+ },
+ {
+  "week": "2027-W10",
+  "theme": "dayInTheLife",
+  "texts": {
+   "en": {
+    "title": "A day in the life",
+    "prompt": "Your ordinary day, cut down to one minute."
+   },
+   "bn": {
+    "title": "আমার একটি দিন",
+    "prompt": "আপনার সাধারণ একটি দিন, এক মিনিটে।"
+   },
+   "de": {
+    "title": "Ein Tag in meinem Leben",
+    "prompt": "Dein ganz normaler Tag, auf eine Minute gekürzt."
+   },
+   "es": {
+    "title": "Un día en mi vida",
+    "prompt": "Tu día normal, resumido en un minuto."
+   },
+   "fil": {
+    "title": "Isang araw sa buhay ko",
+    "prompt": "Ang ordinaryong araw mo, pinaikli sa isang minuto."
+   },
+   "fr": {
+    "title": "Une journée dans ma vie",
+    "prompt": "Votre journée ordinaire, résumée en une minute."
+   },
+   "hi": {
+    "title": "मेरी ज़िंदगी का एक दिन",
+    "prompt": "आपका आम दिन, एक मिनट में।"
+   },
+   "id": {
+    "title": "Sehari bersamaku",
+    "prompt": "Hari biasamu, dipadatkan jadi satu menit."
+   },
+   "it": {
+    "title": "Una giornata tipo",
+    "prompt": "La tua giornata normale, condensata in un minuto."
+   },
+   "ja": {
+    "title": "ある一日",
+    "prompt": "あなたの普段の一日を、1分にまとめて。"
+   },
+   "ko": {
+    "title": "나의 하루",
+    "prompt": "평범한 하루를 1분으로 줄여서 보여 주세요."
+   },
+   "nl": {
+    "title": "Een dag uit mijn leven",
+    "prompt": "Je gewone dag, ingekort tot één minuut."
+   },
+   "pl": {
+    "title": "Dzień z mojego życia",
+    "prompt": "Twój zwykły dzień skrócony do jednej minuty."
+   },
+   "pt": {
+    "title": "Um dia na minha vida",
+    "prompt": "Seu dia comum, resumido em um minuto."
+   },
+   "ru": {
+    "title": "Один день из жизни",
+    "prompt": "Ваш обычный день, сжатый до одной минуты."
+   },
+   "sw": {
+    "title": "Siku moja maishani mwangu",
+    "prompt": "Siku yako ya kawaida, ikifupishwa hadi dakika moja."
+   },
+   "th": {
+    "title": "หนึ่งวันของฉัน",
+    "prompt": "วันธรรมดาของคุณ ย่อเหลือหนึ่งนาที"
+   },
+   "tr": {
+    "title": "Hayatımdan bir gün",
+    "prompt": "Sıradan günün, bir dakikaya sığdırılmış hâli."
+   },
+   "uk": {
+    "title": "Один день із життя",
+    "prompt": "Ваш звичайний день, стиснутий до однієї хвилини."
+   },
+   "vi": {
+    "title": "Một ngày của tôi",
+    "prompt": "Một ngày bình thường của bạn, rút gọn còn một phút."
+   },
+   "zh": {
+    "title": "我的一天",
+    "prompt": "把你平凡的一天浓缩成一分钟。"
+   }
+  }
+ },
+ {
+  "week": "2027-W11",
+  "theme": "localLanguage",
+  "texts": {
+   "en": {
+    "title": "Say it in your language",
+    "prompt": "Teach us a word or phrase from your language or dialect."
+   },
+   "bn": {
+    "title": "আপনার ভাষায় বলুন",
+    "prompt": "আপনার ভাষা বা আঞ্চলিক বুলির একটি শব্দ বা বাক্যাংশ আমাদের শেখান।"
+   },
+   "de": {
+    "title": "Sag es in deiner Sprache",
+    "prompt": "Bring uns ein Wort oder einen Ausdruck aus deiner Sprache oder deinem Dialekt bei."
+   },
+   "es": {
+    "title": "Dilo en tu idioma",
+    "prompt": "Enséñanos una palabra o frase de tu idioma o dialecto."
+   },
+   "fil": {
+    "title": "Sabihin sa wika mo",
+    "prompt": "Turuan kami ng isang salita o parirala mula sa wika o diyalekto mo."
+   },
+   "fr": {
+    "title": "Dites-le dans votre langue",
+    "prompt": "Apprenez-nous un mot ou une expression de votre langue ou de votre dialecte."
+   },
+   "hi": {
+    "title": "अपनी भाषा में बोलिए",
+    "prompt": "हमें अपनी भाषा या बोली का कोई शब्द या मुहावरा सिखाइए।"
+   },
+   "id": {
+    "title": "Ucapkan dalam bahasamu",
+    "prompt": "Ajari kami satu kata atau frasa dari bahasa atau dialekmu."
+   },
+   "it": {
+    "title": "Dillo nella tua lingua",
+    "prompt": "Insegnaci una parola o un'espressione della tua lingua o del tuo dialetto."
+   },
+   "ja": {
+    "title": "あなたの言葉で言ってみよう",
+    "prompt": "あなたの言語や方言の単語やフレーズをひとつ教えてください。"
+   },
+   "ko": {
+    "title": "내 언어로 말해 봐요",
+    "prompt": "내 언어나 사투리의 단어 또는 표현 하나를 알려 주세요."
+   },
+   "nl": {
+    "title": "Zeg het in je eigen taal",
+    "prompt": "Leer ons een woord of uitdrukking uit je taal of dialect."
+   },
+   "pl": {
+    "title": "Powiedz to po swojemu",
+    "prompt": "Naucz nas słowa lub zwrotu z twojego języka lub gwary."
+   },
+   "pt": {
+    "title": "Diga na sua língua",
+    "prompt": "Ensine uma palavra ou expressão da sua língua ou dialeto."
+   },
+   "ru": {
+    "title": "Скажите на своём языке",
+    "prompt": "Научите нас слову или фразе из вашего языка или диалекта."
+   },
+   "sw": {
+    "title": "Sema kwa lugha yako",
+    "prompt": "Tufundishe neno au msemo kutoka lugha au lahaja yako."
+   },
+   "th": {
+    "title": "พูดในภาษาของคุณ",
+    "prompt": "สอนคำหรือวลีจากภาษาหรือภาษาถิ่นของคุณให้เรา"
+   },
+   "tr": {
+    "title": "Kendi dilinde söyle",
+    "prompt": "Dilinden ya da şivenden bir kelime veya ifade öğret."
+   },
+   "uk": {
+    "title": "Скажіть своєю мовою",
+    "prompt": "Навчіть нас слова чи фрази з вашої мови або говірки."
+   },
+   "vi": {
+    "title": "Nói bằng ngôn ngữ của bạn",
+    "prompt": "Dạy chúng tôi một từ hoặc câu trong ngôn ngữ hay phương ngữ của bạn."
+   },
+   "zh": {
+    "title": "用你的语言说",
+    "prompt": "教我们一个来自你的语言或方言的词或短语。"
+   }
+  }
+ },
+ {
+  "week": "2027-W12",
+  "theme": "newSeason",
+  "texts": {
+   "en": {
+    "title": "A new season",
+    "prompt": "Spring or autumn: show the first signs of it where you are."
+   },
+   "bn": {
+    "title": "নতুন ঋতু",
+    "prompt": "বসন্ত বা শরৎ: আপনার এলাকায় তার প্রথম লক্ষণগুলো দেখান।"
+   },
+   "de": {
+    "title": "Eine neue Jahreszeit",
+    "prompt": "Frühling oder Herbst: Zeig die ersten Anzeichen bei dir."
+   },
+   "es": {
+    "title": "Una nueva estación",
+    "prompt": "Primavera u otoño: muestra sus primeras señales donde estás."
+   },
+   "fil": {
+    "title": "Bagong panahon",
+    "prompt": "Tagsibol, taglagas o pagpasok ng tag-ulan: ipakita ang mga unang palatandaan nito sa lugar mo."
+   },
+   "fr": {
+    "title": "Une nouvelle saison",
+    "prompt": "Printemps ou automne : montrez ses premiers signes autour de vous."
+   },
+   "hi": {
+    "title": "नया मौसम",
+    "prompt": "वसंत हो या पतझड़: दिखाइए कि आपके यहाँ इसकी पहली झलक कैसी है।"
+   },
+   "id": {
+    "title": "Musim baru",
+    "prompt": "Musim semi, gugur, hujan, atau kemarau: tunjukkan tanda pertamanya di tempatmu."
+   },
+   "it": {
+    "title": "Una nuova stagione",
+    "prompt": "Primavera o autunno: mostra i primi segni dove ti trovi."
+   },
+   "ja": {
+    "title": "新しい季節",
+    "prompt": "春でも秋でも、あなたの住む場所で見つけた季節の始まりを見せてください。"
+   },
+   "ko": {
+    "title": "새로운 계절",
+    "prompt": "봄이든 가을이든, 사는 곳에서 찾은 계절의 첫 신호를 보여 주세요."
+   },
+   "nl": {
+    "title": "Een nieuw seizoen",
+    "prompt": "Lente of herfst: laat de eerste tekenen zien waar jij bent."
+   },
+   "pl": {
+    "title": "Nowa pora roku",
+    "prompt": "Wiosna czy jesień: pokaż jej pierwsze oznaki u siebie."
+   },
+   "pt": {
+    "title": "Uma nova estação",
+    "prompt": "Primavera ou outono: mostre os primeiros sinais onde você está."
+   },
+   "ru": {
+    "title": "Новое время года",
+    "prompt": "Весна или осень: покажите её первые приметы там, где вы."
+   },
+   "sw": {
+    "title": "Msimu mpya",
+    "prompt": "Masika au vuli: onyesha dalili zake za kwanza ulipo."
+   },
+   "th": {
+    "title": "ฤดูใหม่",
+    "prompt": "ฤดูใบไม้ผลิหรือใบไม้ร่วง: โชว์สัญญาณแรกของฤดูกาลในที่ที่คุณอยู่"
+   },
+   "tr": {
+    "title": "Yeni bir mevsim",
+    "prompt": "İlkbahar ya da sonbahar: bulunduğun yerdeki ilk işaretlerini göster."
+   },
+   "uk": {
+    "title": "Нова пора року",
+    "prompt": "Весна чи осінь: покажіть її перші ознаки там, де ви."
+   },
+   "vi": {
+    "title": "Mùa mới",
+    "prompt": "Xuân hay thu: cho xem những dấu hiệu đầu tiên của mùa ở nơi bạn sống."
+   },
+   "zh": {
+    "title": "新的季节",
+    "prompt": "春天或秋天：展示你那里季节到来的第一个迹象。"
+   }
+  }
+ },
+ {
+  "week": "2027-W13",
+  "theme": "unpopularOpinion",
+  "texts": {
+   "en": {
+    "title": "Unpopular opinion",
+    "prompt": "Share a take you would defend, and keep it kind."
+   },
+   "bn": {
+    "title": "অজনপ্রিয় মত",
+    "prompt": "এমন একটি মত শেয়ার করুন যার পক্ষে আপনি দাঁড়াবেন, তবে ভদ্রভাবে।"
+   },
+   "de": {
+    "title": "Unpopuläre Meinung",
+    "prompt": "Teile eine Meinung, hinter der du stehst, und bleib dabei freundlich."
+   },
+   "es": {
+    "title": "Opinión impopular",
+    "prompt": "Comparte una idea que defenderías, siempre con buen tono."
+   },
+   "fil": {
+    "title": "Unpopular opinion",
+    "prompt": "Magbahagi ng opinyong kaya mong ipagtanggol, pero manatiling mabait."
+   },
+   "fr": {
+    "title": "Opinion impopulaire",
+    "prompt": "Partagez un avis que vous défendriez, en restant bienveillant."
+   },
+   "hi": {
+    "title": "अलोकप्रिय राय",
+    "prompt": "ऐसी राय साझा करें जिस पर आप डटे रह सकें, और लहजा अच्छा रखें।"
+   },
+   "id": {
+    "title": "Opini tidak populer",
+    "prompt": "Bagikan pendapat yang berani kamu bela, tapi tetap sopan."
+   },
+   "it": {
+    "title": "Opinione impopolare",
+    "prompt": "Condividi un'idea che difenderesti, sempre con gentilezza."
+   },
+   "ja": {
+    "title": "少数派の意見",
+    "prompt": "自信を持って主張できる意見を、思いやりを忘れずにシェアしてください。"
+   },
+   "ko": {
+    "title": "소수 의견",
+    "prompt": "자신 있게 지킬 수 있는 생각을 나눠 주세요. 단, 친절하게요."
+   },
+   "nl": {
+    "title": "Impopulaire mening",
+    "prompt": "Deel een mening die je zou verdedigen, en blijf vriendelijk."
+   },
+   "pl": {
+    "title": "Niepopularna opinia",
+    "prompt": "Podziel się poglądem, za którym stoisz, i zachowaj życzliwość."
+   },
+   "pt": {
+    "title": "Opinião impopular",
+    "prompt": "Compartilhe uma opinião que você defenderia, com gentileza."
+   },
+   "ru": {
+    "title": "Непопулярное мнение",
+    "prompt": "Поделитесь мнением, которое готовы отстаивать, и оставайтесь доброжелательны."
+   },
+   "sw": {
+    "title": "Maoni yasiyopendwa",
+    "prompt": "Shiriki mtazamo ambao ungeutetea, na uwe mpole."
+   },
+   "th": {
+    "title": "ความเห็นสวนกระแส",
+    "prompt": "แชร์มุมมองที่คุณพร้อมยืนหยัด และพูดอย่างสุภาพ"
+   },
+   "tr": {
+    "title": "Popüler olmayan görüş",
+    "prompt": "Arkasında durduğun bir görüşü paylaş, ama nazik ol."
+   },
+   "uk": {
+    "title": "Непопулярна думка",
+    "prompt": "Поділіться думкою, яку готові відстояти, і залишайтеся доброзичливими."
+   },
+   "vi": {
+    "title": "Quan điểm trái chiều",
+    "prompt": "Chia sẻ một quan điểm bạn sẵn sàng bảo vệ, và giữ thái độ tử tế."
+   },
+   "zh": {
+    "title": "冷门观点",
+    "prompt": "分享一个你愿意捍卫的观点，记得友善表达。"
+   }
+  }
+ },
+ {
+  "week": "2027-W14",
+  "theme": "oldTech",
+  "texts": {
+   "en": {
+    "title": "Old tech",
+    "prompt": "A gadget from the past and what it was like to use it."
+   },
+   "bn": {
+    "title": "পুরোনো প্রযুক্তি",
+    "prompt": "অতীতের একটি গ্যাজেট, আর সেটা ব্যবহার করতে কেমন লাগত।"
+   },
+   "de": {
+    "title": "Alte Technik",
+    "prompt": "Ein Gerät von früher und wie es war, damit umzugehen."
+   },
+   "es": {
+    "title": "Tecnología antigua",
+    "prompt": "Un aparato del pasado y cómo era usarlo."
+   },
+   "fil": {
+    "title": "Lumang tech",
+    "prompt": "Isang gadget mula sa nakaraan at kung ano ang pakiramdam gamitin ito."
+   },
+   "fr": {
+    "title": "Vieille technologie",
+    "prompt": "Un appareil d'autrefois et ce que c'était de l'utiliser."
+   },
+   "hi": {
+    "title": "पुरानी टेक",
+    "prompt": "बीते ज़माने का कोई गैजेट और उसे इस्तेमाल करना कैसा लगता था।"
+   },
+   "id": {
+    "title": "Teknologi jadul",
+    "prompt": "Gawai dari masa lalu dan bagaimana rasanya memakainya."
+   },
+   "it": {
+    "title": "Tecnologia d'altri tempi",
+    "prompt": "Un dispositivo del passato e com'era usarlo."
+   },
+   "ja": {
+    "title": "懐かしのテクノロジー",
+    "prompt": "昔のガジェットと、それを使うのがどんな感じだったか。"
+   },
+   "ko": {
+    "title": "추억의 기기",
+    "prompt": "옛날 기기와 그걸 쓰던 느낌을 보여 주세요."
+   },
+   "nl": {
+    "title": "Oude techniek",
+    "prompt": "Een apparaat van vroeger en hoe het was om het te gebruiken."
+   },
+   "pl": {
+    "title": "Stara technologia",
+    "prompt": "Sprzęt z dawnych lat i jak się z niego korzystało."
+   },
+   "pt": {
+    "title": "Tecnologia antiga",
+    "prompt": "Um aparelho do passado e como era usá-lo."
+   },
+   "ru": {
+    "title": "Старая техника",
+    "prompt": "Устройство из прошлого и каково было им пользоваться."
+   },
+   "sw": {
+    "title": "Teknolojia ya zamani",
+    "prompt": "Kifaa cha zamani na jinsi ilivyokuwa kukitumia."
+   },
+   "th": {
+    "title": "เทคโนโลยียุคเก่า",
+    "prompt": "แก็ดเจ็ตจากอดีต และความรู้สึกตอนได้ใช้มัน"
+   },
+   "tr": {
+    "title": "Eski teknoloji",
+    "prompt": "Geçmişten bir cihaz ve onu kullanmanın nasıl bir şey olduğu."
+   },
+   "uk": {
+    "title": "Стара техніка",
+    "prompt": "Пристрій із минулого і як ним було користуватися."
+   },
+   "vi": {
+    "title": "Công nghệ xưa",
+    "prompt": "Một món đồ công nghệ ngày xưa và cảm giác khi dùng nó."
+   },
+   "zh": {
+    "title": "怀旧科技",
+    "prompt": "一件过去的电子产品，以及当年使用它的感觉。"
+   }
+  }
+ },
+ {
+  "week": "2027-W15",
+  "theme": "streetFood",
+  "texts": {
+   "en": {
+    "title": "Street food",
+    "prompt": "The best thing to eat on the street near you."
+   },
+   "bn": {
+    "title": "স্ট্রিট ফুড",
+    "prompt": "আপনার কাছের রাস্তার সেরা খাবার।"
+   },
+   "de": {
+    "title": "Streetfood",
+    "prompt": "Das beste Streetfood in deiner Nähe."
+   },
+   "es": {
+    "title": "Comida callejera",
+    "prompt": "Lo mejor para comer en la calle cerca de ti."
+   },
+   "fil": {
+    "title": "Street food",
+    "prompt": "Ang pinakamasarap na street food malapit sa iyo."
+   },
+   "fr": {
+    "title": "Street food",
+    "prompt": "Le meilleur en-cas de rue près de chez vous."
+   },
+   "hi": {
+    "title": "स्ट्रीट फ़ूड",
+    "prompt": "आपके आस-पास का सबसे बढ़िया स्ट्रीट फ़ूड।"
+   },
+   "id": {
+    "title": "Jajanan kaki lima",
+    "prompt": "Makanan jalanan terenak di dekatmu."
+   },
+   "it": {
+    "title": "Street food",
+    "prompt": "La cosa migliore da mangiare per strada vicino a te."
+   },
+   "ja": {
+    "title": "ストリートフード",
+    "prompt": "近所でいちばんおいしい屋台の味。"
+   },
+   "ko": {
+    "title": "길거리 음식",
+    "prompt": "동네에서 가장 맛있는 길거리 음식."
+   },
+   "nl": {
+    "title": "Streetfood",
+    "prompt": "Het lekkerste streetfood bij jou in de buurt."
+   },
+   "pl": {
+    "title": "Jedzenie uliczne",
+    "prompt": "Najlepsze uliczne jedzenie w twojej okolicy."
+   },
+   "pt": {
+    "title": "Comida de rua",
+    "prompt": "A melhor comida de rua perto de você."
+   },
+   "ru": {
+    "title": "Уличная еда",
+    "prompt": "Самая вкусная уличная еда рядом с вами."
+   },
+   "sw": {
+    "title": "Chakula cha mtaani",
+    "prompt": "Chakula kitamu zaidi cha mtaani karibu nawe."
+   },
+   "th": {
+    "title": "สตรีทฟู้ด",
+    "prompt": "ของกินริมทางที่อร่อยที่สุดใกล้คุณ"
+   },
+   "tr": {
+    "title": "Sokak lezzetleri",
+    "prompt": "Yakınındaki en iyi sokak yemeği."
+   },
+   "uk": {
+    "title": "Вулична їжа",
+    "prompt": "Найсмачніша вулична їжа поруч із вами."
+   },
+   "vi": {
+    "title": "Món ăn đường phố",
+    "prompt": "Món ăn đường phố ngon nhất gần bạn."
+   },
+   "zh": {
+    "title": "街头小吃",
+    "prompt": "你附近最好吃的街头美食。"
+   }
+  }
+ },
+ {
+  "week": "2027-W16",
+  "theme": "buildSomething",
+  "texts": {
+   "en": {
+    "title": "Build something",
+    "prompt": "Make something with your hands, from start to finish."
+   },
+   "bn": {
+    "title": "কিছু বানান",
+    "prompt": "নিজের হাতে কিছু বানান, শুরু থেকে শেষ পর্যন্ত।"
+   },
+   "de": {
+    "title": "Bau etwas",
+    "prompt": "Mach etwas mit deinen Händen, vom Anfang bis zum Ende."
+   },
+   "es": {
+    "title": "Construye algo",
+    "prompt": "Haz algo con tus manos, de principio a fin."
+   },
+   "fil": {
+    "title": "Gumawa ng kahit ano",
+    "prompt": "Gumawa ng isang bagay gamit ang mga kamay mo, mula umpisa hanggang matapos."
+   },
+   "fr": {
+    "title": "Construisez quelque chose",
+    "prompt": "Fabriquez quelque chose de vos mains, du début à la fin."
+   },
+   "hi": {
+    "title": "कुछ बनाइए",
+    "prompt": "अपने हाथों से कुछ बनाइए, शुरू से आखिर तक।"
+   },
+   "id": {
+    "title": "Bikin sesuatu",
+    "prompt": "Buat sesuatu dengan tanganmu, dari awal sampai selesai."
+   },
+   "it": {
+    "title": "Costruisci qualcosa",
+    "prompt": "Crea qualcosa con le tue mani, dall'inizio alla fine."
+   },
+   "ja": {
+    "title": "何かを作ろう",
+    "prompt": "自分の手で何かを、最初から最後まで作ってください。"
+   },
+   "ko": {
+    "title": "직접 만들기",
+    "prompt": "손으로 무언가를 처음부터 끝까지 만들어 보세요."
+   },
+   "nl": {
+    "title": "Bouw iets",
+    "prompt": "Maak iets met je handen, van begin tot eind."
+   },
+   "pl": {
+    "title": "Zbuduj coś",
+    "prompt": "Zrób coś własnymi rękami, od początku do końca."
+   },
+   "pt": {
+    "title": "Construa algo",
+    "prompt": "Faça algo com as próprias mãos, do começo ao fim."
+   },
+   "ru": {
+    "title": "Смастерите что-нибудь",
+    "prompt": "Сделайте что-то своими руками, от начала до конца."
+   },
+   "sw": {
+    "title": "Tengeneza kitu",
+    "prompt": "Tengeneza kitu kwa mikono yako, mwanzo hadi mwisho."
+   },
+   "th": {
+    "title": "ลงมือสร้าง",
+    "prompt": "ทำอะไรสักอย่างด้วยมือคุณเอง ตั้งแต่ต้นจนจบ"
+   },
+   "tr": {
+    "title": "Bir şey yap",
+    "prompt": "Ellerinle baştan sona bir şey üret."
+   },
+   "uk": {
+    "title": "Змайструйте щось",
+    "prompt": "Зробіть щось власними руками, від початку до кінця."
+   },
+   "vi": {
+    "title": "Tự tay làm",
+    "prompt": "Làm một thứ bằng đôi tay của bạn, từ đầu đến cuối."
+   },
+   "zh": {
+    "title": "动手做点什么",
+    "prompt": "亲手做一样东西，从头到尾。"
+   }
+  }
+ },
+ {
+  "week": "2027-W17",
+  "theme": "greenHabit",
+  "texts": {
+   "en": {
+    "title": "One green habit",
+    "prompt": "One small thing you do to waste less."
+   },
+   "bn": {
+    "title": "একটি সবুজ অভ্যাস",
+    "prompt": "অপচয় কমাতে আপনি যে ছোট একটি কাজ করেন।"
+   },
+   "de": {
+    "title": "Eine grüne Gewohnheit",
+    "prompt": "Eine kleine Sache, mit der du weniger verschwendest."
+   },
+   "es": {
+    "title": "Un hábito verde",
+    "prompt": "Una pequeña cosa que haces para desperdiciar menos."
+   },
+   "fil": {
+    "title": "Isang green habit",
+    "prompt": "Isang maliit na bagay na ginagawa mo para mabawasan ang nasasayang."
+   },
+   "fr": {
+    "title": "Un geste écolo",
+    "prompt": "Une petite habitude pour moins gaspiller."
+   },
+   "hi": {
+    "title": "एक हरी आदत",
+    "prompt": "बर्बादी कम करने के लिए आप जो एक छोटा काम करते हैं।"
+   },
+   "id": {
+    "title": "Satu kebiasaan hijau",
+    "prompt": "Satu hal kecil yang kamu lakukan untuk mengurangi sampah."
+   },
+   "it": {
+    "title": "Un'abitudine green",
+    "prompt": "Una piccola cosa che fai per sprecare meno."
+   },
+   "ja": {
+    "title": "エコな習慣をひとつ",
+    "prompt": "無駄を減らすためにしている小さなこと。"
+   },
+   "ko": {
+    "title": "친환경 습관 하나",
+    "prompt": "낭비를 줄이기 위해 하는 작은 일 하나."
+   },
+   "nl": {
+    "title": "Eén groene gewoonte",
+    "prompt": "Eén klein ding dat je doet om minder te verspillen."
+   },
+   "pl": {
+    "title": "Jeden zielony nawyk",
+    "prompt": "Jedna mała rzecz, dzięki której marnujesz mniej."
+   },
+   "pt": {
+    "title": "Um hábito verde",
+    "prompt": "Uma pequena coisa que você faz para desperdiçar menos."
+   },
+   "ru": {
+    "title": "Одна зелёная привычка",
+    "prompt": "Одно небольшое дело, которое помогает вам меньше выбрасывать."
+   },
+   "sw": {
+    "title": "Tabia moja ya kutunza mazingira",
+    "prompt": "Jambo moja dogo unalofanya ili kupunguza upotevu."
+   },
+   "th": {
+    "title": "หนึ่งนิสัยรักษ์โลก",
+    "prompt": "สิ่งเล็กๆ ที่คุณทำเพื่อลดการสิ้นเปลือง"
+   },
+   "tr": {
+    "title": "Bir yeşil alışkanlık",
+    "prompt": "Daha az israf etmek için yaptığın küçük bir şey."
+   },
+   "uk": {
+    "title": "Одна зелена звичка",
+    "prompt": "Одна маленька справа, яка допомагає вам менше марнувати."
+   },
+   "vi": {
+    "title": "Một thói quen xanh",
+    "prompt": "Một việc nhỏ bạn làm để bớt lãng phí."
+   },
+   "zh": {
+    "title": "一个环保习惯",
+    "prompt": "你为减少浪费而做的一件小事。"
+   }
+  }
+ },
+ {
+  "week": "2027-W18",
+  "theme": "cityTour",
+  "texts": {
+   "en": {
+    "title": "Your town in 60 seconds",
+    "prompt": "Give us a quick tour of where you live."
+   },
+   "bn": {
+    "title": "60 সেকেন্ডে আপনার শহর",
+    "prompt": "আপনি যেখানে থাকেন, সেখানে আমাদের একটু ঘুরিয়ে দেখান।"
+   },
+   "de": {
+    "title": "Deine Stadt in 60 Sekunden",
+    "prompt": "Nimm uns mit auf eine kurze Tour durch deinen Wohnort."
+   },
+   "es": {
+    "title": "Tu ciudad en 60 segundos",
+    "prompt": "Danos un tour rápido por el lugar donde vives."
+   },
+   "fil": {
+    "title": "Ang bayan mo sa 60 segundo",
+    "prompt": "Dalhin kami sa mabilis na tour sa lugar mo."
+   },
+   "fr": {
+    "title": "Votre ville en 60 secondes",
+    "prompt": "Faites-nous visiter rapidement l'endroit où vous vivez."
+   },
+   "hi": {
+    "title": "60 सेकंड में आपका शहर",
+    "prompt": "आप जहाँ रहते हैं, वहाँ की एक छोटी-सी सैर कराइए।"
+   },
+   "id": {
+    "title": "Kotamu dalam 60 detik",
+    "prompt": "Ajak kami tur singkat keliling tempat tinggalmu."
+   },
+   "it": {
+    "title": "La tua città in 60 secondi",
+    "prompt": "Portaci in un breve giro del posto dove vivi."
+   },
+   "ja": {
+    "title": "60秒で街めぐり",
+    "prompt": "あなたの住む場所をさっと案内してください。"
+   },
+   "ko": {
+    "title": "60초 동네 투어",
+    "prompt": "사는 곳을 빠르게 구경시켜 주세요."
+   },
+   "nl": {
+    "title": "Jouw stad in 60 seconden",
+    "prompt": "Geef ons een snelle rondleiding door je woonplaats."
+   },
+   "pl": {
+    "title": "Twoje miasto w 60 sekund",
+    "prompt": "Oprowadź nas szybko po miejscu, w którym mieszkasz."
+   },
+   "pt": {
+    "title": "Sua cidade em 60 segundos",
+    "prompt": "Faça um tour rápido pelo lugar onde você mora."
+   },
+   "ru": {
+    "title": "Ваш город за 60 секунд",
+    "prompt": "Проведите для нас быструю экскурсию по месту, где вы живёте."
+   },
+   "sw": {
+    "title": "Mji wako kwa sekunde 60",
+    "prompt": "Tutembeze haraka mahali unapoishi."
+   },
+   "th": {
+    "title": "เมืองของคุณใน 60 วินาที",
+    "prompt": "พาเราทัวร์สั้นๆ รอบที่ที่คุณอยู่"
+   },
+   "tr": {
+    "title": "60 saniyede şehrin",
+    "prompt": "Yaşadığın yerde bize kısa bir tur attır."
+   },
+   "uk": {
+    "title": "Ваше місто за 60 секунд",
+    "prompt": "Проведіть для нас швидку екскурсію місцем, де ви живете."
+   },
+   "vi": {
+    "title": "Thị trấn của bạn trong 60 giây",
+    "prompt": "Dẫn chúng tôi đi một vòng nhanh quanh nơi bạn sống."
+   },
+   "zh": {
+    "title": "60 秒逛你的城",
+    "prompt": "带我们快速游览你生活的地方。"
+   }
+  }
+ },
+ {
+  "week": "2027-W19",
+  "theme": "behindTheScenes",
+  "texts": {
+   "en": {
+    "title": "Behind the scenes",
+    "prompt": "Show how you make your videos, posts or art."
+   },
+   "bn": {
+    "title": "পর্দার আড়ালে",
+    "prompt": "দেখান আপনি কীভাবে আপনার ভিডিও, পোস্ট বা শিল্পকর্ম বানান।"
+   },
+   "de": {
+    "title": "Hinter den Kulissen",
+    "prompt": "Zeig, wie deine Videos, Posts oder Kunstwerke entstehen."
+   },
+   "es": {
+    "title": "Detrás de cámaras",
+    "prompt": "Muestra cómo haces tus videos, publicaciones o arte."
+   },
+   "fil": {
+    "title": "Behind the scenes",
+    "prompt": "Ipakita kung paano mo ginagawa ang mga video, post o art mo."
+   },
+   "fr": {
+    "title": "Les coulisses",
+    "prompt": "Montrez comment vous créez vos vidéos, vos posts ou vos œuvres."
+   },
+   "hi": {
+    "title": "पर्दे के पीछे",
+    "prompt": "दिखाइए कि आप अपने वीडियो, पोस्ट या कला कैसे बनाते हैं।"
+   },
+   "id": {
+    "title": "Di balik layar",
+    "prompt": "Tunjukkan cara kamu membuat video, postingan, atau karya senimu."
+   },
+   "it": {
+    "title": "Dietro le quinte",
+    "prompt": "Mostra come realizzi i tuoi video, post o opere."
+   },
+   "ja": {
+    "title": "舞台裏",
+    "prompt": "動画や投稿、作品をどうやって作っているか見せてください。"
+   },
+   "ko": {
+    "title": "비하인드 신",
+    "prompt": "영상, 게시물, 작품을 어떻게 만드는지 보여 주세요."
+   },
+   "nl": {
+    "title": "Achter de schermen",
+    "prompt": "Laat zien hoe je je video's, posts of kunst maakt."
+   },
+   "pl": {
+    "title": "Za kulisami",
+    "prompt": "Pokaż, jak powstają twoje filmy, posty lub prace."
+   },
+   "pt": {
+    "title": "Bastidores",
+    "prompt": "Mostre como você faz seus vídeos, posts ou arte."
+   },
+   "ru": {
+    "title": "За кадром",
+    "prompt": "Покажите, как вы создаёте свои видео, посты или работы."
+   },
+   "sw": {
+    "title": "Nyuma ya pazia",
+    "prompt": "Onyesha jinsi unavyotengeneza video, machapisho au sanaa yako."
+   },
+   "th": {
+    "title": "เบื้องหลัง",
+    "prompt": "โชว์ว่าคุณทำวิดีโอ โพสต์ หรืองานศิลปะของคุณอย่างไร"
+   },
+   "tr": {
+    "title": "Kamera arkası",
+    "prompt": "Videolarını, gönderilerini ya da sanatını nasıl yaptığını göster."
+   },
+   "uk": {
+    "title": "За лаштунками",
+    "prompt": "Покажіть, як ви створюєте свої відео, дописи чи роботи."
+   },
+   "vi": {
+    "title": "Hậu trường",
+    "prompt": "Cho xem cách bạn làm video, bài đăng hay tác phẩm của mình."
+   },
+   "zh": {
+    "title": "幕后花絮",
+    "prompt": "展示你是如何制作视频、帖子或作品的。"
+   }
+  }
+ },
+ {
+  "week": "2027-W20",
+  "theme": "thankACreator",
+  "texts": {
+   "en": {
+    "title": "Thank a creator",
+    "prompt": "Give a shout-out to a creator who inspired you and say why."
+   },
+   "bn": {
+    "title": "একজন ক্রিয়েটরকে ধন্যবাদ",
+    "prompt": "যে ক্রিয়েটর আপনাকে অনুপ্রাণিত করেছেন তাঁকে শাউট-আউট দিন এবং কারণটা বলুন।"
+   },
+   "de": {
+    "title": "Danke an einen Creator",
+    "prompt": "Grüß einen Creator, der dich inspiriert hat, und sag, warum."
+   },
+   "es": {
+    "title": "Agradece a un creador",
+    "prompt": "Saluda a un creador que te inspiró y cuenta por qué."
+   },
+   "fil": {
+    "title": "Pasalamatan ang isang creator",
+    "prompt": "Mag-shout-out sa isang creator na nag-inspire sa iyo at sabihin kung bakit."
+   },
+   "fr": {
+    "title": "Merci à un créateur",
+    "prompt": "Saluez un créateur qui vous a inspiré et dites pourquoi."
+   },
+   "hi": {
+    "title": "किसी क्रिएटर को शुक्रिया",
+    "prompt": "किसी ऐसे क्रिएटर को शाउट-आउट दीजिए जिसने आपको प्रेरित किया, और बताइए क्यों।"
+   },
+   "id": {
+    "title": "Terima kasih, kreator",
+    "prompt": "Beri shout-out untuk kreator yang menginspirasimu dan ceritakan alasannya."
+   },
+   "it": {
+    "title": "Grazie a un creator",
+    "prompt": "Fai un saluto a un creator che ti ha ispirato e spiega perché."
+   },
+   "ja": {
+    "title": "クリエイターに感謝",
+    "prompt": "刺激を受けたクリエイターにエールを送り、その理由を伝えてください。"
+   },
+   "ko": {
+    "title": "크리에이터에게 감사를",
+    "prompt": "영감을 준 크리에이터를 응원하고 그 이유를 말해 주세요."
+   },
+   "nl": {
+    "title": "Bedank een maker",
+    "prompt": "Geef een shout-out aan een maker die je heeft geïnspireerd en vertel waarom."
+   },
+   "pl": {
+    "title": "Podziękuj twórcy",
+    "prompt": "Wyróżnij twórcę, który cię zainspirował, i powiedz dlaczego."
+   },
+   "pt": {
+    "title": "Agradeça a um criador",
+    "prompt": "Mande um alô para um criador que te inspirou e diga por quê."
+   },
+   "ru": {
+    "title": "Спасибо автору",
+    "prompt": "Расскажите об авторе, который вас вдохновил, и объясните почему."
+   },
+   "sw": {
+    "title": "Mshukuru mtayarishaji",
+    "prompt": "Mpongeze mtayarishaji aliyekutia moyo na useme kwa nini."
+   },
+   "th": {
+    "title": "ขอบคุณครีเอเตอร์",
+    "prompt": "ส่งเสียงถึงครีเอเตอร์ที่สร้างแรงบันดาลใจให้คุณ และบอกเหตุผล"
+   },
+   "tr": {
+    "title": "Bir üreticiye teşekkür et",
+    "prompt": "Sana ilham veren bir içerik üreticisine seslen ve nedenini anlat."
+   },
+   "uk": {
+    "title": "Подякуйте автору",
+    "prompt": "Розкажіть про автора, який вас надихнув, і поясніть чому."
+   },
+   "vi": {
+    "title": "Cảm ơn một nhà sáng tạo",
+    "prompt": "Gửi lời cảm ơn tới một nhà sáng tạo đã truyền cảm hứng cho bạn và nói vì sao."
+   },
+   "zh": {
+    "title": "感谢一位创作者",
+    "prompt": "为一位启发过你的创作者点赞，并说说原因。"
+   }
+  }
+ },
+ {
+  "week": "2027-W21",
+  "theme": "plotTwist",
+  "texts": {
+   "en": {
+    "title": "Plot twist",
+    "prompt": "A Short with an ending nobody sees coming."
+   },
+   "bn": {
+    "title": "প্লট টুইস্ট",
+    "prompt": "এমন একটি শর্ট, যার শেষটা কেউ আন্দাজ করতে পারবে না।"
+   },
+   "de": {
+    "title": "Plot-Twist",
+    "prompt": "Ein Short mit einem Ende, mit dem niemand rechnet."
+   },
+   "es": {
+    "title": "Giro inesperado",
+    "prompt": "Un Short con un final que nadie ve venir."
+   },
+   "fil": {
+    "title": "Plot twist",
+    "prompt": "Isang Short na may ending na walang makakahula."
+   },
+   "fr": {
+    "title": "Retournement de situation",
+    "prompt": "Un Short avec une fin que personne ne voit venir."
+   },
+   "hi": {
+    "title": "प्लॉट ट्विस्ट",
+    "prompt": "ऐसा शॉर्ट जिसके अंत का किसी को अंदाज़ा न हो।"
+   },
+   "id": {
+    "title": "Plot twist",
+    "prompt": "Shorts dengan akhir yang tak terduga siapa pun."
+   },
+   "it": {
+    "title": "Colpo di scena",
+    "prompt": "Uno Short con un finale che nessuno si aspetta."
+   },
+   "ja": {
+    "title": "どんでん返し",
+    "prompt": "誰も予想できない結末のショート。"
+   },
+   "ko": {
+    "title": "반전",
+    "prompt": "아무도 예상하지 못한 결말의 쇼츠."
+   },
+   "nl": {
+    "title": "Plotwending",
+    "prompt": "Een Short met een einde dat niemand ziet aankomen."
+   },
+   "pl": {
+    "title": "Zwrot akcji",
+    "prompt": "Short z zakończeniem, którego nikt się nie spodziewa."
+   },
+   "pt": {
+    "title": "Reviravolta",
+    "prompt": "Um Short com um final que ninguém espera."
+   },
+   "ru": {
+    "title": "Неожиданный поворот",
+    "prompt": "Short с концовкой, которую никто не ожидает."
+   },
+   "sw": {
+    "title": "Mwisho usiotarajiwa",
+    "prompt": "Short yenye mwisho ambao hakuna anayeutarajia."
+   },
+   "th": {
+    "title": "หักมุม",
+    "prompt": "Shorts ที่มีตอนจบซึ่งไม่มีใครคาดถึง"
+   },
+   "tr": {
+    "title": "Beklenmedik son",
+    "prompt": "Kimsenin tahmin edemeyeceği bir sonla biten bir Short."
+   },
+   "uk": {
+    "title": "Несподіваний поворот",
+    "prompt": "Short із фіналом, якого ніхто не чекає."
+   },
+   "vi": {
+    "title": "Cú twist",
+    "prompt": "Một Shorts với cái kết không ai đoán trước được."
+   },
+   "zh": {
+    "title": "剧情反转",
+    "prompt": "一条结局谁也猜不到的短视频。"
+   }
+  }
+ },
+ {
+  "week": "2027-W22",
+  "theme": "soundOfYourPlace",
+  "texts": {
+   "en": {
+    "title": "The sound of your place",
+    "prompt": "Record the sounds around you: a market, rain, traffic, birds."
+   },
+   "bn": {
+    "title": "আপনার এলাকার শব্দ",
+    "prompt": "চারপাশের শব্দ রেকর্ড করুন: বাজার, বৃষ্টি, যানবাহন, পাখি।"
+   },
+   "de": {
+    "title": "Der Klang deiner Umgebung",
+    "prompt": "Nimm die Geräusche um dich herum auf: Markt, Regen, Verkehr, Vögel."
+   },
+   "es": {
+    "title": "El sonido de tu lugar",
+    "prompt": "Graba los sonidos a tu alrededor: un mercado, la lluvia, el tráfico, los pájaros."
+   },
+   "fil": {
+    "title": "Ang tunog ng lugar mo",
+    "prompt": "I-record ang mga tunog sa paligid mo: palengke, ulan, trapiko, mga ibon."
+   },
+   "fr": {
+    "title": "Le son de chez vous",
+    "prompt": "Enregistrez les sons autour de vous : un marché, la pluie, la circulation, les oiseaux."
+   },
+   "hi": {
+    "title": "आपकी जगह की आवाज़",
+    "prompt": "अपने आस-पास की आवाज़ें रिकॉर्ड करें: बाज़ार, बारिश, ट्रैफ़िक, पंछी।"
+   },
+   "id": {
+    "title": "Suara tempatmu",
+    "prompt": "Rekam suara di sekitarmu: pasar, hujan, lalu lintas, kicau burung."
+   },
+   "it": {
+    "title": "Il suono del tuo posto",
+    "prompt": "Registra i suoni intorno a te: un mercato, la pioggia, il traffico, gli uccelli."
+   },
+   "ja": {
+    "title": "あなたの街の音",
+    "prompt": "周りの音を録音してください。市場、雨、車の音、鳥の声など。"
+   },
+   "ko": {
+    "title": "우리 동네의 소리",
+    "prompt": "주변의 소리를 녹음해 보세요. 시장, 빗소리, 차 소리, 새소리."
+   },
+   "nl": {
+    "title": "Het geluid van jouw plek",
+    "prompt": "Neem de geluiden om je heen op: een markt, regen, verkeer, vogels."
+   },
+   "pl": {
+    "title": "Dźwięki twojego miejsca",
+    "prompt": "Nagraj dźwięki wokół siebie: targ, deszcz, ruch uliczny, ptaki."
+   },
+   "pt": {
+    "title": "O som do seu lugar",
+    "prompt": "Grave os sons ao seu redor: uma feira, a chuva, o trânsito, os pássaros."
+   },
+   "ru": {
+    "title": "Звуки вашего места",
+    "prompt": "Запишите звуки вокруг: рынок, дождь, транспорт, птиц."
+   },
+   "sw": {
+    "title": "Sauti za mahali pako",
+    "prompt": "Rekodi sauti zinazokuzunguka: soko, mvua, magari, ndege."
+   },
+   "th": {
+    "title": "เสียงของที่ที่คุณอยู่",
+    "prompt": "บันทึกเสียงรอบตัวคุณ: ตลาด ฝน การจราจร นก"
+   },
+   "tr": {
+    "title": "Bulunduğun yerin sesi",
+    "prompt": "Etrafındaki sesleri kaydet: bir pazar, yağmur, trafik, kuşlar."
+   },
+   "uk": {
+    "title": "Звуки вашого місця",
+    "prompt": "Запишіть звуки навколо: ринок, дощ, транспорт, птахів."
+   },
+   "vi": {
+    "title": "Âm thanh nơi bạn sống",
+    "prompt": "Ghi lại âm thanh xung quanh bạn: khu chợ, tiếng mưa, xe cộ, tiếng chim."
+   },
+   "zh": {
+    "title": "你那里的声音",
+    "prompt": "录下你身边的声音：集市、雨声、车流、鸟鸣。"
+   }
+  }
+ },
+ {
+  "week": "2027-W23",
+  "theme": "failOfTheWeek",
+  "texts": {
+   "en": {
+    "title": "Fail of the week",
+    "prompt": "Something that went wrong, and what you learned from it."
+   },
+   "bn": {
+    "title": "সপ্তাহের ব্যর্থতা",
+    "prompt": "যা ভুল হয়ে গেছে, আর তা থেকে আপনি কী শিখেছেন।"
+   },
+   "de": {
+    "title": "Fail der Woche",
+    "prompt": "Etwas, das schiefgegangen ist, und was du daraus gelernt hast."
+   },
+   "es": {
+    "title": "El fallo de la semana",
+    "prompt": "Algo que salió mal y lo que aprendiste de ello."
+   },
+   "fil": {
+    "title": "Fail of the week",
+    "prompt": "Isang bagay na pumalpak, at kung ano ang natutunan mo rito."
+   },
+   "fr": {
+    "title": "Le raté de la semaine",
+    "prompt": "Quelque chose qui a mal tourné, et ce que vous en avez appris."
+   },
+   "hi": {
+    "title": "हफ़्ते की गड़बड़",
+    "prompt": "कुछ ऐसा जो गलत हो गया, और उससे आपने क्या सीखा।"
+   },
+   "id": {
+    "title": "Gagal minggu ini",
+    "prompt": "Sesuatu yang tidak berjalan lancar, dan pelajaran yang kamu dapat."
+   },
+   "it": {
+    "title": "Il fail della settimana",
+    "prompt": "Qualcosa che è andato storto e cosa ne hai imparato."
+   },
+   "ja": {
+    "title": "今週の失敗",
+    "prompt": "うまくいかなかったことと、そこから学んだこと。"
+   },
+   "ko": {
+    "title": "이번 주의 실패",
+    "prompt": "잘 안 됐던 일과 거기서 배운 점."
+   },
+   "nl": {
+    "title": "Fail van de week",
+    "prompt": "Iets wat misging, en wat je ervan hebt geleerd."
+   },
+   "pl": {
+    "title": "Wpadka tygodnia",
+    "prompt": "Coś, co poszło nie tak, i czego cię to nauczyło."
+   },
+   "pt": {
+    "title": "A falha da semana",
+    "prompt": "Algo que deu errado e o que você aprendeu com isso."
+   },
+   "ru": {
+    "title": "Провал недели",
+    "prompt": "Что-то пошло не так, и чему вас это научило."
+   },
+   "sw": {
+    "title": "Kosa la wiki",
+    "prompt": "Jambo lililoharibika, na ulichojifunza kutokana nalo."
+   },
+   "th": {
+    "title": "พลาดประจำสัปดาห์",
+    "prompt": "เรื่องที่ไม่เป็นไปตามแผน และสิ่งที่คุณได้เรียนรู้"
+   },
+   "tr": {
+    "title": "Haftanın fiyaskosu",
+    "prompt": "Ters giden bir şey ve ondan ne öğrendiğin."
+   },
+   "uk": {
+    "title": "Провал тижня",
+    "prompt": "Щось пішло не так, і чого вас це навчило."
+   },
+   "vi": {
+    "title": "Thất bại của tuần",
+    "prompt": "Một chuyện không suôn sẻ, và bài học bạn rút ra."
+   },
+   "zh": {
+    "title": "本周翻车",
+    "prompt": "一件搞砸的事，以及你从中学到了什么。"
+   }
+  }
+ },
+ {
+  "week": "2027-W24",
+  "theme": "storyThatChangedYou",
+  "texts": {
+   "en": {
+    "title": "A story that changed you",
+    "prompt": "A book, film or game that changed how you see things. No spoilers."
+   },
+   "bn": {
+    "title": "যে গল্প আপনাকে বদলে দিয়েছে",
+    "prompt": "একটি বই, সিনেমা বা গেম যা আপনার দেখার চোখ বদলে দিয়েছে। কোনো স্পয়লার নয়।"
+   },
+   "de": {
+    "title": "Eine Geschichte, die dich verändert hat",
+    "prompt": "Ein Buch, Film oder Spiel, das deinen Blick auf die Dinge verändert hat. Keine Spoiler."
+   },
+   "es": {
+    "title": "Una historia que te cambió",
+    "prompt": "Un libro, película o juego que cambió tu forma de ver las cosas. Sin spoilers."
+   },
+   "fil": {
+    "title": "Kuwentong bumago sa iyo",
+    "prompt": "Isang libro, pelikula o laro na nagbago ng pananaw mo. Bawal ang spoiler."
+   },
+   "fr": {
+    "title": "Une histoire qui vous a changé",
+    "prompt": "Un livre, un film ou un jeu qui a changé votre regard. Sans spoilers."
+   },
+   "hi": {
+    "title": "वह कहानी जिसने आपको बदला",
+    "prompt": "कोई किताब, फ़िल्म या गेम जिसने चीज़ों को देखने का आपका नज़रिया बदल दिया। कोई स्पॉइलर नहीं।"
+   },
+   "id": {
+    "title": "Kisah yang mengubahmu",
+    "prompt": "Buku, film, atau gim yang mengubah cara pandangmu. Tanpa spoiler."
+   },
+   "it": {
+    "title": "Una storia che ti ha cambiato",
+    "prompt": "Un libro, un film o un gioco che ha cambiato il tuo modo di vedere le cose. Niente spoiler."
+   },
+   "ja": {
+    "title": "あなたを変えた物語",
+    "prompt": "ものの見方を変えた本、映画、ゲーム。ネタバレはなしで。"
+   },
+   "ko": {
+    "title": "나를 바꾼 이야기",
+    "prompt": "세상을 보는 눈을 바꿔 준 책, 영화, 게임. 스포일러는 금지예요."
+   },
+   "nl": {
+    "title": "Een verhaal dat je veranderde",
+    "prompt": "Een boek, film of game waardoor je anders naar dingen kijkt. Geen spoilers."
+   },
+   "pl": {
+    "title": "Historia, która cię zmieniła",
+    "prompt": "Książka, film lub gra, które zmieniły twoje spojrzenie na świat. Bez spoilerów."
+   },
+   "pt": {
+    "title": "Uma história que mudou você",
+    "prompt": "Um livro, filme ou jogo que mudou sua forma de ver as coisas. Sem spoilers."
+   },
+   "ru": {
+    "title": "История, которая вас изменила",
+    "prompt": "Книга, фильм или игра, которые изменили ваш взгляд на вещи. Без спойлеров."
+   },
+   "sw": {
+    "title": "Hadithi iliyokubadilisha",
+    "prompt": "Kitabu, filamu au mchezo uliobadilisha jinsi unavyoona mambo. Bila kufichua mwisho."
+   },
+   "th": {
+    "title": "เรื่องที่เปลี่ยนคุณ",
+    "prompt": "หนังสือ ภาพยนตร์ หรือเกมที่เปลี่ยนมุมมองของคุณ ห้ามสปอยล์"
+   },
+   "tr": {
+    "title": "Seni değiştiren bir hikâye",
+    "prompt": "Bakış açını değiştiren bir kitap, film ya da oyun. Spoiler yok."
+   },
+   "uk": {
+    "title": "Історія, що вас змінила",
+    "prompt": "Книга, фільм чи гра, які змінили ваш погляд на речі. Без спойлерів."
+   },
+   "vi": {
+    "title": "Câu chuyện đã thay đổi bạn",
+    "prompt": "Một cuốn sách, bộ phim hay trò chơi đã thay đổi cách bạn nhìn mọi thứ. Không tiết lộ nội dung."
+   },
+   "zh": {
+    "title": "改变你的故事",
+    "prompt": "一本书、一部电影或一款游戏，它改变了你看待事物的方式。请勿剧透。"
+   }
+  }
+ },
+ {
+  "week": "2027-W25",
+  "theme": "workoutAnywhere",
+  "texts": {
+   "en": {
+    "title": "Workout anywhere",
+    "prompt": "An exercise anyone can do without equipment."
+   },
+   "bn": {
+    "title": "যেকোনো জায়গায় ব্যায়াম",
+    "prompt": "এমন একটি ব্যায়াম যা যে কেউ কোনো সরঞ্জাম ছাড়াই করতে পারে।"
+   },
+   "de": {
+    "title": "Training überall",
+    "prompt": "Eine Übung, die jeder ohne Geräte machen kann."
+   },
+   "es": {
+    "title": "Ejercicio en cualquier lugar",
+    "prompt": "Un ejercicio que cualquiera puede hacer sin equipo."
+   },
+   "fil": {
+    "title": "Workout kahit saan",
+    "prompt": "Isang ehersisyong kayang gawin ng kahit sino nang walang gamit."
+   },
+   "fr": {
+    "title": "Du sport partout",
+    "prompt": "Un exercice que tout le monde peut faire sans matériel."
+   },
+   "hi": {
+    "title": "कहीं भी वर्कआउट",
+    "prompt": "ऐसी एक्सरसाइज़ जो कोई भी बिना किसी उपकरण के कर सके।"
+   },
+   "id": {
+    "title": "Olahraga di mana saja",
+    "prompt": "Gerakan latihan yang bisa dilakukan siapa saja tanpa alat."
+   },
+   "it": {
+    "title": "Allenamento ovunque",
+    "prompt": "Un esercizio che chiunque può fare senza attrezzi."
+   },
+   "ja": {
+    "title": "どこでもトレーニング",
+    "prompt": "道具なしで誰でもできるエクササイズ。"
+   },
+   "ko": {
+    "title": "어디서나 운동",
+    "prompt": "도구 없이 누구나 할 수 있는 운동."
+   },
+   "nl": {
+    "title": "Overal sporten",
+    "prompt": "Een oefening die iedereen zonder spullen kan doen."
+   },
+   "pl": {
+    "title": "Trening wszędzie",
+    "prompt": "Ćwiczenie, które każdy może zrobić bez sprzętu."
+   },
+   "pt": {
+    "title": "Treino em qualquer lugar",
+    "prompt": "Um exercício que qualquer pessoa pode fazer sem equipamento."
+   },
+   "ru": {
+    "title": "Тренировка где угодно",
+    "prompt": "Упражнение, которое любой может сделать без снаряжения."
+   },
+   "sw": {
+    "title": "Mazoezi popote",
+    "prompt": "Zoezi ambalo mtu yeyote anaweza kufanya bila vifaa."
+   },
+   "th": {
+    "title": "ออกกำลังกายได้ทุกที่",
+    "prompt": "ท่าออกกำลังกายที่ใครก็ทำได้โดยไม่ต้องใช้อุปกรณ์"
+   },
+   "tr": {
+    "title": "Her yerde antrenman",
+    "prompt": "Herkesin ekipmansız yapabileceği bir egzersiz."
+   },
+   "uk": {
+    "title": "Тренування будь-де",
+    "prompt": "Вправа, яку будь-хто може зробити без спорядження."
+   },
+   "vi": {
+    "title": "Tập luyện mọi nơi",
+    "prompt": "Một bài tập ai cũng làm được mà không cần dụng cụ."
+   },
+   "zh": {
+    "title": "随时随地运动",
+    "prompt": "一个任何人不用器械都能做的动作。"
+   }
+  }
+ },
+ {
+  "week": "2027-W26",
+  "theme": "halfwayCheckIn",
+  "texts": {
+   "en": {
+    "title": "Halfway check-in",
+    "prompt": "Half the year is gone: how is your new year goal going? Be honest."
+   },
+   "bn": {
+    "title": "বছরের মাঝামাঝি হিসাব",
+    "prompt": "বছরের অর্ধেক পেরিয়ে গেছে: নতুন বছরের লক্ষ্য কেমন চলছে? সৎভাবে বলুন।"
+   },
+   "de": {
+    "title": "Halbzeit-Check",
+    "prompt": "Das halbe Jahr ist um: Wie läuft dein Neujahrsziel? Sei ehrlich."
+   },
+   "es": {
+    "title": "Balance de mitad de año",
+    "prompt": "Ya pasó la mitad del año: ¿cómo va tu meta de año nuevo? Sé sincero."
+   },
+   "fil": {
+    "title": "Kumustahan sa kalagitnaan",
+    "prompt": "Kalahati na ng taon ang lumipas: kumusta ang goal mo sa bagong taon? Maging tapat."
+   },
+   "fr": {
+    "title": "Bilan de mi-année",
+    "prompt": "La moitié de l'année est passée : où en est votre objectif du Nouvel An ? Soyez honnête."
+   },
+   "hi": {
+    "title": "आधे साल का हिसाब",
+    "prompt": "आधा साल बीत गया: नए साल का आपका लक्ष्य कैसा चल रहा है? ईमानदारी से बताइए।"
+   },
+   "id": {
+    "title": "Cek tengah tahun",
+    "prompt": "Setengah tahun sudah lewat: bagaimana kabar tujuan tahun barumu? Jujur, ya."
+   },
+   "it": {
+    "title": "Bilancio di metà anno",
+    "prompt": "Metà anno è passato: come va il tuo obiettivo per l'anno nuovo? Sii sincero."
+   },
+   "ja": {
+    "title": "折り返しチェック",
+    "prompt": "1年の半分が過ぎました。新年の目標はどうですか？正直にどうぞ。"
+   },
+   "ko": {
+    "title": "중간 점검",
+    "prompt": "벌써 한 해의 절반이 지났어요. 새해 목표는 잘 되고 있나요? 솔직하게요."
+   },
+   "nl": {
+    "title": "Halverwege",
+    "prompt": "Het halve jaar is voorbij: hoe gaat het met je goede voornemen? Wees eerlijk."
+   },
+   "pl": {
+    "title": "Podsumowanie półrocza",
+    "prompt": "Minęła połowa roku: jak idzie twoje noworoczne postanowienie? Szczerze."
+   },
+   "pt": {
+    "title": "Balanço do meio do ano",
+    "prompt": "Metade do ano já foi: como vai sua meta de ano novo? Seja sincero."
+   },
+   "ru": {
+    "title": "Итоги полугодия",
+    "prompt": "Полгода позади: как продвигается ваша новогодняя цель? Только честно."
+   },
+   "sw": {
+    "title": "Tathmini ya nusu mwaka",
+    "prompt": "Nusu ya mwaka imepita: lengo lako la mwaka mpya linaendeleaje? Kuwa mkweli."
+   },
+   "th": {
+    "title": "เช็กอินกลางปี",
+    "prompt": "ครึ่งปีผ่านไปแล้ว: เป้าหมายปีใหม่ของคุณเป็นอย่างไรบ้าง? ตอบตามจริงนะ"
+   },
+   "tr": {
+    "title": "Yarı yol kontrolü",
+    "prompt": "Yılın yarısı geride kaldı: yeni yıl hedefin nasıl gidiyor? Dürüst ol."
+   },
+   "uk": {
+    "title": "Підсумки півроку",
+    "prompt": "Пів року минуло: як просувається ваша новорічна мета? Тільки чесно."
+   },
+   "vi": {
+    "title": "Nhìn lại giữa năm",
+    "prompt": "Nửa năm đã trôi qua: mục tiêu năm mới của bạn tiến triển thế nào? Hãy thành thật nhé."
+   },
+   "zh": {
+    "title": "年中回顾",
+    "prompt": "一年已过半：你的新年目标进展如何？说实话哦。"
+   }
+  }
+ },
+ {
+  "week": "2027-W27",
+  "theme": "getOutside",
+  "texts": {
+   "en": {
+    "title": "Get outside",
+    "prompt": "A walk, a hike, a park or a beach. Take us with you."
+   },
+   "bn": {
+    "title": "বাইরে চলুন",
+    "prompt": "হাঁটা, হাইক, পার্ক বা সমুদ্রসৈকত। আমাদেরও সঙ্গে নিন।"
+   },
+   "de": {
+    "title": "Raus an die Luft",
+    "prompt": "Ein Spaziergang, eine Wanderung, ein Park oder ein Strand. Nimm uns mit."
+   },
+   "es": {
+    "title": "Sal al aire libre",
+    "prompt": "Un paseo, una caminata, un parque o una playa. Llévanos contigo."
+   },
+   "fil": {
+    "title": "Lumabas ka",
+    "prompt": "Lakad, hike, parke o beach. Isama mo kami."
+   },
+   "fr": {
+    "title": "Sortez !",
+    "prompt": "Une balade, une randonnée, un parc ou une plage. Emmenez-nous avec vous."
+   },
+   "hi": {
+    "title": "बाहर निकलिए",
+    "prompt": "सैर, हाइक, पार्क या समुद्र तट। हमें भी साथ ले चलिए।"
+   },
+   "id": {
+    "title": "Ayo keluar",
+    "prompt": "Jalan kaki, mendaki, taman, atau pantai. Ajak kami ikut."
+   },
+   "it": {
+    "title": "Esci all'aria aperta",
+    "prompt": "Una passeggiata, un'escursione, un parco o una spiaggia. Portaci con te."
+   },
+   "ja": {
+    "title": "外に出よう",
+    "prompt": "散歩、ハイキング、公園やビーチ。私たちも一緒に連れて行ってください。"
+   },
+   "ko": {
+    "title": "밖으로 나가요",
+    "prompt": "산책, 하이킹, 공원, 해변. 우리도 데려가 주세요."
+   },
+   "nl": {
+    "title": "Naar buiten",
+    "prompt": "Een wandeling, een tocht, een park of een strand. Neem ons mee."
+   },
+   "pl": {
+    "title": "Wyjdź na zewnątrz",
+    "prompt": "Spacer, wędrówka, park albo plaża. Zabierz nas ze sobą."
+   },
+   "pt": {
+    "title": "Vá lá fora",
+    "prompt": "Uma caminhada, uma trilha, um parque ou uma praia. Leve a gente junto."
+   },
+   "ru": {
+    "title": "На свежий воздух",
+    "prompt": "Прогулка, поход, парк или пляж. Возьмите нас с собой."
+   },
+   "sw": {
+    "title": "Toka nje",
+    "prompt": "Matembezi, kupanda mlima, bustani au ufukwe. Tuchukue pamoja nawe."
+   },
+   "th": {
+    "title": "ออกไปข้างนอก",
+    "prompt": "เดินเล่น เดินป่า สวนสาธารณะ หรือชายหาด พาเราไปด้วย"
+   },
+   "tr": {
+    "title": "Dışarı çık",
+    "prompt": "Bir yürüyüş, bir doğa gezisi, bir park ya da bir plaj. Bizi de götür."
+   },
+   "uk": {
+    "title": "На свіже повітря",
+    "prompt": "Прогулянка, похід, парк чи пляж. Візьміть нас із собою."
+   },
+   "vi": {
+    "title": "Ra ngoài thôi",
+    "prompt": "Đi dạo, leo núi, công viên hay bãi biển. Đưa chúng tôi đi cùng."
+   },
+   "zh": {
+    "title": "出去走走",
+    "prompt": "散步、徒步、公园或海滩。带上我们一起去。"
+   }
+  }
+ },
+ {
+  "week": "2027-W28",
+  "theme": "askMeAnything",
+  "texts": {
+   "en": {
+    "title": "The question I get most",
+    "prompt": "Answer the question people ask you all the time."
+   },
+   "bn": {
+    "title": "আমাকে সবচেয়ে বেশি করা প্রশ্ন",
+    "prompt": "মানুষ আপনাকে সবসময় যে প্রশ্নটা করে, তার উত্তর দিন।"
+   },
+   "de": {
+    "title": "Die Frage, die ich am häufigsten höre",
+    "prompt": "Beantworte die Frage, die dir ständig gestellt wird."
+   },
+   "es": {
+    "title": "La pregunta que más me hacen",
+    "prompt": "Responde la pregunta que la gente te hace todo el tiempo."
+   },
+   "fil": {
+    "title": "Ang tanong na lagi sa aking itinatanong",
+    "prompt": "Sagutin ang tanong na lagi sa iyong itinatanong ng mga tao."
+   },
+   "fr": {
+    "title": "La question qu'on me pose le plus",
+    "prompt": "Répondez à la question qu'on vous pose tout le temps."
+   },
+   "hi": {
+    "title": "मुझसे सबसे ज़्यादा पूछा जाने वाला सवाल",
+    "prompt": "उस सवाल का जवाब दीजिए जो लोग आपसे हमेशा पूछते हैं।"
+   },
+   "id": {
+    "title": "Pertanyaan yang paling sering kudapat",
+    "prompt": "Jawab pertanyaan yang selalu ditanyakan orang kepadamu."
+   },
+   "it": {
+    "title": "La domanda che mi fanno di più",
+    "prompt": "Rispondi alla domanda che ti fanno di continuo."
+   },
+   "ja": {
+    "title": "いちばんよく聞かれる質問",
+    "prompt": "いつも聞かれる質問に答えてください。"
+   },
+   "ko": {
+    "title": "가장 많이 받는 질문",
+    "prompt": "사람들이 늘 물어보는 질문에 답해 주세요."
+   },
+   "nl": {
+    "title": "De vraag die ik het vaakst krijg",
+    "prompt": "Beantwoord de vraag die mensen je steeds stellen."
+   },
+   "pl": {
+    "title": "Pytanie, które słyszę najczęściej",
+    "prompt": "Odpowiedz na pytanie, które ludzie zadają ci bez przerwy."
+   },
+   "pt": {
+    "title": "A pergunta que mais ouço",
+    "prompt": "Responda à pergunta que as pessoas te fazem o tempo todo."
+   },
+   "ru": {
+    "title": "Вопрос, который мне задают чаще всего",
+    "prompt": "Ответьте на вопрос, который вам задают постоянно."
+   },
+   "sw": {
+    "title": "Swali ninaloulizwa zaidi",
+    "prompt": "Jibu swali ambalo watu hukuuliza kila mara."
+   },
+   "th": {
+    "title": "คำถามที่ฉันโดนถามบ่อยที่สุด",
+    "prompt": "ตอบคำถามที่คนชอบถามคุณอยู่เสมอ"
+   },
+   "tr": {
+    "title": "En çok sorulan soru",
+    "prompt": "İnsanların sana sürekli sorduğu soruyu yanıtla."
+   },
+   "uk": {
+    "title": "Питання, яке мені ставлять найчастіше",
+    "prompt": "Дайте відповідь на питання, яке вам ставлять постійно."
+   },
+   "vi": {
+    "title": "Câu hỏi tôi hay gặp nhất",
+    "prompt": "Trả lời câu hỏi mà mọi người lúc nào cũng hỏi bạn."
+   },
+   "zh": {
+    "title": "我最常被问的问题",
+    "prompt": "回答大家总是问你的那个问题。"
+   }
+  }
+ },
+ {
+  "week": "2027-W29",
+  "theme": "lifeHack",
+  "texts": {
+   "en": {
+    "title": "Life hack",
+    "prompt": "A trick that saves you time or money every week."
+   },
+   "bn": {
+    "title": "লাইফ হ্যাক",
+    "prompt": "এমন একটি কৌশল যা প্রতি সপ্তাহে আপনার সময় বা টাকা বাঁচায়।"
+   },
+   "de": {
+    "title": "Lifehack",
+    "prompt": "Ein Trick, der dir jede Woche Zeit oder Geld spart."
+   },
+   "es": {
+    "title": "Truco útil",
+    "prompt": "Un truco que te ahorra tiempo o dinero cada semana."
+   },
+   "fil": {
+    "title": "Life hack",
+    "prompt": "Isang trick na nakakatipid ng oras o pera mo bawat linggo."
+   },
+   "fr": {
+    "title": "Astuce du quotidien",
+    "prompt": "Une astuce qui vous fait gagner du temps ou de l'argent chaque semaine."
+   },
+   "hi": {
+    "title": "लाइफ़ हैक",
+    "prompt": "एक तरकीब जो हर हफ़्ते आपका समय या पैसा बचाती है।"
+   },
+   "id": {
+    "title": "Life hack",
+    "prompt": "Trik yang menghemat waktu atau uangmu setiap minggu."
+   },
+   "it": {
+    "title": "Trucco utile",
+    "prompt": "Un trucco che ti fa risparmiare tempo o soldi ogni settimana."
+   },
+   "ja": {
+    "title": "ライフハック",
+    "prompt": "毎週の時間やお金を節約できる工夫。"
+   },
+   "ko": {
+    "title": "생활 꿀팁",
+    "prompt": "매주 시간이나 돈을 아껴 주는 요령."
+   },
+   "nl": {
+    "title": "Lifehack",
+    "prompt": "Een trucje dat je elke week tijd of geld bespaart."
+   },
+   "pl": {
+    "title": "Lifehack",
+    "prompt": "Trik, który co tydzień oszczędza ci czas lub pieniądze."
+   },
+   "pt": {
+    "title": "Dica esperta",
+    "prompt": "Um truque que economiza seu tempo ou dinheiro toda semana."
+   },
+   "ru": {
+    "title": "Лайфхак",
+    "prompt": "Приём, который каждую неделю экономит вам время или деньги."
+   },
+   "sw": {
+    "title": "Mbinu ya maisha",
+    "prompt": "Mbinu inayokuokolea muda au pesa kila wiki."
+   },
+   "th": {
+    "title": "ไลฟ์แฮก",
+    "prompt": "เคล็ดลับที่ช่วยคุณประหยัดเวลาหรือเงินทุกสัปดาห์"
+   },
+   "tr": {
+    "title": "Pratik ipucu",
+    "prompt": "Her hafta sana zaman ya da para kazandıran bir püf noktası."
+   },
+   "uk": {
+    "title": "Лайфхак",
+    "prompt": "Прийом, який щотижня заощаджує вам час або гроші."
+   },
+   "vi": {
+    "title": "Mẹo vặt cuộc sống",
+    "prompt": "Một mẹo giúp bạn tiết kiệm thời gian hoặc tiền bạc mỗi tuần."
+   },
+   "zh": {
+    "title": "生活小妙招",
+    "prompt": "每周帮你省时间或省钱的小技巧。"
+   }
+  }
+ },
+ {
+  "week": "2027-W30",
+  "theme": "bestAdvice",
+  "texts": {
+   "en": {
+    "title": "The best advice I got",
+    "prompt": "The best advice someone older ever gave you."
+   },
+   "bn": {
+    "title": "আমার পাওয়া সেরা পরামর্শ",
+    "prompt": "বয়সে বড় কেউ আপনাকে যে সেরা পরামর্শটি দিয়েছিলেন।"
+   },
+   "de": {
+    "title": "Der beste Rat, den ich je bekam",
+    "prompt": "Der beste Rat, den dir je ein älterer Mensch gegeben hat."
+   },
+   "es": {
+    "title": "El mejor consejo que recibí",
+    "prompt": "El mejor consejo que te dio alguien mayor."
+   },
+   "fil": {
+    "title": "Ang pinakamagandang payong natanggap ko",
+    "prompt": "Ang pinakamagandang payong ibinigay sa iyo ng isang nakatatanda."
+   },
+   "fr": {
+    "title": "Le meilleur conseil reçu",
+    "prompt": "Le meilleur conseil qu'une personne plus âgée vous ait donné."
+   },
+   "hi": {
+    "title": "मुझे मिली सबसे अच्छी सलाह",
+    "prompt": "किसी बड़े से मिली अब तक की सबसे अच्छी सलाह।"
+   },
+   "id": {
+    "title": "Nasihat terbaik yang pernah kudapat",
+    "prompt": "Nasihat terbaik yang pernah diberikan orang yang lebih tua kepadamu."
+   },
+   "it": {
+    "title": "Il miglior consiglio ricevuto",
+    "prompt": "Il miglior consiglio che qualcuno più grande di te ti abbia mai dato."
+   },
+   "ja": {
+    "title": "もらった最高のアドバイス",
+    "prompt": "年上の人からもらった、いちばんのアドバイス。"
+   },
+   "ko": {
+    "title": "내가 받은 최고의 조언",
+    "prompt": "어른에게 들은 최고의 조언."
+   },
+   "nl": {
+    "title": "Het beste advies dat ik kreeg",
+    "prompt": "Het beste advies dat iemand die ouder is je ooit gaf."
+   },
+   "pl": {
+    "title": "Najlepsza rada w moim życiu",
+    "prompt": "Najlepsza rada, jaką dała ci kiedyś starsza osoba."
+   },
+   "pt": {
+    "title": "O melhor conselho que recebi",
+    "prompt": "O melhor conselho que alguém mais velho já te deu."
+   },
+   "ru": {
+    "title": "Лучший совет в моей жизни",
+    "prompt": "Лучший совет, который вам дал кто-то старше вас."
+   },
+   "sw": {
+    "title": "Ushauri bora niliowahi kupata",
+    "prompt": "Ushauri bora zaidi ambao mtu mzima aliwahi kukupa."
+   },
+   "th": {
+    "title": "คำแนะนำที่ดีที่สุดที่ฉันเคยได้รับ",
+    "prompt": "คำแนะนำที่ดีที่สุดที่ผู้ใหญ่เคยให้คุณ"
+   },
+   "tr": {
+    "title": "Aldığım en iyi tavsiye",
+    "prompt": "Senden büyük birinin sana verdiği en iyi tavsiye."
+   },
+   "uk": {
+    "title": "Найкраща порада в моєму житті",
+    "prompt": "Найкраща порада, яку вам дав хтось старший."
+   },
+   "vi": {
+    "title": "Lời khuyên hay nhất tôi từng nhận",
+    "prompt": "Lời khuyên hay nhất mà một người lớn tuổi hơn từng cho bạn."
+   },
+   "zh": {
+    "title": "我得到的最好建议",
+    "prompt": "长辈给过你的最好的建议。"
+   }
+  }
+ },
+ {
+  "week": "2027-W31",
+  "theme": "collection",
+  "texts": {
+   "en": {
+    "title": "My collection",
+    "prompt": "Show off something you collect and the piece you love most."
+   },
+   "bn": {
+    "title": "আমার সংগ্রহ",
+    "prompt": "আপনি যা সংগ্রহ করেন তা দেখান, আর সবচেয়ে প্রিয় জিনিসটিও।"
+   },
+   "de": {
+    "title": "Meine Sammlung",
+    "prompt": "Zeig, was du sammelst, und dein Lieblingsstück."
+   },
+   "es": {
+    "title": "Mi colección",
+    "prompt": "Presume algo que coleccionas y la pieza que más quieres."
+   },
+   "fil": {
+    "title": "Ang koleksyon ko",
+    "prompt": "Ipakita ang kinokolekta mo at ang pinakapaborito mo rito."
+   },
+   "fr": {
+    "title": "Ma collection",
+    "prompt": "Montrez ce que vous collectionnez et la pièce que vous préférez."
+   },
+   "hi": {
+    "title": "मेरा कलेक्शन",
+    "prompt": "जो चीज़ें आप जमा करते हैं उन्हें दिखाइए, और वह भी जो आपको सबसे प्यारी है।"
+   },
+   "id": {
+    "title": "Koleksiku",
+    "prompt": "Pamerkan barang yang kamu koleksi dan yang paling kamu sayangi."
+   },
+   "it": {
+    "title": "La mia collezione",
+    "prompt": "Mostra cosa collezioni e il pezzo che ami di più."
+   },
+   "ja": {
+    "title": "私のコレクション",
+    "prompt": "集めているものと、いちばんお気に入りの一品を見せてください。"
+   },
+   "ko": {
+    "title": "나의 컬렉션",
+    "prompt": "모으고 있는 것과 가장 아끼는 하나를 자랑해 주세요."
+   },
+   "nl": {
+    "title": "Mijn verzameling",
+    "prompt": "Laat zien wat je verzamelt en welk stuk je het mooiste vindt."
+   },
+   "pl": {
+    "title": "Moja kolekcja",
+    "prompt": "Pokaż, co kolekcjonujesz, i swój ulubiony okaz."
+   },
+   "pt": {
+    "title": "Minha coleção",
+    "prompt": "Mostre algo que você coleciona e a peça de que mais gosta."
+   },
+   "ru": {
+    "title": "Моя коллекция",
+    "prompt": "Покажите, что вы собираете, и самый любимый экземпляр."
+   },
+   "sw": {
+    "title": "Mkusanyiko wangu",
+    "prompt": "Onyesha kitu unachokusanya na kipande unachokipenda zaidi."
+   },
+   "th": {
+    "title": "ของสะสมของฉัน",
+    "prompt": "อวดของที่คุณสะสม และชิ้นที่คุณรักที่สุด"
+   },
+   "tr": {
+    "title": "Koleksiyonum",
+    "prompt": "Topladığın bir şeyi ve en sevdiğin parçayı göster."
+   },
+   "uk": {
+    "title": "Моя колекція",
+    "prompt": "Покажіть, що ви збираєте, і свій найулюбленіший екземпляр."
+   },
+   "vi": {
+    "title": "Bộ sưu tập của tôi",
+    "prompt": "Khoe thứ bạn sưu tầm và món bạn yêu thích nhất."
+   },
+   "zh": {
+    "title": "我的收藏",
+    "prompt": "晒出你收藏的东西，以及你最爱的那一件。"
+   }
+  }
+ },
+ {
+  "week": "2027-W32",
+  "theme": "oneTake",
+  "texts": {
+   "en": {
+    "title": "One take",
+    "prompt": "No cuts: tell a story in a single take."
+   },
+   "bn": {
+    "title": "এক টেক",
+    "prompt": "কোনো কাট নয়: এক টেকে একটি গল্প বলুন।"
+   },
+   "de": {
+    "title": "In einem Take",
+    "prompt": "Ohne Schnitt: Erzähl eine Geschichte in einer einzigen Aufnahme."
+   },
+   "es": {
+    "title": "Una sola toma",
+    "prompt": "Sin cortes: cuenta una historia en una sola toma."
+   },
+   "fil": {
+    "title": "One take",
+    "prompt": "Walang cut: magkuwento sa isang take lang."
+   },
+   "fr": {
+    "title": "En une prise",
+    "prompt": "Sans coupe : racontez une histoire en une seule prise."
+   },
+   "hi": {
+    "title": "वन टेक",
+    "prompt": "बिना कट: एक ही टेक में कहानी सुनाइए।"
+   },
+   "id": {
+    "title": "Sekali ambil",
+    "prompt": "Tanpa potongan: ceritakan sebuah kisah dalam satu kali pengambilan."
+   },
+   "it": {
+    "title": "Un'unica ripresa",
+    "prompt": "Niente tagli: racconta una storia in una sola ripresa."
+   },
+   "ja": {
+    "title": "ワンテイク",
+    "prompt": "カットなし。ワンテイクで物語を伝えてください。"
+   },
+   "ko": {
+    "title": "원테이크",
+    "prompt": "컷 없이 한 번에 이야기를 들려주세요."
+   },
+   "nl": {
+    "title": "In één take",
+    "prompt": "Niet knippen: vertel een verhaal in één take."
+   },
+   "pl": {
+    "title": "Jedno ujęcie",
+    "prompt": "Bez cięć: opowiedz historię w jednym ujęciu."
+   },
+   "pt": {
+    "title": "Uma tomada só",
+    "prompt": "Sem cortes: conte uma história em uma única tomada."
+   },
+   "ru": {
+    "title": "Одним дублем",
+    "prompt": "Без склеек: расскажите историю одним дублем."
+   },
+   "sw": {
+    "title": "Rekodi moja",
+    "prompt": "Bila kukata: simulia hadithi kwa kurekodi mara moja tu."
+   },
+   "th": {
+    "title": "เทคเดียว",
+    "prompt": "ไม่มีการตัด: เล่าเรื่องให้จบในเทคเดียว"
+   },
+   "tr": {
+    "title": "Tek çekim",
+    "prompt": "Kesme yok: bir hikâyeyi tek çekimde anlat."
+   },
+   "uk": {
+    "title": "Одним дублем",
+    "prompt": "Без склейок: розкажіть історію одним дублем."
+   },
+   "vi": {
+    "title": "Một cú máy",
+    "prompt": "Không cắt ghép: kể một câu chuyện chỉ trong một lần quay."
+   },
+   "zh": {
+    "title": "一镜到底",
+    "prompt": "不剪辑：一个镜头讲完一个故事。"
+   }
+  }
+ },
+ {
+  "week": "2027-W33",
+  "theme": "sky",
+  "texts": {
+   "en": {
+    "title": "Sunrise or sunset",
+    "prompt": "Catch the sky at the start or the end of the day."
+   },
+   "bn": {
+    "title": "সূর্যোদয় বা সূর্যাস্ত",
+    "prompt": "দিনের শুরু বা শেষের আকাশ ক্যামেরায় ধরুন।"
+   },
+   "de": {
+    "title": "Sonnenaufgang oder Sonnenuntergang",
+    "prompt": "Fang den Himmel am Anfang oder am Ende des Tages ein."
+   },
+   "es": {
+    "title": "Amanecer o atardecer",
+    "prompt": "Captura el cielo al empezar o al terminar el día."
+   },
+   "fil": {
+    "title": "Pagsikat o paglubog ng araw",
+    "prompt": "Kunan ang langit sa simula o sa dulo ng araw."
+   },
+   "fr": {
+    "title": "Lever ou coucher de soleil",
+    "prompt": "Capturez le ciel au début ou à la fin de la journée."
+   },
+   "hi": {
+    "title": "सूर्योदय या सूर्यास्त",
+    "prompt": "दिन की शुरुआत या अंत में आसमान को कैमरे में कैद कीजिए।"
+   },
+   "id": {
+    "title": "Matahari terbit atau terbenam",
+    "prompt": "Abadikan langit di awal atau akhir hari."
+   },
+   "it": {
+    "title": "Alba o tramonto",
+    "prompt": "Cattura il cielo all'inizio o alla fine della giornata."
+   },
+   "ja": {
+    "title": "朝焼けか夕焼け",
+    "prompt": "一日の始まりか終わりの空をとらえてください。"
+   },
+   "ko": {
+    "title": "일출 또는 일몰",
+    "prompt": "하루의 시작이나 끝의 하늘을 담아 보세요."
+   },
+   "nl": {
+    "title": "Zonsopkomst of zonsondergang",
+    "prompt": "Vang de lucht aan het begin of het einde van de dag."
+   },
+   "pl": {
+    "title": "Wschód lub zachód słońca",
+    "prompt": "Uchwyć niebo na początku lub na końcu dnia."
+   },
+   "pt": {
+    "title": "Nascer ou pôr do sol",
+    "prompt": "Capture o céu no começo ou no fim do dia."
+   },
+   "ru": {
+    "title": "Рассвет или закат",
+    "prompt": "Поймайте небо в начале или в конце дня."
+   },
+   "sw": {
+    "title": "Macheo au machweo",
+    "prompt": "Nasa anga mwanzoni au mwishoni mwa siku."
+   },
+   "th": {
+    "title": "พระอาทิตย์ขึ้นหรือตก",
+    "prompt": "เก็บภาพท้องฟ้าตอนเริ่มต้นหรือตอนจบของวัน"
+   },
+   "tr": {
+    "title": "Gün doğumu ya da gün batımı",
+    "prompt": "Günün başında ya da sonunda gökyüzünü yakala."
+   },
+   "uk": {
+    "title": "Схід чи захід сонця",
+    "prompt": "Спіймайте небо на початку чи наприкінці дня."
+   },
+   "vi": {
+    "title": "Bình minh hay hoàng hôn",
+    "prompt": "Ghi lại bầu trời lúc đầu ngày hoặc cuối ngày."
+   },
+   "zh": {
+    "title": "日出或日落",
+    "prompt": "拍下一天开始或结束时的天空。"
+   }
+  }
+ },
+ {
+  "week": "2027-W34",
+  "theme": "schoolLesson",
+  "texts": {
+   "en": {
+    "title": "What school didn't teach",
+    "prompt": "A lesson you wish someone had taught you at school."
+   },
+   "bn": {
+    "title": "স্কুল যা শেখায়নি",
+    "prompt": "এমন একটি শিক্ষা, যা স্কুলে কেউ শেখালে ভালো হতো।"
+   },
+   "de": {
+    "title": "Was die Schule nicht lehrt",
+    "prompt": "Eine Lektion, die dir die Schule besser beigebracht hätte."
+   },
+   "es": {
+    "title": "Lo que la escuela no enseñó",
+    "prompt": "Una lección que te habría gustado aprender en la escuela."
+   },
+   "fil": {
+    "title": "Hindi itinuro sa school",
+    "prompt": "Isang aral na sana ay itinuro sa iyo sa school."
+   },
+   "fr": {
+    "title": "Ce que l'école n'apprend pas",
+    "prompt": "Une leçon que vous auriez aimé apprendre à l'école."
+   },
+   "hi": {
+    "title": "जो स्कूल ने नहीं सिखाया",
+    "prompt": "एक सबक जो काश आपको स्कूल में किसी ने सिखाया होता।"
+   },
+   "id": {
+    "title": "Yang tak diajarkan di sekolah",
+    "prompt": "Pelajaran yang kamu harap diajarkan di sekolah."
+   },
+   "it": {
+    "title": "Cosa la scuola non insegna",
+    "prompt": "Una lezione che avresti voluto imparare a scuola."
+   },
+   "ja": {
+    "title": "学校で教わらなかったこと",
+    "prompt": "学校で教えてほしかったと思う教訓。"
+   },
+   "ko": {
+    "title": "학교에서 안 가르쳐 준 것",
+    "prompt": "학교에서 누가 가르쳐 줬으면 좋았을 교훈."
+   },
+   "nl": {
+    "title": "Wat school je niet leerde",
+    "prompt": "Een les die je graag op school had geleerd."
+   },
+   "pl": {
+    "title": "Czego nie uczyła szkoła",
+    "prompt": "Lekcja, która przydałaby ci się już w szkole."
+   },
+   "pt": {
+    "title": "O que a escola não ensinou",
+    "prompt": "Uma lição que você queria ter aprendido na escola."
+   },
+   "ru": {
+    "title": "Чему не учат в школе",
+    "prompt": "Урок, который пригодился бы вам ещё в школе."
+   },
+   "sw": {
+    "title": "Ambacho shule haikufundisha",
+    "prompt": "Somo ambalo ungetamani mtu angekufundisha shuleni."
+   },
+   "th": {
+    "title": "สิ่งที่โรงเรียนไม่ได้สอน",
+    "prompt": "บทเรียนที่คุณอยากให้มีคนสอนตั้งแต่สมัยเรียน"
+   },
+   "tr": {
+    "title": "Okulun öğretmedikleri",
+    "prompt": "Keşke okulda öğretselerdi dediğin bir ders."
+   },
+   "uk": {
+    "title": "Чого не вчать у школі",
+    "prompt": "Урок, який знадобився б вам ще в школі."
+   },
+   "vi": {
+    "title": "Điều trường không dạy",
+    "prompt": "Một bài học bạn ước gì đã được dạy ở trường."
+   },
+   "zh": {
+    "title": "学校没教的事",
+    "prompt": "一堂你希望在学校就有人教你的课。"
+   }
+  }
+ },
+ {
+  "week": "2027-W35",
+  "theme": "firstTime",
+  "texts": {
+   "en": {
+    "title": "My first time",
+    "prompt": "Try something for the first time, on camera."
+   },
+   "bn": {
+    "title": "আমার প্রথমবার",
+    "prompt": "ক্যামেরার সামনে প্রথমবার কিছু চেষ্টা করুন।"
+   },
+   "de": {
+    "title": "Mein erstes Mal",
+    "prompt": "Probier etwas zum ersten Mal aus, vor der Kamera."
+   },
+   "es": {
+    "title": "Mi primera vez",
+    "prompt": "Prueba algo por primera vez, frente a la cámara."
+   },
+   "fil": {
+    "title": "Unang beses ko",
+    "prompt": "Sumubok ng isang bagay sa unang pagkakataon, sa harap ng camera."
+   },
+   "fr": {
+    "title": "Ma première fois",
+    "prompt": "Essayez quelque chose pour la première fois, devant la caméra."
+   },
+   "hi": {
+    "title": "मेरा पहला अनुभव",
+    "prompt": "कैमरे के सामने पहली बार कुछ आज़माइए।"
+   },
+   "id": {
+    "title": "Pertama kalinya",
+    "prompt": "Coba sesuatu untuk pertama kalinya, di depan kamera."
+   },
+   "it": {
+    "title": "La mia prima volta",
+    "prompt": "Prova qualcosa per la prima volta, davanti alla telecamera."
+   },
+   "ja": {
+    "title": "初めての挑戦",
+    "prompt": "初めてのことに、カメラの前で挑戦してください。"
+   },
+   "ko": {
+    "title": "나의 첫 도전",
+    "prompt": "처음 해 보는 일을 카메라 앞에서 도전해 보세요."
+   },
+   "nl": {
+    "title": "Mijn eerste keer",
+    "prompt": "Probeer iets voor het eerst, voor de camera."
+   },
+   "pl": {
+    "title": "Mój pierwszy raz",
+    "prompt": "Spróbuj czegoś po raz pierwszy, przed kamerą."
+   },
+   "pt": {
+    "title": "Minha primeira vez",
+    "prompt": "Experimente algo pela primeira vez, diante da câmera."
+   },
+   "ru": {
+    "title": "Мой первый раз",
+    "prompt": "Попробуйте что-то впервые, на камеру."
+   },
+   "sw": {
+    "title": "Mara yangu ya kwanza",
+    "prompt": "Jaribu kitu kwa mara ya kwanza, mbele ya kamera."
+   },
+   "th": {
+    "title": "ครั้งแรกของฉัน",
+    "prompt": "ลองทำอะไรเป็นครั้งแรก ต่อหน้ากล้อง"
+   },
+   "tr": {
+    "title": "İlk kez",
+    "prompt": "Kamera karşısında bir şeyi ilk kez dene."
+   },
+   "uk": {
+    "title": "Мій перший раз",
+    "prompt": "Спробуйте щось уперше, на камеру."
+   },
+   "vi": {
+    "title": "Lần đầu tiên của tôi",
+    "prompt": "Thử một điều lần đầu tiên, trước ống kính."
+   },
+   "zh": {
+    "title": "我的第一次",
+    "prompt": "在镜头前第一次尝试某件事。"
+   }
+  }
+ },
+ {
+  "week": "2027-W36",
+  "theme": "kitchenExperiment",
+  "texts": {
+   "en": {
+    "title": "Kitchen experiment",
+    "prompt": "Try a recipe you have never made before."
+   },
+   "bn": {
+    "title": "রান্নাঘরের পরীক্ষা",
+    "prompt": "এমন একটি রেসিপি চেষ্টা করুন যা আগে কখনো বানাননি।"
+   },
+   "de": {
+    "title": "Küchenexperiment",
+    "prompt": "Probier ein Rezept, das du noch nie gekocht hast."
+   },
+   "es": {
+    "title": "Experimento en la cocina",
+    "prompt": "Prueba una receta que nunca hayas hecho."
+   },
+   "fil": {
+    "title": "Eksperimento sa kusina",
+    "prompt": "Subukan ang isang recipe na hindi mo pa nagagawa."
+   },
+   "fr": {
+    "title": "Expérience en cuisine",
+    "prompt": "Testez une recette que vous n'avez jamais faite."
+   },
+   "hi": {
+    "title": "किचन एक्सपेरिमेंट",
+    "prompt": "ऐसी रेसिपी आज़माइए जो आपने पहले कभी नहीं बनाई।"
+   },
+   "id": {
+    "title": "Eksperimen dapur",
+    "prompt": "Coba resep yang belum pernah kamu buat."
+   },
+   "it": {
+    "title": "Esperimento in cucina",
+    "prompt": "Prova una ricetta che non hai mai fatto."
+   },
+   "ja": {
+    "title": "キッチンで実験",
+    "prompt": "作ったことのないレシピに挑戦してください。"
+   },
+   "ko": {
+    "title": "주방 실험",
+    "prompt": "한 번도 만들어 본 적 없는 레시피에 도전해 보세요."
+   },
+   "nl": {
+    "title": "Keukenexperiment",
+    "prompt": "Probeer een recept dat je nog nooit hebt gemaakt."
+   },
+   "pl": {
+    "title": "Kuchenny eksperyment",
+    "prompt": "Wypróbuj przepis, który będzie dla ciebie zupełną nowością."
+   },
+   "pt": {
+    "title": "Experimento na cozinha",
+    "prompt": "Teste uma receita que você nunca fez."
+   },
+   "ru": {
+    "title": "Эксперимент на кухне",
+    "prompt": "Попробуйте рецепт, который никогда раньше не готовили."
+   },
+   "sw": {
+    "title": "Jaribio la jikoni",
+    "prompt": "Jaribu mapishi ambayo hujawahi kupika."
+   },
+   "th": {
+    "title": "การทดลองในครัว",
+    "prompt": "ลองสูตรอาหารที่คุณไม่เคยทำมาก่อน"
+   },
+   "tr": {
+    "title": "Mutfak deneyi",
+    "prompt": "Daha önce hiç yapmadığın bir tarifi dene."
+   },
+   "uk": {
+    "title": "Експеримент на кухні",
+    "prompt": "Спробуйте рецепт, який ніколи раніше не готували."
+   },
+   "vi": {
+    "title": "Thử nghiệm trong bếp",
+    "prompt": "Thử một công thức bạn chưa từng nấu."
+   },
+   "zh": {
+    "title": "厨房实验",
+    "prompt": "尝试一道你从没做过的菜。"
+   }
+  }
+ },
+ {
+  "week": "2027-W37",
+  "theme": "workFromAnywhere",
+  "texts": {
+   "en": {
+    "title": "Where I work today",
+    "prompt": "Show where you work today and what it takes."
+   },
+   "bn": {
+    "title": "আজ আমি কোথায় কাজ করছি",
+    "prompt": "আজ আপনি কোথায় কাজ করছেন আর তার জন্য কী কী লাগে, দেখান।"
+   },
+   "de": {
+    "title": "Hier arbeite ich heute",
+    "prompt": "Zeig, wo du heute arbeitest und was dazugehört."
+   },
+   "es": {
+    "title": "Dónde trabajo hoy",
+    "prompt": "Muestra dónde trabajas hoy y lo que implica."
+   },
+   "fil": {
+    "title": "Kung saan ako nagtatrabaho ngayon",
+    "prompt": "Ipakita kung saan ka nagtatrabaho ngayon at ano ang kailangan para dito."
+   },
+   "fr": {
+    "title": "Où je travaille aujourd'hui",
+    "prompt": "Montrez où vous travaillez aujourd'hui et ce que ça demande."
+   },
+   "hi": {
+    "title": "आज का मेरा वर्कस्पॉट",
+    "prompt": "दिखाइए कि आज आप कहाँ काम कर रहे हैं और उसके लिए क्या-क्या चाहिए।"
+   },
+   "id": {
+    "title": "Tempat kerjaku hari ini",
+    "prompt": "Tunjukkan di mana kamu bekerja hari ini dan apa saja yang dibutuhkan."
+   },
+   "it": {
+    "title": "Dove lavoro oggi",
+    "prompt": "Mostra dove lavori oggi e cosa serve."
+   },
+   "ja": {
+    "title": "今日の仕事場",
+    "prompt": "今日どこで働いているか、何が必要かを見せてください。"
+   },
+   "ko": {
+    "title": "오늘의 일터",
+    "prompt": "오늘 어디서 일하는지, 무엇이 필요한지 보여 주세요."
+   },
+   "nl": {
+    "title": "Waar ik vandaag werk",
+    "prompt": "Laat zien waar je vandaag werkt en wat daarbij komt kijken."
+   },
+   "pl": {
+    "title": "Gdzie dziś pracuję",
+    "prompt": "Pokaż, gdzie dziś pracujesz i czego to wymaga."
+   },
+   "pt": {
+    "title": "Onde trabalho hoje",
+    "prompt": "Mostre onde você trabalha hoje e o que isso exige."
+   },
+   "ru": {
+    "title": "Где я работаю сегодня",
+    "prompt": "Покажите, где вы работаете сегодня и что для этого нужно."
+   },
+   "sw": {
+    "title": "Ninapofanyia kazi leo",
+    "prompt": "Onyesha unapofanyia kazi leo na kinachohitajika."
+   },
+   "th": {
+    "title": "วันนี้ฉันทำงานที่ไหน",
+    "prompt": "โชว์ว่าวันนี้คุณทำงานที่ไหน และต้องใช้อะไรบ้าง"
+   },
+   "tr": {
+    "title": "Bugün nerede çalışıyorum",
+    "prompt": "Bugün nerede çalıştığını ve bunun için neler gerektiğini göster."
+   },
+   "uk": {
+    "title": "Де я працюю сьогодні",
+    "prompt": "Покажіть, де ви працюєте сьогодні і що для цього потрібно."
+   },
+   "vi": {
+    "title": "Hôm nay tôi làm việc ở đâu",
+    "prompt": "Cho xem hôm nay bạn làm việc ở đâu và cần những gì."
+   },
+   "zh": {
+    "title": "我今天在哪工作",
+    "prompt": "展示你今天在哪里工作，以及需要些什么。"
+   }
+  }
+ },
+ {
+  "week": "2027-W38",
+  "theme": "smallBusiness",
+  "texts": {
+   "en": {
+    "title": "Small business spotlight",
+    "prompt": "A local shop, stall or maker you want people to know about."
+   },
+   "bn": {
+    "title": "ছোট ব্যবসার গল্প",
+    "prompt": "একটি স্থানীয় দোকান, স্টল বা কারিগর, যাদের কথা আপনি সবাইকে জানাতে চান।"
+   },
+   "de": {
+    "title": "Kleine Läden im Rampenlicht",
+    "prompt": "Ein Laden, Stand oder Handwerksbetrieb vor Ort, den mehr Leute kennen sollten."
+   },
+   "es": {
+    "title": "Negocios locales",
+    "prompt": "Una tienda, un puesto o un artesano de tu zona que quieres dar a conocer."
+   },
+   "fil": {
+    "title": "Spotlight sa maliit na negosyo",
+    "prompt": "Isang lokal na tindahan, puwesto o gumagawa na gusto mong makilala ng mga tao."
+   },
+   "fr": {
+    "title": "Coup de projecteur local",
+    "prompt": "Une boutique, un stand ou un artisan du coin que vous voulez faire connaître."
+   },
+   "hi": {
+    "title": "छोटे बिज़नेस पर स्पॉटलाइट",
+    "prompt": "कोई लोकल दुकान, ठेला या कारीगर जिसके बारे में आप चाहते हैं कि लोग जानें।"
+   },
+   "id": {
+    "title": "Sorotan usaha kecil",
+    "prompt": "Toko, lapak, atau perajin lokal yang ingin kamu kenalkan ke banyak orang."
+   },
+   "it": {
+    "title": "Attività locali in vetrina",
+    "prompt": "Un negozio, una bancarella o un artigiano della tua zona che vuoi far conoscere."
+   },
+   "ja": {
+    "title": "小さなお店に注目",
+    "prompt": "みんなに知ってほしい地元のお店、屋台、作り手。"
+   },
+   "ko": {
+    "title": "작은 가게 소개",
+    "prompt": "사람들에게 알리고 싶은 동네 가게, 노점, 제작자."
+   },
+   "nl": {
+    "title": "Lokale ondernemer in de spotlight",
+    "prompt": "Een winkel, kraam of maker uit de buurt die meer mensen moeten kennen."
+   },
+   "pl": {
+    "title": "Lokalny biznes w centrum uwagi",
+    "prompt": "Sklep, stragan lub rzemieślnik z okolicy, o którym warto, żeby ludzie wiedzieli."
+   },
+   "pt": {
+    "title": "Negócio local em destaque",
+    "prompt": "Uma loja, barraca ou artesão local que você quer que as pessoas conheçam."
+   },
+   "ru": {
+    "title": "Местный бизнес",
+    "prompt": "Местный магазин, лавка или мастер, о котором стоит узнать всем."
+   },
+   "sw": {
+    "title": "Biashara ndogo ya kujulikana",
+    "prompt": "Duka, kibanda au fundi wa karibu ambaye ungependa watu wamjue."
+   },
+   "th": {
+    "title": "ส่องธุรกิจเล็กๆ",
+    "prompt": "ร้าน แผงลอย หรือคนทำงานฝีมือในท้องถิ่นที่คุณอยากให้คนรู้จัก"
+   },
+   "tr": {
+    "title": "Küçük işletmeler sahnede",
+    "prompt": "İnsanların tanımasını istediğin yerel bir dükkân, tezgâh ya da zanaatkâr."
+   },
+   "uk": {
+    "title": "Місцевий бізнес",
+    "prompt": "Місцева крамниця, ятка чи майстер, про яких варто дізнатися всім."
+   },
+   "vi": {
+    "title": "Tiệm nhỏ đáng biết",
+    "prompt": "Một cửa hàng, sạp hàng hay người làm nghề ở địa phương mà bạn muốn mọi người biết đến."
+   },
+   "zh": {
+    "title": "小店聚焦",
+    "prompt": "一家你希望更多人知道的本地小店、摊位或手艺人。"
+   }
+  }
+ },
+ {
+  "week": "2027-W39",
+  "theme": "retroLook",
+  "texts": {
+   "en": {
+    "title": "Retro look",
+    "prompt": "Shoot your Short like it is from another decade."
+   },
+   "bn": {
+    "title": "রেট্রো লুক",
+    "prompt": "আপনার শর্ট এমনভাবে শুট করুন যেন সেটা অন্য কোনো দশকের।"
+   },
+   "de": {
+    "title": "Retro-Look",
+    "prompt": "Dreh deinen Short, als käme er aus einem anderen Jahrzehnt."
+   },
+   "es": {
+    "title": "Estilo retro",
+    "prompt": "Graba tu Short como si fuera de otra década."
+   },
+   "fil": {
+    "title": "Retro look",
+    "prompt": "Kunan ang Short mo na parang galing sa ibang dekada."
+   },
+   "fr": {
+    "title": "Look rétro",
+    "prompt": "Tournez votre Short comme s'il venait d'une autre décennie."
+   },
+   "hi": {
+    "title": "रेट्रो लुक",
+    "prompt": "अपना शॉर्ट ऐसे शूट करें जैसे वह किसी और दशक का हो।"
+   },
+   "id": {
+    "title": "Gaya retro",
+    "prompt": "Rekam Shorts-mu seolah berasal dari dekade lain."
+   },
+   "it": {
+    "title": "Stile retrò",
+    "prompt": "Gira il tuo Short come se venisse da un altro decennio."
+   },
+   "ja": {
+    "title": "レトロな雰囲気",
+    "prompt": "別の時代に撮ったようなショートを撮影してください。"
+   },
+   "ko": {
+    "title": "레트로 감성",
+    "prompt": "다른 시대에서 온 것처럼 쇼츠를 촬영해 보세요."
+   },
+   "nl": {
+    "title": "Retrolook",
+    "prompt": "Film je Short alsof hij uit een ander decennium komt."
+   },
+   "pl": {
+    "title": "Styl retro",
+    "prompt": "Nakręć Shorta tak, jakby pochodził z innej dekady."
+   },
+   "pt": {
+    "title": "Visual retrô",
+    "prompt": "Grave seu Short como se fosse de outra década."
+   },
+   "ru": {
+    "title": "Ретро-стиль",
+    "prompt": "Снимите Short так, будто он из другого десятилетия."
+   },
+   "sw": {
+    "title": "Mtindo wa zamani",
+    "prompt": "Rekodi Short yako kana kwamba ni ya mwongo mwingine."
+   },
+   "th": {
+    "title": "ลุคย้อนยุค",
+    "prompt": "ถ่าย Shorts ของคุณให้เหมือนมาจากอีกยุคหนึ่ง"
+   },
+   "tr": {
+    "title": "Retro görünüm",
+    "prompt": "Short'unu başka bir on yıldan gelmiş gibi çek."
+   },
+   "uk": {
+    "title": "Ретростиль",
+    "prompt": "Зніміть Short так, ніби він з іншого десятиліття."
+   },
+   "vi": {
+    "title": "Phong cách retro",
+    "prompt": "Quay Shorts của bạn như thể nó đến từ một thập kỷ khác."
+   },
+   "zh": {
+    "title": "复古风",
+    "prompt": "把你的短视频拍得像来自另一个年代。"
+   }
+  }
+ },
+ {
+  "week": "2027-W40",
+  "theme": "kindness",
+  "texts": {
+   "en": {
+    "title": "Random act of kindness",
+    "prompt": "Do something kind for someone and share how it went, with their OK."
+   },
+   "bn": {
+    "title": "হঠাৎ একটু দয়া",
+    "prompt": "কারো জন্য ভালো কিছু করুন এবং তাঁদের সম্মতি নিয়ে জানান কেমন হলো।"
+   },
+   "de": {
+    "title": "Einfach mal nett sein",
+    "prompt": "Tu jemandem etwas Gutes und erzähl mit dessen Einverständnis, wie es lief."
+   },
+   "es": {
+    "title": "Un acto de amabilidad",
+    "prompt": "Haz algo amable por alguien y cuenta cómo salió, con su permiso."
+   },
+   "fil": {
+    "title": "Random act of kindness",
+    "prompt": "Gumawa ng kabutihan para sa isang tao at ikuwento kung paano ito nangyari, nang may pahintulot nila."
+   },
+   "fr": {
+    "title": "Un geste de gentillesse",
+    "prompt": "Faites quelque chose de gentil pour quelqu'un et racontez comment ça s'est passé, avec son accord."
+   },
+   "hi": {
+    "title": "अचानक की गई नेकी",
+    "prompt": "किसी के लिए कुछ अच्छा करें और उनकी इजाज़त से बताएँ कि कैसा रहा।"
+   },
+   "id": {
+    "title": "Kebaikan kecil",
+    "prompt": "Lakukan kebaikan untuk seseorang dan bagikan ceritanya, dengan izin mereka."
+   },
+   "it": {
+    "title": "Un gesto gentile",
+    "prompt": "Fai qualcosa di gentile per qualcuno e racconta com'è andata, con il suo consenso."
+   },
+   "ja": {
+    "title": "ささやかな親切",
+    "prompt": "誰かに親切なことをして、その様子をシェアしてください。相手の了承を得てから。"
+   },
+   "ko": {
+    "title": "작은 친절",
+    "prompt": "누군가에게 친절을 베풀고 어땠는지 공유해 주세요. 상대의 동의를 받고요."
+   },
+   "nl": {
+    "title": "Zomaar iets aardigs",
+    "prompt": "Doe iets aardigs voor iemand en vertel hoe het ging, met diens toestemming."
+   },
+   "pl": {
+    "title": "Dobry uczynek",
+    "prompt": "Zrób komuś coś miłego i opowiedz, jak poszło, za zgodą tej osoby."
+   },
+   "pt": {
+    "title": "Um gesto de gentileza",
+    "prompt": "Faça algo gentil por alguém e conte como foi, com a permissão da pessoa."
+   },
+   "ru": {
+    "title": "Доброе дело",
+    "prompt": "Сделайте что-то доброе для кого-то и расскажите, как всё прошло, с согласия этого человека."
+   },
+   "sw": {
+    "title": "Tendo la wema",
+    "prompt": "Mtendee mtu wema na usimulie ilivyokwenda, kwa ridhaa yake."
+   },
+   "th": {
+    "title": "น้ำใจเล็กๆ",
+    "prompt": "ทำเรื่องดีๆ ให้ใครสักคน แล้วเล่าว่าเป็นอย่างไร โดยได้รับอนุญาตจากเขา"
+   },
+   "tr": {
+    "title": "Rastgele bir iyilik",
+    "prompt": "Birine iyilik yap ve nasıl geçtiğini onun izniyle paylaş."
+   },
+   "uk": {
+    "title": "Добра справа",
+    "prompt": "Зробіть щось добре для когось і розкажіть, як усе минуло, з дозволу цієї людини."
+   },
+   "vi": {
+    "title": "Việc tốt bất ngờ",
+    "prompt": "Làm một điều tử tế cho ai đó và kể lại diễn biến, khi họ đồng ý."
+   },
+   "zh": {
+    "title": "随手善举",
+    "prompt": "为别人做一件好事，在对方同意后分享经过。"
+   }
+  }
+ },
+ {
+  "week": "2027-W41",
+  "theme": "explainLikeImFive",
+  "texts": {
+   "en": {
+    "title": "Explain it to a kid",
+    "prompt": "Explain something complicated so simply that a child would get it."
+   },
+   "bn": {
+    "title": "একটি শিশুকে বোঝান",
+    "prompt": "জটিল কিছু এত সহজভাবে বোঝান যে একটি শিশুও বুঝে যাবে।"
+   },
+   "de": {
+    "title": "Erklär es einem Kind",
+    "prompt": "Erklär etwas Kompliziertes so einfach, dass es ein Kind versteht."
+   },
+   "es": {
+    "title": "Explícaselo a un niño",
+    "prompt": "Explica algo complicado tan fácil que un niño lo entendería."
+   },
+   "fil": {
+    "title": "Ipaliwanag sa isang bata",
+    "prompt": "Ipaliwanag ang isang komplikadong bagay nang napakasimple na maiintindihan ng isang bata."
+   },
+   "fr": {
+    "title": "Expliquez-le à un enfant",
+    "prompt": "Expliquez quelque chose de compliqué si simplement qu'un enfant comprendrait."
+   },
+   "hi": {
+    "title": "बच्चे को समझाइए",
+    "prompt": "किसी मुश्किल चीज़ को इतना आसान करके समझाइए कि बच्चा भी समझ जाए।"
+   },
+   "id": {
+    "title": "Jelaskan ke anak kecil",
+    "prompt": "Jelaskan hal yang rumit dengan begitu sederhana sampai anak kecil pun paham."
+   },
+   "it": {
+    "title": "Spiegalo a un bambino",
+    "prompt": "Spiega qualcosa di complicato in modo così semplice che lo capirebbe un bambino."
+   },
+   "ja": {
+    "title": "子どもに説明しよう",
+    "prompt": "難しいことを、子どもでもわかるくらいシンプルに説明してください。"
+   },
+   "ko": {
+    "title": "아이에게 설명하기",
+    "prompt": "복잡한 것을 아이도 이해할 만큼 쉽게 설명해 주세요."
+   },
+   "nl": {
+    "title": "Leg het uit aan een kind",
+    "prompt": "Leg iets ingewikkelds zo simpel uit dat een kind het snapt."
+   },
+   "pl": {
+    "title": "Wyjaśnij to dziecku",
+    "prompt": "Wyjaśnij coś skomplikowanego tak prosto, że zrozumie to dziecko."
+   },
+   "pt": {
+    "title": "Explique para uma criança",
+    "prompt": "Explique algo complicado de um jeito tão simples que uma criança entenderia."
+   },
+   "ru": {
+    "title": "Объясните ребёнку",
+    "prompt": "Объясните что-то сложное так просто, чтобы понял даже ребёнок."
+   },
+   "sw": {
+    "title": "Mweleze mtoto",
+    "prompt": "Eleza jambo gumu kwa urahisi kiasi kwamba mtoto angelielewa."
+   },
+   "th": {
+    "title": "อธิบายให้เด็กฟัง",
+    "prompt": "อธิบายเรื่องซับซ้อนให้ง่ายจนเด็กก็เข้าใจ"
+   },
+   "tr": {
+    "title": "Bir çocuğa anlat",
+    "prompt": "Karmaşık bir şeyi bir çocuğun anlayacağı kadar basit anlat."
+   },
+   "uk": {
+    "title": "Поясніть дитині",
+    "prompt": "Поясніть щось складне так просто, щоб зрозуміла навіть дитина."
+   },
+   "vi": {
+    "title": "Giải thích cho trẻ con",
+    "prompt": "Giải thích một điều phức tạp thật đơn giản đến mức trẻ con cũng hiểu."
+   },
+   "zh": {
+    "title": "讲给小朋友听",
+    "prompt": "把复杂的事情讲得简单到小朋友都能听懂。"
+   }
+  }
+ },
+ {
+  "week": "2027-W42",
+  "theme": "spookyStory",
+  "texts": {
+   "en": {
+    "title": "Spooky story",
+    "prompt": "A creepy story, a local legend or the scariest moment you ever had."
+   },
+   "bn": {
+    "title": "ভূতুড়ে গল্প",
+    "prompt": "গা ছমছমে গল্প, স্থানীয় কিংবদন্তি বা আপনার জীবনের সবচেয়ে ভয়ের মুহূর্ত।"
+   },
+   "de": {
+    "title": "Gruselgeschichte",
+    "prompt": "Eine gruselige Geschichte, eine Legende aus deiner Gegend oder dein unheimlichster Moment."
+   },
+   "es": {
+    "title": "Historia de miedo",
+    "prompt": "Una historia escalofriante, una leyenda local o tu momento más aterrador."
+   },
+   "fil": {
+    "title": "Nakakatakot na kuwento",
+    "prompt": "Isang nakakakilabot na kuwento, lokal na alamat o ang pinakanakakatakot na sandali sa buhay mo."
+   },
+   "fr": {
+    "title": "Histoire qui fait peur",
+    "prompt": "Une histoire effrayante, une légende locale ou votre plus grande frayeur."
+   },
+   "hi": {
+    "title": "डरावनी कहानी",
+    "prompt": "कोई डरावनी कहानी, लोक कथा या आपकी ज़िंदगी का सबसे डरावना पल।"
+   },
+   "id": {
+    "title": "Cerita seram",
+    "prompt": "Kisah menyeramkan, legenda lokal, atau momen paling menakutkan yang pernah kamu alami."
+   },
+   "it": {
+    "title": "Storia da brividi",
+    "prompt": "Una storia inquietante, una leggenda locale o il momento più spaventoso che hai vissuto."
+   },
+   "ja": {
+    "title": "怖い話",
+    "prompt": "ぞっとする話、地元の伝説、またはこれまででいちばん怖かった瞬間。"
+   },
+   "ko": {
+    "title": "무서운 이야기",
+    "prompt": "오싹한 이야기, 동네 전설, 또는 가장 무서웠던 순간."
+   },
+   "nl": {
+    "title": "Griezelverhaal",
+    "prompt": "Een eng verhaal, een lokale legende of je engste moment ooit."
+   },
+   "pl": {
+    "title": "Straszna historia",
+    "prompt": "Upiorna opowieść, lokalna legenda albo twój najstraszniejszy moment."
+   },
+   "pt": {
+    "title": "História de arrepiar",
+    "prompt": "Uma história assustadora, uma lenda local ou o momento mais assustador que você já viveu."
+   },
+   "ru": {
+    "title": "Страшная история",
+    "prompt": "Жуткая история, местная легенда или самый страшный момент в вашей жизни."
+   },
+   "sw": {
+    "title": "Hadithi ya kutisha",
+    "prompt": "Hadithi ya kuogofya, hekaya ya kwenu au wakati wa kutisha zaidi uliowahi kupitia."
+   },
+   "th": {
+    "title": "เรื่องหลอน",
+    "prompt": "เรื่องขนหัวลุก ตำนานท้องถิ่น หรือช่วงเวลาที่น่ากลัวที่สุดที่คุณเคยเจอ"
+   },
+   "tr": {
+    "title": "Ürkütücü hikâye",
+    "prompt": "Tüyler ürperten bir hikâye, yerel bir efsane ya da yaşadığın en korkunç an."
+   },
+   "uk": {
+    "title": "Страшна історія",
+    "prompt": "Моторошна історія, місцева легенда чи найстрашніший момент у вашому житті."
+   },
+   "vi": {
+    "title": "Chuyện rùng rợn",
+    "prompt": "Một câu chuyện ghê rợn, truyền thuyết địa phương hay khoảnh khắc đáng sợ nhất bạn từng trải qua."
+   },
+   "zh": {
+    "title": "恐怖故事",
+    "prompt": "一个吓人的故事、一个当地传说，或你经历过最可怕的时刻。"
+   }
+  }
+ },
+ {
+  "week": "2027-W43",
+  "theme": "makeover",
+  "texts": {
+   "en": {
+    "title": "Makeover",
+    "prompt": "Transform yourself, a room or an old object."
+   },
+   "bn": {
+    "title": "মেকওভার",
+    "prompt": "নিজেকে, একটি ঘর বা একটি পুরোনো জিনিসকে বদলে দিন।"
+   },
+   "de": {
+    "title": "Makeover",
+    "prompt": "Verwandle dich, einen Raum oder einen alten Gegenstand."
+   },
+   "es": {
+    "title": "Transformación",
+    "prompt": "Transfórmate tú, una habitación o un objeto viejo."
+   },
+   "fil": {
+    "title": "Makeover",
+    "prompt": "Baguhin ang sarili mo, isang kuwarto o isang lumang gamit."
+   },
+   "fr": {
+    "title": "Relooking",
+    "prompt": "Transformez-vous, une pièce ou un vieil objet."
+   },
+   "hi": {
+    "title": "मेकओवर",
+    "prompt": "खुद को, किसी कमरे को या किसी पुरानी चीज़ को बदल डालिए।"
+   },
+   "id": {
+    "title": "Makeover",
+    "prompt": "Ubah penampilanmu, sebuah ruangan, atau barang lama."
+   },
+   "it": {
+    "title": "Trasformazione",
+    "prompt": "Trasforma te stesso, una stanza o un vecchio oggetto."
+   },
+   "ja": {
+    "title": "大変身",
+    "prompt": "自分自身、部屋、または古いものを大変身させてください。"
+   },
+   "ko": {
+    "title": "변신",
+    "prompt": "나 자신, 방, 또는 오래된 물건을 변신시켜 보세요."
+   },
+   "nl": {
+    "title": "Make-over",
+    "prompt": "Verander jezelf, een kamer of een oud voorwerp."
+   },
+   "pl": {
+    "title": "Metamorfoza",
+    "prompt": "Odmień siebie, pokój albo stary przedmiot."
+   },
+   "pt": {
+    "title": "Transformação",
+    "prompt": "Transforme você, um cômodo ou um objeto antigo."
+   },
+   "ru": {
+    "title": "Преображение",
+    "prompt": "Преобразите себя, комнату или старую вещь."
+   },
+   "sw": {
+    "title": "Sura mpya",
+    "prompt": "Jibadilishe mwenyewe, badilisha chumba au kitu cha zamani."
+   },
+   "th": {
+    "title": "เมกโอเวอร์",
+    "prompt": "เปลี่ยนโฉมตัวคุณเอง ห้อง หรือของเก่าสักชิ้น"
+   },
+   "tr": {
+    "title": "Değişim",
+    "prompt": "Kendini, bir odayı ya da eski bir eşyayı dönüştür."
+   },
+   "uk": {
+    "title": "Перевтілення",
+    "prompt": "Змініть себе, кімнату або стару річ."
+   },
+   "vi": {
+    "title": "Lột xác",
+    "prompt": "Biến đổi chính bạn, một căn phòng hoặc một món đồ cũ."
+   },
+   "zh": {
+    "title": "大改造",
+    "prompt": "改造你自己、一个房间或一件旧物。"
+   }
+  }
+ },
+ {
+  "week": "2027-W44",
+  "theme": "comfortFood",
+  "texts": {
+   "en": {
+    "title": "Comfort food",
+    "prompt": "The food that makes a bad day better."
+   },
+   "bn": {
+    "title": "মন ভালো করা খাবার",
+    "prompt": "যে খাবার খারাপ দিনকে একটু ভালো করে দেয়।"
+   },
+   "de": {
+    "title": "Seelenfutter",
+    "prompt": "Das Essen, das einen schlechten Tag besser macht."
+   },
+   "es": {
+    "title": "Comida reconfortante",
+    "prompt": "La comida que mejora un mal día."
+   },
+   "fil": {
+    "title": "Comfort food",
+    "prompt": "Ang pagkaing nagpapagaan ng masamang araw."
+   },
+   "fr": {
+    "title": "Plat réconfortant",
+    "prompt": "Le plat qui rend une mauvaise journée meilleure."
+   },
+   "hi": {
+    "title": "कम्फ़र्ट फ़ूड",
+    "prompt": "वह खाना जो बुरे दिन को बेहतर बना देता है।"
+   },
+   "id": {
+    "title": "Makanan penghibur",
+    "prompt": "Makanan yang bikin hari buruk jadi lebih baik."
+   },
+   "it": {
+    "title": "Comfort food",
+    "prompt": "Il cibo che migliora una brutta giornata."
+   },
+   "ja": {
+    "title": "ほっとするごはん",
+    "prompt": "嫌な日を少し良くしてくれる食べ物。"
+   },
+   "ko": {
+    "title": "위로가 되는 음식",
+    "prompt": "힘든 날을 조금 낫게 해 주는 음식."
+   },
+   "nl": {
+    "title": "Troosteten",
+    "prompt": "Het eten dat een slechte dag beter maakt."
+   },
+   "pl": {
+    "title": "Jedzenie na pocieszenie",
+    "prompt": "Jedzenie, które poprawia zły dzień."
+   },
+   "pt": {
+    "title": "Comida afetiva",
+    "prompt": "A comida que melhora um dia ruim."
+   },
+   "ru": {
+    "title": "Еда для души",
+    "prompt": "Еда, которая делает плохой день лучше."
+   },
+   "sw": {
+    "title": "Chakula cha faraja",
+    "prompt": "Chakula kinachofanya siku mbaya iwe bora."
+   },
+   "th": {
+    "title": "อาหารปลอบใจ",
+    "prompt": "อาหารที่ทำให้วันแย่ๆ ดีขึ้น"
+   },
+   "tr": {
+    "title": "Teselli yemeği",
+    "prompt": "Kötü bir günü daha iyi yapan yemek."
+   },
+   "uk": {
+    "title": "Їжа для душі",
+    "prompt": "Їжа, яка робить поганий день кращим."
+   },
+   "vi": {
+    "title": "Món ăn chữa lành",
+    "prompt": "Món ăn giúp một ngày tệ trở nên tốt hơn."
+   },
+   "zh": {
+    "title": "治愈美食",
+    "prompt": "能让糟糕的一天变好一点的食物。"
+   }
+  }
+ },
+ {
+  "week": "2027-W45",
+  "theme": "gratitude",
+  "texts": {
+   "en": {
+    "title": "Three good things",
+    "prompt": "Three things you are thankful for this week."
+   },
+   "bn": {
+    "title": "তিনটি ভালো জিনিস",
+    "prompt": "এই সপ্তাহে যে তিনটি জিনিসের জন্য আপনি কৃতজ্ঞ।"
+   },
+   "de": {
+    "title": "Drei gute Dinge",
+    "prompt": "Drei Dinge, für die du diese Woche dankbar bist."
+   },
+   "es": {
+    "title": "Tres cosas buenas",
+    "prompt": "Tres cosas por las que estás agradecido esta semana."
+   },
+   "fil": {
+    "title": "Tatlong magagandang bagay",
+    "prompt": "Tatlong bagay na ipinagpapasalamat mo ngayong linggo."
+   },
+   "fr": {
+    "title": "Trois belles choses",
+    "prompt": "Trois choses pour lesquelles vous êtes reconnaissant cette semaine."
+   },
+   "hi": {
+    "title": "तीन अच्छी बातें",
+    "prompt": "इस हफ़्ते की तीन चीज़ें जिनके लिए आप शुक्रगुज़ार हैं।"
+   },
+   "id": {
+    "title": "Tiga hal baik",
+    "prompt": "Tiga hal yang kamu syukuri minggu ini."
+   },
+   "it": {
+    "title": "Tre cose belle",
+    "prompt": "Tre cose per cui sei grato questa settimana."
+   },
+   "ja": {
+    "title": "3つのいいこと",
+    "prompt": "今週感謝していることを3つ。"
+   },
+   "ko": {
+    "title": "좋았던 일 세 가지",
+    "prompt": "이번 주에 감사한 일 세 가지."
+   },
+   "nl": {
+    "title": "Drie goede dingen",
+    "prompt": "Drie dingen waar je deze week dankbaar voor bent."
+   },
+   "pl": {
+    "title": "Trzy dobre rzeczy",
+    "prompt": "Trzy rzeczy, za które dziękujesz w tym tygodniu."
+   },
+   "pt": {
+    "title": "Três coisas boas",
+    "prompt": "Três coisas pelas quais você é grato nesta semana."
+   },
+   "ru": {
+    "title": "Три хорошие вещи",
+    "prompt": "Три вещи, за которые вы благодарны на этой неделе."
+   },
+   "sw": {
+    "title": "Mambo matatu mazuri",
+    "prompt": "Mambo matatu unayoshukuru kwa wiki hii."
+   },
+   "th": {
+    "title": "สามเรื่องดีๆ",
+    "prompt": "สามสิ่งที่คุณรู้สึกขอบคุณในสัปดาห์นี้"
+   },
+   "tr": {
+    "title": "Üç güzel şey",
+    "prompt": "Bu hafta minnettar olduğun üç şey."
+   },
+   "uk": {
+    "title": "Три хороші речі",
+    "prompt": "Три речі, за які ви вдячні цього тижня."
+   },
+   "vi": {
+    "title": "Ba điều tốt đẹp",
+    "prompt": "Ba điều bạn biết ơn trong tuần này."
+   },
+   "zh": {
+    "title": "三件好事",
+    "prompt": "本周你感恩的三件事。"
+   }
+  }
+ },
+ {
+  "week": "2027-W46",
+  "theme": "silentShort",
+  "texts": {
+   "en": {
+    "title": "Silent Short",
+    "prompt": "Tell a story without a single word."
+   },
+   "bn": {
+    "title": "নির্বাক শর্ট",
+    "prompt": "একটি শব্দও না বলে একটি গল্প বলুন।"
+   },
+   "de": {
+    "title": "Stummer Short",
+    "prompt": "Erzähl eine Geschichte ohne ein einziges Wort."
+   },
+   "es": {
+    "title": "Short sin palabras",
+    "prompt": "Cuenta una historia sin decir ni una palabra."
+   },
+   "fil": {
+    "title": "Short na walang salita",
+    "prompt": "Magkuwento nang walang kahit isang salita."
+   },
+   "fr": {
+    "title": "Short muet",
+    "prompt": "Racontez une histoire sans un seul mot."
+   },
+   "hi": {
+    "title": "बिना शब्दों का शॉर्ट",
+    "prompt": "एक भी शब्द बोले बिना कहानी सुनाइए।"
+   },
+   "id": {
+    "title": "Shorts tanpa kata",
+    "prompt": "Ceritakan sebuah kisah tanpa satu kata pun."
+   },
+   "it": {
+    "title": "Short muto",
+    "prompt": "Racconta una storia senza dire una parola."
+   },
+   "ja": {
+    "title": "無言のショート",
+    "prompt": "ひと言も話さずに物語を伝えてください。"
+   },
+   "ko": {
+    "title": "말 없는 쇼츠",
+    "prompt": "한마디도 하지 않고 이야기를 들려주세요."
+   },
+   "nl": {
+    "title": "Stille Short",
+    "prompt": "Vertel een verhaal zonder één woord."
+   },
+   "pl": {
+    "title": "Short bez słów",
+    "prompt": "Opowiedz historię bez jednego słowa."
+   },
+   "pt": {
+    "title": "Short sem palavras",
+    "prompt": "Conte uma história sem dizer uma única palavra."
+   },
+   "ru": {
+    "title": "Short без слов",
+    "prompt": "Расскажите историю, не сказав ни слова."
+   },
+   "sw": {
+    "title": "Short bila maneno",
+    "prompt": "Simulia hadithi bila neno hata moja."
+   },
+   "th": {
+    "title": "Shorts ไร้คำพูด",
+    "prompt": "เล่าเรื่องโดยไม่ใช้คำพูดสักคำ"
+   },
+   "tr": {
+    "title": "Sessiz Short",
+    "prompt": "Tek bir kelime etmeden bir hikâye anlat."
+   },
+   "uk": {
+    "title": "Short без слів",
+    "prompt": "Розкажіть історію, не сказавши жодного слова."
+   },
+   "vi": {
+    "title": "Shorts không lời",
+    "prompt": "Kể một câu chuyện mà không nói một lời nào."
+   },
+   "zh": {
+    "title": "无台词短视频",
+    "prompt": "一句话都不说，讲一个故事。"
+   }
+  }
+ },
+ {
+  "week": "2027-W47",
+  "theme": "spedUp",
+  "texts": {
+   "en": {
+    "title": "Sped up",
+    "prompt": "A timelapse of you making, drawing, fixing or cooking something."
+   },
+   "bn": {
+    "title": "দ্রুত গতিতে",
+    "prompt": "আপনি কিছু বানাচ্ছেন, আঁকছেন, সারাচ্ছেন বা রাঁধছেন, তার টাইমল্যাপস।"
+   },
+   "de": {
+    "title": "Im Zeitraffer",
+    "prompt": "Ein Zeitraffer, in dem du etwas baust, zeichnest, reparierst oder kochst."
+   },
+   "es": {
+    "title": "A cámara rápida",
+    "prompt": "Un timelapse tuyo haciendo, dibujando, arreglando o cocinando algo."
+   },
+   "fil": {
+    "title": "Pinabilis",
+    "prompt": "Isang timelapse mo habang gumagawa, gumuguhit, nag-aayos o nagluluto."
+   },
+   "fr": {
+    "title": "En accéléré",
+    "prompt": "Un timelapse de vous en train de fabriquer, dessiner, réparer ou cuisiner quelque chose."
+   },
+   "hi": {
+    "title": "फ़ास्ट फ़ॉरवर्ड",
+    "prompt": "कुछ बनाते, ड्रॉ करते, ठीक करते या पकाते हुए आपका टाइमलैप्स।"
+   },
+   "id": {
+    "title": "Dipercepat",
+    "prompt": "Timelapse saat kamu membuat, menggambar, memperbaiki, atau memasak sesuatu."
+   },
+   "it": {
+    "title": "Accelerato",
+    "prompt": "Un timelapse di te che crei, disegni, ripari o cucini qualcosa."
+   },
+   "ja": {
+    "title": "早送り",
+    "prompt": "何かを作る、描く、直す、料理するところのタイムラプス。"
+   },
+   "ko": {
+    "title": "빨리 감기",
+    "prompt": "무언가를 만들고, 그리고, 고치고, 요리하는 모습을 타임랩스로 담아 보세요."
+   },
+   "nl": {
+    "title": "Versneld",
+    "prompt": "Een timelapse van jou terwijl je iets maakt, tekent, repareert of kookt."
+   },
+   "pl": {
+    "title": "Przyspieszone",
+    "prompt": "Timelapse, w którym coś robisz, rysujesz, naprawiasz lub gotujesz."
+   },
+   "pt": {
+    "title": "Acelerado",
+    "prompt": "Um timelapse seu fazendo, desenhando, consertando ou cozinhando algo."
+   },
+   "ru": {
+    "title": "В ускоренном режиме",
+    "prompt": "Таймлапс того, как вы что-то мастерите, рисуете, чините или готовите."
+   },
+   "sw": {
+    "title": "Kwa kasi",
+    "prompt": "Timelapse yako ukitengeneza, ukichora, ukirekebisha au ukipika kitu."
+   },
+   "th": {
+    "title": "เร่งสปีด",
+    "prompt": "ไทม์แลปส์ตอนคุณทำ วาด ซ่อม หรือทำอาหาร"
+   },
+   "tr": {
+    "title": "Hızlandırılmış",
+    "prompt": "Bir şey yaparken, çizerken, onarırken ya da pişirirken çektiğin bir timelapse."
+   },
+   "uk": {
+    "title": "Прискорено",
+    "prompt": "Таймлапс того, як ви щось майструєте, малюєте, лагодите чи готуєте."
+   },
+   "vi": {
+    "title": "Tua nhanh",
+    "prompt": "Một đoạn timelapse khi bạn làm, vẽ, sửa hoặc nấu một thứ gì đó."
+   },
+   "zh": {
+    "title": "快进",
+    "prompt": "用延时摄影记录你制作、绘画、修理或烹饪某样东西。"
+   }
+  }
+ },
+ {
+  "week": "2027-W48",
+  "theme": "thenAndNow",
+  "texts": {
+   "en": {
+    "title": "Then and now",
+    "prompt": "Put an old photo or video next to how it looks today."
+   },
+   "bn": {
+    "title": "তখন আর এখন",
+    "prompt": "একটি পুরোনো ছবি বা ভিডিও আজকের চেহারার পাশে রাখুন।"
+   },
+   "de": {
+    "title": "Damals und heute",
+    "prompt": "Stell ein altes Foto oder Video neben den Anblick von heute."
+   },
+   "es": {
+    "title": "Ayer y hoy",
+    "prompt": "Pon una foto o un video antiguo junto a cómo se ve hoy."
+   },
+   "fil": {
+    "title": "Noon at ngayon",
+    "prompt": "Itabi ang isang lumang litrato o video sa itsura nito ngayon."
+   },
+   "fr": {
+    "title": "Hier et aujourd'hui",
+    "prompt": "Placez une vieille photo ou vidéo à côté de ce que ça donne aujourd'hui."
+   },
+   "hi": {
+    "title": "तब और अब",
+    "prompt": "किसी पुरानी फ़ोटो या वीडियो को आज के नज़ारे के साथ रखिए।"
+   },
+   "id": {
+    "title": "Dulu dan sekarang",
+    "prompt": "Sandingkan foto atau video lama dengan tampilannya hari ini."
+   },
+   "it": {
+    "title": "Ieri e oggi",
+    "prompt": "Metti una vecchia foto o un vecchio video accanto a com'è oggi."
+   },
+   "ja": {
+    "title": "昔と今",
+    "prompt": "古い写真や動画を、今の様子と並べてみてください。"
+   },
+   "ko": {
+    "title": "그때와 지금",
+    "prompt": "옛날 사진이나 영상을 지금 모습과 나란히 놓아 보세요."
+   },
+   "nl": {
+    "title": "Toen en nu",
+    "prompt": "Zet een oude foto of video naast hoe het er nu uitziet."
+   },
+   "pl": {
+    "title": "Kiedyś i dziś",
+    "prompt": "Zestaw stare zdjęcie lub film z tym, jak to wygląda dziś."
+   },
+   "pt": {
+    "title": "Ontem e hoje",
+    "prompt": "Coloque uma foto ou vídeo antigo ao lado de como está hoje."
+   },
+   "ru": {
+    "title": "Тогда и сейчас",
+    "prompt": "Поставьте старое фото или видео рядом с тем, как это выглядит сегодня."
+   },
+   "sw": {
+    "title": "Zamani na sasa",
+    "prompt": "Weka picha au video ya zamani kando ya jinsi inavyoonekana leo."
+   },
+   "th": {
+    "title": "อดีตและปัจจุบัน",
+    "prompt": "วางรูปหรือวิดีโอเก่าเทียบกับหน้าตาในวันนี้"
+   },
+   "tr": {
+    "title": "Dün ve bugün",
+    "prompt": "Eski bir fotoğrafı ya da videoyu bugünkü hâliyle yan yana koy."
+   },
+   "uk": {
+    "title": "Тоді й тепер",
+    "prompt": "Поставте старе фото чи відео поруч із тим, який вигляд це має сьогодні."
+   },
+   "vi": {
+    "title": "Xưa và nay",
+    "prompt": "Đặt một tấm ảnh hoặc video cũ cạnh hình ảnh hôm nay."
+   },
+   "zh": {
+    "title": "过去与现在",
+    "prompt": "把一张老照片或旧视频和今天的样子放在一起。"
+   }
+  }
+ },
+ {
+  "week": "2027-W49",
+  "theme": "fiveSecondHook",
+  "texts": {
+   "en": {
+    "title": "The five-second hook",
+    "prompt": "Start your Short with something that makes everyone stay."
+   },
+   "bn": {
+    "title": "পাঁচ সেকেন্ডের হুক",
+    "prompt": "এমন কিছু দিয়ে শর্ট শুরু করুন, যা সবাইকে দেখে যেতে বাধ্য করে।"
+   },
+   "de": {
+    "title": "Der Fünf-Sekunden-Hook",
+    "prompt": "Starte deinen Short mit etwas, das alle dranbleiben lässt."
+   },
+   "es": {
+    "title": "El gancho de cinco segundos",
+    "prompt": "Empieza tu Short con algo que haga que todos se queden."
+   },
+   "fil": {
+    "title": "Ang five-second hook",
+    "prompt": "Simulan ang Short mo sa isang bagay na magpapanatili sa lahat na nanonood."
+   },
+   "fr": {
+    "title": "L'accroche en cinq secondes",
+    "prompt": "Commencez votre Short par quelque chose qui donne envie à tout le monde de rester."
+   },
+   "hi": {
+    "title": "पाँच सेकंड का हुक",
+    "prompt": "अपने शॉर्ट की शुरुआत ऐसी चीज़ से करें जो सबको रोक ले।"
+   },
+   "id": {
+    "title": "Hook lima detik",
+    "prompt": "Buka Shorts-mu dengan sesuatu yang bikin semua orang bertahan."
+   },
+   "it": {
+    "title": "L'aggancio di cinque secondi",
+    "prompt": "Inizia il tuo Short con qualcosa che faccia restare tutti."
+   },
+   "ja": {
+    "title": "最初の5秒",
+    "prompt": "誰もが見続けたくなる始まり方でショートをスタートしてください。"
+   },
+   "ko": {
+    "title": "첫 5초의 승부",
+    "prompt": "모두가 계속 보고 싶어지는 장면으로 쇼츠를 시작하세요."
+   },
+   "nl": {
+    "title": "De hook van vijf seconden",
+    "prompt": "Begin je Short met iets waardoor iedereen blijft kijken."
+   },
+   "pl": {
+    "title": "Haczyk w pięć sekund",
+    "prompt": "Zacznij Shorta czymś, co zatrzyma wszystkich do końca."
+   },
+   "pt": {
+    "title": "O gancho de cinco segundos",
+    "prompt": "Comece seu Short com algo que faça todo mundo ficar."
+   },
+   "ru": {
+    "title": "Цепляющие пять секунд",
+    "prompt": "Начните Short с того, что заставит всех остаться."
+   },
+   "sw": {
+    "title": "Sekunde tano za kwanza",
+    "prompt": "Anza Short yako na kitu kinachomfanya kila mtu abaki."
+   },
+   "th": {
+    "title": "ห้าวินาทีแรก",
+    "prompt": "เปิด Shorts ของคุณด้วยอะไรที่ทำให้ทุกคนอยู่ดูต่อ"
+   },
+   "tr": {
+    "title": "Beş saniyelik kanca",
+    "prompt": "Short'una herkesi ekranda tutacak bir şeyle başla."
+   },
+   "uk": {
+    "title": "Гачок за п'ять секунд",
+    "prompt": "Почніть Short із чогось, що змусить усіх залишитися."
+   },
+   "vi": {
+    "title": "Năm giây đầu tiên",
+    "prompt": "Mở đầu Shorts bằng một điều khiến ai cũng muốn xem tiếp."
+   },
+   "zh": {
+    "title": "黄金五秒",
+    "prompt": "用能让所有人留下来的内容开启你的短视频。"
+   }
+  }
+ },
+ {
+  "week": "2027-W50",
+  "theme": "traditions",
+  "texts": {
+   "en": {
+    "title": "Our tradition",
+    "prompt": "A tradition from your family or culture, and what it means to you."
+   },
+   "bn": {
+    "title": "আমাদের ঐতিহ্য",
+    "prompt": "আপনার পরিবার বা সংস্কৃতির একটি ঐতিহ্য, আর আপনার কাছে তার মানে।"
+   },
+   "de": {
+    "title": "Unsere Tradition",
+    "prompt": "Eine Tradition aus deiner Familie oder Kultur und was sie dir bedeutet."
+   },
+   "es": {
+    "title": "Nuestra tradición",
+    "prompt": "Una tradición de tu familia o cultura y lo que significa para ti."
+   },
+   "fil": {
+    "title": "Ang tradisyon namin",
+    "prompt": "Isang tradisyon mula sa pamilya o kultura mo, at kung ano ang kahulugan nito sa iyo."
+   },
+   "fr": {
+    "title": "Notre tradition",
+    "prompt": "Une tradition de votre famille ou de votre culture, et ce qu'elle représente pour vous."
+   },
+   "hi": {
+    "title": "हमारी परंपरा",
+    "prompt": "आपके परिवार या संस्कृति की कोई परंपरा, और आपके लिए उसका मतलब।"
+   },
+   "id": {
+    "title": "Tradisi kami",
+    "prompt": "Tradisi dari keluarga atau budayamu, dan artinya bagimu."
+   },
+   "it": {
+    "title": "La nostra tradizione",
+    "prompt": "Una tradizione della tua famiglia o cultura e cosa significa per te."
+   },
+   "ja": {
+    "title": "私たちの伝統",
+    "prompt": "家族や文化の伝統と、それがあなたにとって持つ意味。"
+   },
+   "ko": {
+    "title": "우리의 전통",
+    "prompt": "가족이나 문화의 전통과 그것이 나에게 갖는 의미."
+   },
+   "nl": {
+    "title": "Onze traditie",
+    "prompt": "Een traditie uit je familie of cultuur, en wat die voor je betekent."
+   },
+   "pl": {
+    "title": "Nasza tradycja",
+    "prompt": "Tradycja z twojej rodziny lub kultury i co dla ciebie znaczy."
+   },
+   "pt": {
+    "title": "Nossa tradição",
+    "prompt": "Uma tradição da sua família ou cultura e o que ela significa para você."
+   },
+   "ru": {
+    "title": "Наша традиция",
+    "prompt": "Традиция вашей семьи или культуры и что она для вас значит."
+   },
+   "sw": {
+    "title": "Mila yetu",
+    "prompt": "Mila kutoka familia au utamaduni wako, na maana yake kwako."
+   },
+   "th": {
+    "title": "ประเพณีของเรา",
+    "prompt": "ประเพณีจากครอบครัวหรือวัฒนธรรมของคุณ และความหมายที่มีต่อคุณ"
+   },
+   "tr": {
+    "title": "Geleneğimiz",
+    "prompt": "Ailenden ya da kültüründen bir gelenek ve senin için anlamı."
+   },
+   "uk": {
+    "title": "Наша традиція",
+    "prompt": "Традиція вашої родини чи культури і що вона для вас означає."
+   },
+   "vi": {
+    "title": "Truyền thống của chúng tôi",
+    "prompt": "Một truyền thống của gia đình hoặc nền văn hóa của bạn, và ý nghĩa của nó với bạn."
+   },
+   "zh": {
+    "title": "我们的传统",
+    "prompt": "来自你的家庭或文化的一个传统，以及它对你的意义。"
+   }
+  }
+ },
+ {
+  "week": "2027-W51",
+  "theme": "cheapGifts",
+  "texts": {
+   "en": {
+    "title": "Gifts that cost almost nothing",
+    "prompt": "Great gift ideas for little or no money."
+   },
+   "bn": {
+    "title": "প্রায় বিনা খরচের উপহার",
+    "prompt": "অল্প টাকায় বা একেবারে বিনা খরচে দারুণ উপহারের আইডিয়া।"
+   },
+   "de": {
+    "title": "Geschenke, die fast nichts kosten",
+    "prompt": "Tolle Geschenkideen für wenig oder gar kein Geld."
+   },
+   "es": {
+    "title": "Regalos que casi no cuestan nada",
+    "prompt": "Grandes ideas de regalo con poco o nada de dinero."
+   },
+   "fil": {
+    "title": "Mga regalong halos walang gastos",
+    "prompt": "Magagandang ideya ng regalo na kaunti o walang gastos."
+   },
+   "fr": {
+    "title": "Des cadeaux presque gratuits",
+    "prompt": "De super idées de cadeaux pour peu ou pas d'argent."
+   },
+   "hi": {
+    "title": "लगभग मुफ़्त तोहफ़े",
+    "prompt": "कम या बिना पैसे के शानदार तोहफ़ों के आइडिया।"
+   },
+   "id": {
+    "title": "Hadiah nyaris gratis",
+    "prompt": "Ide hadiah keren dengan sedikit biaya atau tanpa biaya sama sekali."
+   },
+   "it": {
+    "title": "Regali che costano quasi niente",
+    "prompt": "Ottime idee regalo con pochi soldi o gratis."
+   },
+   "ja": {
+    "title": "ほぼお金のかからないプレゼント",
+    "prompt": "ほとんど、またはまったくお金をかけない素敵なプレゼントのアイデア。"
+   },
+   "ko": {
+    "title": "돈이 거의 안 드는 선물",
+    "prompt": "돈을 거의 또는 전혀 들이지 않는 멋진 선물 아이디어."
+   },
+   "nl": {
+    "title": "Cadeaus die bijna niets kosten",
+    "prompt": "Leuke cadeau-ideeën voor weinig of geen geld."
+   },
+   "pl": {
+    "title": "Prezenty prawie za darmo",
+    "prompt": "Świetne pomysły na prezenty za grosze albo za darmo."
+   },
+   "pt": {
+    "title": "Presentes que quase não custam nada",
+    "prompt": "Ótimas ideias de presente com pouco ou nenhum dinheiro."
+   },
+   "ru": {
+    "title": "Подарки почти даром",
+    "prompt": "Классные идеи подарков за небольшие деньги или бесплатно."
+   },
+   "sw": {
+    "title": "Zawadi zisizogharimu kitu",
+    "prompt": "Mawazo mazuri ya zawadi kwa pesa kidogo au bila pesa kabisa."
+   },
+   "th": {
+    "title": "ของขวัญแทบไม่ต้องจ่าย",
+    "prompt": "ไอเดียของขวัญเจ๋งๆ ที่ใช้เงินน้อยหรือไม่ใช้เลย"
+   },
+   "tr": {
+    "title": "Neredeyse bedava hediyeler",
+    "prompt": "Az parayla ya da hiç para harcamadan harika hediye fikirleri."
+   },
+   "uk": {
+    "title": "Подарунки майже задарма",
+    "prompt": "Класні ідеї подарунків за невеликі гроші або безкоштовно."
+   },
+   "vi": {
+    "title": "Quà gần như không tốn tiền",
+    "prompt": "Ý tưởng quà tuyệt vời mà tốn rất ít hoặc không tốn đồng nào."
+   },
+   "zh": {
+    "title": "几乎不花钱的礼物",
+    "prompt": "花很少钱甚至不花钱的好礼物创意。"
+   }
+  }
+ },
+ {
+  "week": "2027-W52",
+  "theme": "yearInOneMinute",
+  "texts": {
+   "en": {
+    "title": "Your year in one minute",
+    "prompt": "A recap of your year in a single Short."
+   },
+   "bn": {
+    "title": "এক মিনিটে আপনার বছর",
+    "prompt": "একটি শর্টে আপনার পুরো বছরের সারসংক্ষেপ।"
+   },
+   "de": {
+    "title": "Dein Jahr in einer Minute",
+    "prompt": "Ein Rückblick auf dein Jahr in einem einzigen Short."
+   },
+   "es": {
+    "title": "Tu año en un minuto",
+    "prompt": "Un resumen de tu año en un solo Short."
+   },
+   "fil": {
+    "title": "Ang taon mo sa isang minuto",
+    "prompt": "Recap ng taon mo sa isang Short."
+   },
+   "fr": {
+    "title": "Votre année en une minute",
+    "prompt": "Le récap de votre année en un seul Short."
+   },
+   "hi": {
+    "title": "एक मिनट में आपका साल",
+    "prompt": "एक ही शॉर्ट में आपके साल की झलक।"
+   },
+   "id": {
+    "title": "Tahunmu dalam satu menit",
+    "prompt": "Rangkuman tahunmu dalam satu Shorts."
+   },
+   "it": {
+    "title": "Il tuo anno in un minuto",
+    "prompt": "Il riassunto del tuo anno in un solo Short."
+   },
+   "ja": {
+    "title": "1分でふり返る1年",
+    "prompt": "あなたの1年を、ひとつのショートでふり返り。"
+   },
+   "ko": {
+    "title": "1분으로 보는 나의 한 해",
+    "prompt": "한 해를 쇼츠 하나로 정리해 보세요."
+   },
+   "nl": {
+    "title": "Jouw jaar in één minuut",
+    "prompt": "Een terugblik op je jaar in één Short."
+   },
+   "pl": {
+    "title": "Twój rok w minutę",
+    "prompt": "Podsumowanie twojego roku w jednym Shorcie."
+   },
+   "pt": {
+    "title": "Seu ano em um minuto",
+    "prompt": "Uma retrospectiva do seu ano em um único Short."
+   },
+   "ru": {
+    "title": "Ваш год за минуту",
+    "prompt": "Итоги вашего года в одном Short."
+   },
+   "sw": {
+    "title": "Mwaka wako kwa dakika moja",
+    "prompt": "Muhtasari wa mwaka wako katika Short moja."
+   },
+   "th": {
+    "title": "ปีของคุณในหนึ่งนาที",
+    "prompt": "สรุปปีของคุณใน Shorts เดียว"
+   },
+   "tr": {
+    "title": "Bir dakikada yılın",
+    "prompt": "Tek bir Short'ta yılının özeti."
+   },
+   "uk": {
+    "title": "Ваш рік за хвилину",
+    "prompt": "Підсумки вашого року в одному Short."
+   },
+   "vi": {
+    "title": "Năm của bạn trong một phút",
+    "prompt": "Tóm tắt cả năm của bạn trong một Shorts."
+   },
+   "zh": {
+    "title": "一分钟回顾你的一年",
+    "prompt": "用一条短视频回顾你的一年。"
+   }
+  }
+ }
+]
