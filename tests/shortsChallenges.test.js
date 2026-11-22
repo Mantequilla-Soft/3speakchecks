@@ -85,6 +85,17 @@ describe('public', () => {
     expect(res.body.past.map((c) => c.week)).toEqual(['2026-W48']);
   });
 
+  test('?past= asks for more earlier weeks (the week picker), newest first, capped', async () => {
+    pinClock(new Date('2027-03-10T10:00:00.000Z')); // 2027-W10
+    let res = await request(app).get('/shorts-challenges').expect(200);
+    expect(res.body.past).toHaveLength(8);
+    res = await request(app).get('/shorts-challenges?past=12').expect(200);
+    expect(res.body.past).toHaveLength(12);
+    expect(res.body.past[0].week).toBe('2027-W09');
+    res = await request(app).get('/shorts-challenges?past=999').expect(200);
+    expect(res.body.past).toHaveLength(15); // every week since 2026-W48
+  });
+
   test('dates always follow the week id (weeks seeded as Monday weeks are moved to Sunday)', async () => {
     await request(app).get('/shorts-challenges').expect(200);
     await db().collection('shorts_challenges').updateOne({ _id: '2026-W48' }, { $set: { starts_at: new Date('2026-11-23T00:00:00Z'), ends_at: new Date('2026-11-29T23:59:59.999Z') } });
