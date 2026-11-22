@@ -530,9 +530,12 @@ describe('re-encoding the spot to match the video (AD_AUDIO_NORMALISE on)', () =
     const s = await session();
     const res = await get(variantPath(s.sid, CONTENT_480), conformApp).expect(200);
     expect(res.text).toContain(`/m/${s.sid}/am1`);
-    expect(await stored(s.sid)).toMatchObject({ adConformTo: null, adConformFrom: { content: CONTENT_480, ad: SPOT } });
-
-    // Decided in the background, from the cached shapes: the video's own.
+    const first = await stored(s.sid);
+    expect(first).toMatchObject({ adConformFrom: { content: CONTENT_480, ad: SPOT } });
+    // Decided in the background, from the cached shapes: the video's own. With
+    // both shapes cached that can finish before the playlist answer is read, so
+    // the first look may already see it (it was asserted null here and flaked).
+    if (first.adConformTo !== null) expect(first.adConformTo).toMatchObject({ width: 1280, height: 720, sampleRate: 48000 });
     const decided = await fx.eventually(async () => (await stored(s.sid)).adConformTo);
     expect(decided).toMatchObject({ width: 1280, height: 720, sampleRate: 48000 });
 
