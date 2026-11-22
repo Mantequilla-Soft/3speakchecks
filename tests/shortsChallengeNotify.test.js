@@ -111,6 +111,36 @@ test('several new entries in one run, oldest first; entries older than 3 days ar
   ]);
 });
 
+test('a new week is announced once, at its start, with its theme and link', async () => {
+  const sunday = new Date('2026-11-22T00:03:00.000Z').getTime(); // 2026-W48 just started
+  const fetchImpl = discord();
+  expect(await notify.runOnce({ db: db(), fetchImpl, now: sunday })).toEqual({ sent: 0, failed: 0, announced: true });
+  const msg = fetchImpl.calls[0].body;
+  expect(msg.allowed_mentions).toEqual({ parse: [] });
+  expect(msg.content).toMatch(/Shorts challenge has started/);
+  expect(msg.embeds[0]).toMatchObject({
+    title: 'This week: Your workspace',
+    url: 'https://3speak.tv/challenge/2026-W48',
+    description: 'Show where you create: your desk, studio, kitchen or wherever the magic happens.',
+  });
+  expect(msg.embeds[0].fields[0].value).toBe('2026-W48 (Nov 22 to Nov 28, UTC)');
+  const again = discord();
+  expect(await notify.runOnce({ db: db(), fetchImpl: again, now: sunday + 5 * 60000 })).toEqual({ sent: 0, failed: 0 });
+  expect(again).not.toHaveBeenCalled();
+});
+
+test('a refused announcement is tried again; a week that started days ago is not announced', async () => {
+  const sunday = new Date('2026-11-22T00:03:00.000Z').getTime();
+  expect(await notify.runOnce({ db: db(), fetchImpl: discord([500]), now: sunday })).toEqual({ sent: 0, failed: 0 });
+  const up = discord();
+  expect(await notify.runOnce({ db: db(), fetchImpl: up, now: sunday + 5 * 60000 })).toMatchObject({ announced: true });
+  // NOW (Wednesday) is more than 2 days into 2026-W48: a fresh database announces nothing
+  await db().collection('shorts_challenges').updateOne({ _id: '2026-W48' }, { $set: { announced_at: null } });
+  const late = discord();
+  expect(await notify.runOnce({ db: db(), fetchImpl: late, now: NOW.getTime() })).toEqual({ sent: 0, failed: 0 });
+  expect(late).not.toHaveBeenCalled();
+});
+
 test('plainCaption drops links, images and Markdown and keeps it short', () => {
   expect(notify.plainCaption('**Hi** [my site](https://x.y) ![p](https://i/p.png) https://3speak.tv/x #tag')).toBe('Hi my site tag');
   expect(notify.plainCaption('x'.repeat(400))).toHaveLength(300);

@@ -11,6 +11,10 @@
  *      post it to the webhook, and give the claim back when Discord refused it
  *      (retried on the next run, at most MAX_ATTEMPTS times).
  *
+ * It also posts each week's theme once when the week starts (the team's weekly
+ * reminder to join, owner 2026-11-22): claimed with `announced_at` on the
+ * shorts_challenges doc, only within ANNOUNCE_WITHIN_DAYS of the start.
+ *
  * The webhook is SHORTS_CHALLENGE_DISCORD_WEBHOOK (env only, never in the repo or
  * a log line). Unset = the job does nothing. Mentions are switched off, so a
  * caption's "@everyone" stays text.
@@ -22,6 +26,7 @@ const DAY_MS = 24 * 3600 * 1000;
 const MAX_PER_RUN = 20;
 const MAX_ATTEMPTS = 5;
 const NOTIFY_MAX_AGE_DAYS = 3;
+const ANNOUNCE_WITHIN_DAYS = 2;
 const CYAN = 0x5fc4d8;
 
 const webhookUrl = () => process.env.SHORTS_CHALLENGE_DISCORD_WEBHOOK || '';
@@ -72,6 +77,56 @@ function buildMessage(entry, video, challenge) {
   return { username: '3Speak Shorts challenge', embeds: [embed], allowed_mentions: { parse: [] } };
 }
 
+/** The "new week" message: this week's theme, its prompt and the way in. */
+function buildWeekMessage(challenge) {
+  const en = challenge?.texts?.en || {};
+  return {
+    username: '3Speak Shorts challenge',
+    content: "🏁 This week's Shorts challenge has started. Join with a Short!",
+    embeds: [{
+      title: `This week: ${en.title || challenge.week}`.slice(0, 256),
+      url: `https://3speak.tv/challenge/${challenge.week}`,
+      color: CYAN,
+      ...(en.prompt ? { description: en.prompt } : {}),
+      fields: [
+        { name: 'Week', value: `${challenge.week} (${dayRange(challenge)}, UTC)`, inline: true },
+        { name: 'Tag', value: `#${challenge.tag}`, inline: true },
+      ],
+      footer: { text: 'Post a Short and turn on "Join this week\'s challenge"' },
+    }],
+    allowed_mentions: { parse: [] },
+  };
+}
+
+/** Post this week's theme once, at its start. Returns true when it was sent now. */
+async function announceWeek(db, hook, fetchImpl, now) {
+  const week = weekIdOf(new Date(now));
+  const claimed = await db.collection(CHALLENGES).findOneAndUpdate(
+    {
+      _id: week,
+      announced_at: null,
+      starts_at: { $lte: new Date(now), $gte: new Date(now - ANNOUNCE_WITHIN_DAYS * DAY_MS) },
+    },
+    { $set: { announced_at: new Date(now) } },
+    { returnDocument: 'after' },
+  );
+  const challenge = claimed && Object.prototype.hasOwnProperty.call(claimed, 'value') ? claimed.value : claimed;
+  if (!challenge) return false;
+  let res = null;
+  try {
+    res = await fetchImpl(hook, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildWeekMessage(challenge)),
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch { /* network: give the claim back below */ }
+  if (res && res.ok) return true;
+  await db.collection(CHALLENGES).updateOne({ _id: week }, { $set: { announced_at: null } });
+  console.warn(`[challenge-discord] week ${week} announcement refused (${res ? res.status : 'network'}), retry next run`);
+  return false;
+}
+
 let running = false;
 
 /**
@@ -90,6 +145,7 @@ async function runOnce({ db = getDb(), fetchImpl = fetch, now = Date.now() } = {
       await syncEntries(db, c, { force: true, now }).catch((err) => console.warn('[challenge-discord] sync failed:', err.message));
     }
     const byWeek = new Map(challenges.map((c) => [c.week, c]));
+    const announced = await announceWeek(db, hook, fetchImpl, now);
 
     let sent = 0;
     let failed = 0;
@@ -128,8 +184,8 @@ async function runOnce({ db = getDb(), fetchImpl = fetch, now = Date.now() } = {
       console.warn(`[challenge-discord] Discord refused ${entry.owner}/${entry.permlink} (${status}), retry next run`);
       if (!res || res.status === 429 || res.status >= 500) break; // slow down / Discord trouble: stop this run
     }
-    if (sent || failed) console.log(`[challenge-discord] sent ${sent}, failed ${failed}`);
-    return { sent, failed };
+    if (sent || failed || announced) console.log(`[challenge-discord] sent ${sent}, failed ${failed}${announced ? ', new week announced' : ''}`);
+    return { sent, failed, ...(announced ? { announced: true } : {}) };
   } finally {
     running = false;
   }
@@ -150,4 +206,4 @@ function start() {
   return true;
 }
 
-module.exports = { runOnce, start, buildMessage, plainCaption, _test: { reset: () => { running = false; } } };
+module.exports = { runOnce, start, buildMessage, buildWeekMessage, plainCaption, _test: { reset: () => { running = false; } } };
