@@ -1,6 +1,8 @@
 /**
- * 🏁 Weekly Shorts challenge (owner 2026-11-22): one theme per ISO week (Monday
- * 00:00 UTC to Sunday 23:59:59.999 UTC). A Short joins by carrying the week's
+ * 🏁 Weekly Shorts challenge (owner 2026-11-22): one theme per week, Sunday
+ * 00:00 UTC to Saturday 23:59:59.999 UTC (owner: weeks start on Sundays). A week
+ * is named after the ISO week its Monday falls in, so '2026-W48' runs from Sunday
+ * 2026-11-22 to Saturday 2026-11-28. A Short joins by carrying the week's
  * Hive tag (`challenge2026w48`), set by a switch in the 3Speak uploader.
  *
  * Two collections:
@@ -33,9 +35,9 @@ const LANG_RE = /^[a-z]{2,3}(-[a-z0-9]{2,8})?$/i;
 const TITLE_MAX = 80;
 const PROMPT_MAX = 300;
 
-/** The ISO week a moment falls in, in UTC: '2026-W48'. */
+/** The challenge week a moment falls in, in UTC: '2026-W48' (a Sunday counts with the Monday after it). */
 function weekIdOf(date = new Date()) {
-  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1));
   const day = d.getUTCDay() || 7; // Monday 1 .. Sunday 7
   d.setUTCDate(d.getUTCDate() + 4 - day); // the Thursday of this week decides the year
   const yearStart = Date.UTC(d.getUTCFullYear(), 0, 1);
@@ -43,7 +45,7 @@ function weekIdOf(date = new Date()) {
   return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
 }
 
-/** Monday 00:00 UTC of a week id, or null for something that is not one. */
+/** Sunday 00:00 UTC of a week id, or null for something that is not one. */
 function weekStart(weekId) {
   const m = WEEK_RE.exec(String(weekId || ''));
   if (!m) return null;
@@ -52,11 +54,11 @@ function weekStart(weekId) {
   if (week < 1 || week > 53) return null;
   const jan4 = new Date(Date.UTC(year, 0, 4));
   const monday1 = jan4.getTime() - ((jan4.getUTCDay() || 7) - 1) * DAY_MS;
-  const start = new Date(monday1 + (week - 1) * 7 * DAY_MS);
+  const start = new Date(monday1 + (week - 1) * 7 * DAY_MS - DAY_MS); // the Sunday before
   return weekIdOf(start) === weekId ? start : null; // W53 only in years that have one
 }
 
-/** The last moment of a week (Sunday 23:59:59.999 UTC), or null. */
+/** The last moment of a week (Saturday 23:59:59.999 UTC), or null. */
 function weekEnd(weekId) {
   const s = weekStart(weekId);
   return s ? new Date(s.getTime() + 7 * DAY_MS - 1) : null;
@@ -101,12 +103,33 @@ function ensureReady(db, { seedFile = path.join(__dirname, '../data/shortsChalle
         db.collection(ENTRIES).createIndex({ week: 1, reviewed_at: 1, posted_at: -1 }),
       ]);
       await seedChallenges(db, seedFile);
+      await fixWeekDates(db);
     })().catch((err) => {
       readyPromise = null; // try again on the next request
       throw err;
     });
   }
   return readyPromise;
+}
+
+/**
+ * A week's dates always follow from its id (they are never edited by hand): put
+ * them right where they differ, e.g. the weeks seeded while weeks still started
+ * on Mondays (2026-11-22).
+ */
+async function fixWeekDates(db) {
+  const docs = await db.collection(CHALLENGES).find({}, { projection: { starts_at: 1, ends_at: 1 } }).toArray();
+  const ops = [];
+  for (const d of docs) {
+    const s = weekStart(d._id);
+    const e = weekEnd(d._id);
+    if (!s) continue;
+    if (new Date(d.starts_at).getTime() !== s.getTime() || new Date(d.ends_at).getTime() !== e.getTime()) {
+      ops.push({ updateOne: { filter: { _id: d._id }, update: { $set: { starts_at: s, ends_at: e } } } });
+    }
+  }
+  if (ops.length) await db.collection(CHALLENGES).bulkWrite(ops, { ordered: false });
+  return ops.length;
 }
 
 /** Insert the planned weeks that are not in Mongo yet; never touches an existing week. */
@@ -232,6 +255,7 @@ module.exports = {
   cleanTexts,
   ensureReady,
   seedChallenges,
+  fixWeekDates,
   syncEntries,
   statusOf,
   statusFilter,

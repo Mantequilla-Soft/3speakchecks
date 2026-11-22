@@ -42,11 +42,16 @@ afterEach(() => {
 });
 
 describe('weeks', () => {
-  test('ISO weeks in UTC, Monday to Sunday', () => {
-    expect(sc.weekIdOf(new Date('2026-11-23T00:00:00Z'))).toBe('2026-W48');
+  test('weeks run Sunday to Saturday in UTC, named after the ISO week of their Monday', () => {
+    expect(sc.weekIdOf(new Date('2026-11-21T23:59:59Z'))).toBe('2026-W47'); // Saturday
+    expect(sc.weekIdOf(new Date('2026-11-22T00:00:00Z'))).toBe('2026-W48'); // Sunday
+    expect(sc.weekIdOf(new Date('2026-11-28T23:59:59Z'))).toBe('2026-W48'); // Saturday
+    expect(sc.weekIdOf(new Date('2026-11-29T00:00:00Z'))).toBe('2026-W49');
     expect(sc.weekIdOf(new Date('2027-01-01T12:00:00Z'))).toBe('2026-W53');
-    expect(sc.weekStart('2026-W48').toISOString()).toBe('2026-11-23T00:00:00.000Z');
-    expect(sc.weekEnd('2026-W48').toISOString()).toBe('2026-11-29T23:59:59.999Z');
+    expect(sc.weekIdOf(new Date('2027-01-03T00:00:00Z'))).toBe('2027-W01');
+    expect(sc.weekStart('2026-W48').toISOString()).toBe('2026-11-22T00:00:00.000Z');
+    expect(sc.weekEnd('2026-W48').toISOString()).toBe('2026-11-28T23:59:59.999Z');
+    expect(sc.weekStart('2026-W53').toISOString()).toBe('2026-12-27T00:00:00.000Z');
     expect(sc.weekStart('2027-W53')).toBeNull();
     expect(sc.tagOf('2026-W48')).toBe('challenge2026w48');
   });
@@ -78,6 +83,14 @@ describe('public', () => {
     expect(Object.keys(res.body.current.texts)).toHaveLength(21);
     expect(res.body.next.week).toBe('2026-W50');
     expect(res.body.past.map((c) => c.week)).toEqual(['2026-W48']);
+  });
+
+  test('dates always follow the week id (weeks seeded as Monday weeks are moved to Sunday)', async () => {
+    await request(app).get('/shorts-challenges').expect(200);
+    await db().collection('shorts_challenges').updateOne({ _id: '2026-W48' }, { $set: { starts_at: new Date('2026-11-23T00:00:00Z'), ends_at: new Date('2026-11-29T23:59:59.999Z') } });
+    sc._test.resetReady();
+    const res = await request(app).get('/shorts-challenges/2026-W48').expect(200);
+    expect(res.body.challenge).toMatchObject({ starts_at: '2026-11-22T00:00:00.000Z', ends_at: '2026-11-28T23:59:59.999Z' });
   });
 
   test('the seed never overwrites a week the team changed', async () => {
@@ -166,6 +179,6 @@ describe('admin', () => {
       .send({ theme: 'winterWalk', texts: { en: { title: 'Winter walk', prompt: 'Take us on a walk.' } } }).expect(200);
     expect(res.body.challenge).toMatchObject({ week: '2028-W02', tag: 'challenge2028w02', theme: 'winterWalk', texts: { en: { title: 'Winter walk' } } });
     const pub = await request(app).get('/shorts-challenges/2028-W02').expect(200);
-    expect(pub.body.challenge.starts_at).toBe('2028-01-10T00:00:00.000Z');
+    expect(pub.body.challenge.starts_at).toBe('2028-01-09T00:00:00.000Z');
   });
 });

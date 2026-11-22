@@ -1,5 +1,6 @@
 /**
- * 🏁 Weekly Shorts challenge (utils/shortsChallenge.js has the model).
+ * 🏁 Weekly Shorts challenge (utils/shortsChallenge.js has the model; weeks run
+ * Sunday to Saturday, UTC).
  *
  * Public:
  *   GET /shorts-challenges                  this week, next week and the 8 before,
