@@ -67,6 +67,9 @@ function cleanSource({ kind, author, permlink, start, end }) {
     return out;
 }
 
+/** The snaps containers Shorts reply under (peak.snaps and our own). */
+const isContainer = ({ author, permlink }) => author === 'peak.snaps' || /^snap-container-/.test(permlink);
+
 function splitRef(ref) {
     const m = typeof ref === 'string' && ref.match(/^@?([a-z0-9.-]+)\/([a-z0-9-]+)$/);
     return m ? { author: m[1], permlink: m[2] } : null;
@@ -110,6 +113,9 @@ function derivedSourceOf(post) {
         });
     }
     if (!source) return null;
+    // A snaps container is where Shorts are posted, never what one is made from
+    // (a reaction posted as a Short replies under it).
+    if (isContainer(source)) return null;
     // Made from itself is no link at all.
     if (source.author === self && source.permlink === post.permlink) return null;
     return source;

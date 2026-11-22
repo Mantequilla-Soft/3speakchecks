@@ -75,6 +75,12 @@ describe('derivedSourceOf', () => {
         expect(derivedSourceOf(q)).toEqual({ kind: 'clip', author: 'bob', permlink: 'p' });
     });
 
+    test('a snaps container is never a source (reactions posted as Shorts reply under it)', () => {
+        const p = post({ parent_author: 'peak.snaps', parent_permlink: 'snap-container-1790333280' }, { tags: ['3speak', 'reaction'], video: { url: 'u' } });
+        expect(derivedSourceOf(p)).toBeNull();
+        expect(derivedSourceOf(post({}, { '3speak': { source: { kind: 'clip', author: 'threespeak', permlink: 'snap-container-1' } } }))).toBeNull();
+    });
+
     test('made from itself is no source', () => {
         expect(derivedSourceOf(post({}, { '3speak': { source: { kind: 'clip', author: 'alice', permlink: 'my-post' } } }))).toBeNull();
     });
