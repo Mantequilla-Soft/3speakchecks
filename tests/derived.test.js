@@ -205,6 +205,24 @@ describe('routes', () => {
         expect(g.body.total).toBe(2);
     });
 
+    test('one creator\'s Shorts of a source, in the order of the source (a virtual series)', async () => {
+        const piece = (author, permlink, start, created, media = 'short') => ({ author, permlink, source_author: 'bob', source_permlink: 'ep', kind: 'audiogram', media, created: new Date(created), ...(start !== null ? { start } : {}) });
+        coll.rows.push(
+            piece('bob', 'third', 600, '2026-11-01'),
+            piece('bob', 'first', 10, '2026-11-03'),
+            piece('bob', 'unplaced', null, '2026-11-02'),
+            piece('bob', 'second', 300, '2026-11-04'),
+            piece('carol', 'not-hers', 5, '2026-11-05'),
+            piece('bob', 'a-video', 1, '2026-11-06', 'video'),
+        );
+        const g = await request(app).get('/derived/bob/ep?by=bob&media=short&order=start');
+        expect(g.body.items.map((i) => i.permlink)).toEqual(['first', 'second', 'third', 'unplaced']);
+        const all = await request(app).get('/derived/bob/ep');
+        expect(all.body.total).toBe(6);
+        const junk = await request(app).get('/derived/bob/ep?by=NOT VALID&media=weird&order=x');
+        expect(junk.body.total).toBe(6);
+    });
+
     test('a teaser Story leaves the list when its 24 hours are over', async () => {
         const story = (permlink, created) => post({ permlink, created }, { video: { url: 'u' }, 'threespeak.video': { surface: 'shorts' }, '3speak': { story: true, source: { kind: 'teaser', author: 'bob', permlink: 'long' } } });
         const fresh = rowFor(story('fresh', new Date(Date.now() - 3600e3).toISOString().slice(0, 19)));

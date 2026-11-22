@@ -85,13 +85,19 @@ async function saveDerived(db, post) {
     return { row };
 }
 
-/** Rows made from source_author/source_permlink, newest first. */
-async function listDerived(db, sourceAuthor, sourcePermlink, { limit = 24, exclude = [] } = {}) {
+/**
+ * Rows made from source_author/source_permlink, newest first. `by` keeps one
+ * creator's, `media` one kind of post; `order: 'start'` sorts by where in the
+ * source each piece starts (then oldest first), for "Part 2 of 4" of the Shorts
+ * a creator cut from one video or episode.
+ */
+async function listDerived(db, sourceAuthor, sourcePermlink, { limit = 24, exclude = [], by = null, media = null, order = 'new' } = {}) {
     await ensureIndexes(db);
     const match = {
         source_author: sourceAuthor,
         source_permlink: sourcePermlink,
-        ...(exclude.length ? { author: { $nin: exclude } } : {}),
+        ...(by ? { author: by } : (exclude.length ? { author: { $nin: exclude } } : {})),
+        ...(media ? { media } : {}),
         // Expired Stories out; everything else has no expires_at.
         expires_at: { $not: { $lte: new Date() } },
     };
@@ -99,6 +105,10 @@ async function listDerived(db, sourceAuthor, sourcePermlink, { limit = 24, exclu
         col(db).find(match, { projection: { _id: 0, updated_at: 0 } }).sort({ created: -1 }).limit(limit).toArray(),
         col(db).aggregate([{ $match: match }, { $group: { _id: '$kind', n: { $sum: 1 } } }]).toArray(),
     ]);
+    if (order === 'start') {
+        const at = (r) => (Number.isFinite(r.start) ? r.start : Infinity);
+        items.sort((a, b) => at(a) - at(b) || new Date(a.created) - new Date(b.created));
+    }
     const byKind = {};
     let total = 0;
     for (const c of counts) { byKind[c._id] = c.n; total += c.n; }

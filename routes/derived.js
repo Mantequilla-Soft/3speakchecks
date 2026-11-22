@@ -12,6 +12,9 @@
  *       Idempotent; 404 + retry while a fresh post is not readable yet.
  *
  *   GET /derived/:author/:permlink?limit=24        (the SOURCE post)
+ *       &by=<creator>&media=short&order=start    one creator's Shorts of it, in
+ *                                                the order of the source (a
+ *                                                virtual series: "Part 2 of 4")
  *       { items: [{ author, permlink, kind, media, title, thumbnail, duration,
  *         start?, end?, created }], counts: { kind: n }, total }
  *       Hidden creators are left out. Cached a minute per source; a register
@@ -28,6 +31,7 @@ const { saveDerived, listDerived } = require('../utils/derivedStore');
 const router = express.Router();
 
 const MAX_LIMIT = 60;
+const MEDIA = ['short', 'video', 'audio', 'post'];
 const CACHE_TTL_MS = 60 * 1000;
 const CACHE_MAX = 2000;
 const cache = new Map(); // "author/permlink|limit" -> { at, body }
@@ -80,11 +84,17 @@ router.get('/derived/:author/:permlink', async (req, res) => {
         return res.status(400).json({ success: false, error: 'invalid author or permlink' });
     }
     const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || 24));
-    const key = `${author}/${permlink}|${limit}`;
+    const by = ACCOUNT_RE.test(String(req.query.by || '').toLowerCase()) ? String(req.query.by).toLowerCase() : null;
+    const media = MEDIA.includes(req.query.media) ? req.query.media : null;
+    const order = req.query.order === 'start' ? 'start' : 'new';
+    const key = `${author}/${permlink}|${limit}|${by || ''}|${media || ''}|${order}`;
     const hit = cache.get(key);
     if (hit && Date.now() - hit.at < CACHE_TTL_MS) return res.json(hit.body);
     try {
-        const body = await listDerived(getDb(), author, permlink, { limit, exclude: hiddenListSync() });
+        const hidden = hiddenListSync();
+        const body = by && hidden.includes(by)
+            ? { items: [], counts: {}, total: 0 }
+            : await listDerived(getDb(), author, permlink, { limit, exclude: hidden, by, media, order });
         if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value);
         cache.set(key, { at: Date.now(), body });
         res.json(body);
