@@ -9,7 +9,8 @@
  *                                           first, in the tag feed's video shape
  *                                           (?page, ?limit)
  *
- * Admin (Authorization: Bearer CHALLENGE_ADMIN_SECRET; 503 while it is unset):
+ * Admin (Authorization: Bearer AD_ADMIN_SECRET, the same admin secret the ads
+ * admin uses, so the one admin frontend reaches both; 503 while it is unset):
  *   GET /admin/shorts-challenges            every week, with pending / checked /
  *                                           rejected counts
  *   PUT /admin/shorts-challenges/:week      create or change a week's prompts:
@@ -52,7 +53,7 @@ const limiter = rateLimit({
   message: { success: false, error: 'Too many requests' },
 });
 
-const ADMIN_SECRET = () => process.env.CHALLENGE_ADMIN_SECRET || '';
+const ADMIN_SECRET = () => process.env.AD_ADMIN_SECRET || '';
 function safeEqual(a, b) {
   const ab = Buffer.from(String(a));
   const bb = Buffer.from(String(b));
@@ -61,7 +62,7 @@ function safeEqual(a, b) {
 }
 function requireAdmin(req, res, next) {
   const secret = ADMIN_SECRET();
-  if (!secret) return res.status(503).json({ success: false, error: 'Challenge admin disabled (no CHALLENGE_ADMIN_SECRET set)' });
+  if (!secret) return res.status(503).json({ success: false, error: 'Challenge admin disabled (no AD_ADMIN_SECRET set)' });
   const header = String(req.get('authorization') || '');
   const provided = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
   if (!provided || !safeEqual(provided, secret)) return res.status(401).json({ success: false, error: 'unauthorized' });

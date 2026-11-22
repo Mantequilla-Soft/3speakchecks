@@ -2,7 +2,7 @@
  * Weekly Shorts challenge (utils/shortsChallenge.js + routes/shortsChallenges.js)
  * against the real test MongoDB: the planned weeks are seeded insert-only, Shorts
  * carrying a week's tag inside that week become entries, and only entries the team
- * checked show up and count. The admin routes need CHALLENGE_ADMIN_SECRET.
+ * checked show up and count. The admin routes need AD_ADMIN_SECRET.
  */
 const request = require('supertest');
 const testDb = require('./helpers/db');
@@ -27,15 +27,18 @@ const short = (owner, permlink, extra = {}) => db().collection('embed-video').in
   ...extra,
 });
 
+// The ads admin's secret (same one): restored after each test, other files in
+// this worker may rely on it
+const savedSecret = process.env.AD_ADMIN_SECRET;
 beforeEach(() => {
   pinClock(WED_W49);
   sc._test.resetReady();
   sc._test.lastSync.clear();
-  process.env.CHALLENGE_ADMIN_SECRET = SECRET;
+  process.env.AD_ADMIN_SECRET = SECRET;
 });
 afterEach(() => {
   jest.useRealTimers();
-  delete process.env.CHALLENGE_ADMIN_SECRET;
+  if (savedSecret === undefined) delete process.env.AD_ADMIN_SECRET; else process.env.AD_ADMIN_SECRET = savedSecret;
 });
 
 describe('weeks', () => {
@@ -126,7 +129,7 @@ describe('admin', () => {
   test('refused without the secret, and off while none is set', async () => {
     await request(app).get('/admin/shorts-challenges').expect(401);
     await request(app).get('/admin/shorts-challenges').set({ Authorization: 'Bearer nope' }).expect(401);
-    delete process.env.CHALLENGE_ADMIN_SECRET;
+    delete process.env.AD_ADMIN_SECRET;
     await request(app).get('/admin/shorts-challenges').set(admin()).expect(503);
   });
 
