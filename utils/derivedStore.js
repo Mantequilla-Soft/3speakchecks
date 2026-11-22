@@ -9,10 +9,11 @@
  *     source_author, source_permlink,     what it was made from
  *     kind, start?, end?,                 how (utils/derivedSource.js KINDS)
  *     media, title, thumbnail, duration,  for the card
+ *     expires_at?,                        a 24h Story's end (then it leaves the list)
  *     created, updated_at }
  */
 const {
-    derivedSourceOf, mediaOf, titleOf, thumbnailOf, durationOf,
+    derivedSourceOf, mediaOf, titleOf, thumbnailOf, durationOf, parseMeta,
 } = require('./derivedSource');
 
 const COLLECTION = 'derived-content';
@@ -30,6 +31,9 @@ async function ensureIndexes(db) {
         console.error('[derived] index setup failed:', err && err.message);
     }
 }
+
+const STORY_TTL_MS = (parseFloat(process.env.STORY_TTL_HOURS) || 24) * 60 * 60 * 1000;
+const isStory = (post) => parseMeta(post?.json_metadata)?.['3speak']?.story === true;
 
 // Hive dates come without a zone and are UTC.
 const hiveDate = (s) => {
@@ -54,6 +58,8 @@ function rowFor(post) {
         thumbnail: thumbnailOf(post),
         duration: durationOf(post),
         created: hiveDate(post.created),
+        // A 24h Story (a teaser) leaves the list when it expires (routes/stories.js TTL).
+        ...(isStory(post) ? { expires_at: new Date(hiveDate(post.created).getTime() + STORY_TTL_MS) } : {}),
     };
 }
 
@@ -69,9 +75,9 @@ async function saveDerived(db, post) {
         const r = await col(db).deleteOne(key);
         return r.deletedCount ? { removed: true, row: null } : { row: null };
     }
-    // start/end can go away on an edit: unset what the new row leaves out.
+    // start/end/expires_at can go away on an edit: unset what the new row leaves out.
     const unset = {};
-    for (const f of ['start', 'end']) if (row[f] === undefined) unset[f] = '';
+    for (const f of ['start', 'end', 'expires_at']) if (row[f] === undefined) unset[f] = '';
     await col(db).updateOne(key, {
         $set: { ...row, updated_at: new Date() },
         ...(Object.keys(unset).length ? { $unset: unset } : {}),
@@ -86,6 +92,8 @@ async function listDerived(db, sourceAuthor, sourcePermlink, { limit = 24, exclu
         source_author: sourceAuthor,
         source_permlink: sourcePermlink,
         ...(exclude.length ? { author: { $nin: exclude } } : {}),
+        // Expired Stories out; everything else has no expires_at.
+        expires_at: { $not: { $lte: new Date() } },
     };
     const [items, counts] = await Promise.all([
         col(db).find(match, { projection: { _id: 0, updated_at: 0 } }).sort({ created: -1 }).limit(limit).toArray(),

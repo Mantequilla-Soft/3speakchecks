@@ -125,7 +125,11 @@ describe('card fields', () => {
 // A Mongo collection as far as derivedStore uses it.
 function fakeCollection() {
     const rows = [];
-    const matches = (r, q) => Object.entries(q).every(([k, v]) => (v && v.$nin ? !v.$nin.includes(r[k]) : r[k] === v));
+    const matches = (r, q) => Object.entries(q).every(([k, v]) => {
+        if (v && v.$nin) return !v.$nin.includes(r[k]);
+        if (v && v.$not && v.$not.$lte) return !(r[k] !== undefined && r[k] <= v.$not.$lte);
+        return r[k] === v;
+    });
     return {
         rows,
         createIndex: jest.fn(async () => 'ok'),
@@ -199,6 +203,17 @@ describe('routes', () => {
         const g = await request(app).get('/derived/bob/long?limit=1');
         expect(g.body.items.map((i) => i.permlink)).toEqual(['new']);
         expect(g.body.total).toBe(2);
+    });
+
+    test('a teaser Story leaves the list when its 24 hours are over', async () => {
+        const story = (permlink, created) => post({ permlink, created }, { video: { url: 'u' }, 'threespeak.video': { surface: 'shorts' }, '3speak': { story: true, source: { kind: 'teaser', author: 'bob', permlink: 'long' } } });
+        const fresh = rowFor(story('fresh', new Date(Date.now() - 3600e3).toISOString().slice(0, 19)));
+        const old = rowFor(story('old', new Date(Date.now() - 30 * 3600e3).toISOString().slice(0, 19)));
+        expect(fresh.expires_at).toBeInstanceOf(Date);
+        coll.rows.push(fresh, old);
+        const g = await request(app).get('/derived/bob/long');
+        expect(g.body.items.map((i) => i.permlink)).toEqual(['fresh']);
+        expect(g.body.counts).toEqual({ teaser: 1 });
     });
 
     test('a register drops the cached list of its source', async () => {
