@@ -17,6 +17,7 @@ const { hiveRpcBatch } = require('../utils/hive');
 
 const seen = [];
 let feedItems = [];
+let feedFail = false;
 let stubServer;
 let app;
 let followingOf;
@@ -29,7 +30,7 @@ beforeAll(async () => {
     alice: { handle: 'alice', status: 'incubating', userId: 'u-alice', hiveUsername: null },
     gone: { handle: 'gone', status: 'unknown', userId: null, hiveUsername: null },
   } }));
-  stub.get('/public/feed', (_req, res) => res.json({ items: feedItems }));
+  stub.get('/public/feed', (_req, res) => (feedFail ? res.status(503).json({ error: 'busy' }) : res.json({ items: feedItems })));
   stub.get('/public/profile/:h', (req, res) => (req.params.h === 'alice'
     ? res.json({ handle: 'alice', counts: { posts: 2 } })
     : res.status(404).json({ error: 'No such user' })));
@@ -55,6 +56,8 @@ const warmupPost = (handle, permlink, extra = {}) => ({
 beforeEach(async () => {
   seen.length = 0;
   feedItems = [];
+  feedFail = false;
+  require('../routes/incubation')._feedPools.clear();
   // Nobody exists on Hive unless a test says so.
   hiveRpcBatch.mockResolvedValue([{ result: [] }]);
   await db().collection('incubation_watch').insertMany([
@@ -120,6 +123,37 @@ describe('GET /incubation/feed: the warm-up rail', () => {
     expect(res.headers['cache-control']).toBe('public, max-age=30');
   });
 
+  test('the filtered pool is built once a minute per question, not per request', async () => {
+    feedItems = [warmupPost('alice', 'p1')];
+    await approve(['alice', 'p1']);
+    const reads = () => seen.filter((s) => s.url.startsWith('/public/feed')).length;
+    await Promise.all([shown('?contentType=short'), shown('?contentType=short')]);
+    expect(await shown('?contentType=short')).toEqual(['p1']);
+    expect(reads()).toBe(1);
+    // Another question has its own pool.
+    await shown('?contentType=video');
+    expect(reads()).toBe(2);
+    // Past the minute it is built again.
+    const now = Date.now();
+    const spy = jest.spyOn(Date, 'now').mockReturnValue(now + 61 * 1000);
+    try {
+      await shown('?contentType=short');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(reads()).toBe(3);
+  });
+
+  test('a failed read is not kept: the next request asks again', async () => {
+    feedItems = [warmupPost('alice', 'p1')];
+    await approve(['alice', 'p1']);
+    feedFail = true;
+    await request(app).get('/incubation/feed?contentType=short').expect(503);
+    feedFail = false;
+    expect(await shown('?contentType=short')).toEqual(['p1']);
+    expect(seen.filter((x) => x.url.startsWith('/public/feed'))).toHaveLength(2);
+  });
+
   test('nothing shows until 3Speak approved it (fails closed)', async () => {
     feedItems = [warmupPost('alice', 'p1'), warmupPost('alice', 'p2')];
     await approve(['alice', 'p1']);
@@ -148,6 +182,8 @@ describe('GET /incubation/feed: the warm-up rail', () => {
     await approve(['alice', 'p1'], ['onhive', 'h1']);
     hiveRpcBatch.mockRejectedValueOnce(new Error('all nodes down'));
     expect(await shown()).toEqual(['p1', 'h1']);
+    // That pool is kept a minute like any other; a minute on, Hive answers.
+    require('../routes/incubation')._feedPools.clear();
     hiveRpcBatch.mockResolvedValue([{ result: [{ name: 'onhive' }] }]);
     expect(await shown()).toEqual(['p1']);
   });
