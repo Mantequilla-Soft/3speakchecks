@@ -62,6 +62,7 @@ const post = (handle, permlink, extra = {}) => ({
 beforeEach(() => {
   feedByType = {};
   feedStatus = 200;
+  require('../../routes/incubation')._feedPools.clear(); // the feed keeps its pool a minute
   svc.seen.length = 0;
   hiveRpcBatch.mockReset();
   hiveRpcBatch.mockResolvedValue([{ result: [] }]);
