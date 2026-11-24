@@ -235,6 +235,31 @@ const WARMUP_FEED_MAX_AGE_DAYS = (() => {
     const v = parseFloat(process.env.WARMUP_FEED_MAX_AGE_DAYS);
     return Number.isFinite(v) && v > 0 ? v : 3;
 })();
+// The warm-up posts after every filter above, kept WARMUP_FEED_POOL_TTL_MS per
+// question (content type, pool size, asked age), so only the random draw below
+// runs per request. Building it is a service read plus a Hive lookup and three
+// Mongo reads; done on every load it held each Shorts refresh for 0.5 s here and
+// up to 8 s on the US box (it answers no-store, so nothing in front caches it).
+// One build at a time per key: requests arriving meanwhile share it. Errors are
+// not kept.
+const WARMUP_FEED_POOL_TTL_MS = 60 * 1000;
+const feedPools = new Map(); // "contentType|limit|maxAgeDays" -> { at, pool: Promise<{status, body}> }
+function warmupPool(key, path, sinceMs) {
+    const hit = feedPools.get(key);
+    if (hit && Date.now() - hit.at < WARMUP_FEED_POOL_TTL_MS) return hit.pool;
+    const pool = call('GET', path).then(async (r) => {
+        if (r.status !== 200 || !Array.isArray(r.body?.items)) {
+            feedPools.delete(key);
+            return r;
+        }
+        const items = await dropHiveOwned(stillWarmingUp(r.body.items.filter((it) => new Date(it.created).getTime() >= sinceMs)));
+        return { status: r.status, body: { ...r.body, items: await dropAiFlagged(await filterByAsset(items)) } };
+    });
+    pool.catch(() => feedPools.delete(key));
+    feedPools.set(key, { at: Date.now(), pool });
+    return pool;
+}
+
 router.get('/feed', (req, res) => {
     const { limit, contentType } = req.query;
     const sinceMs = Math.max(WARMUP_FEED_SINCE.getTime(), Date.now() - WARMUP_FEED_MAX_AGE_DAYS * 86400000);
@@ -245,15 +270,16 @@ router.get('/feed', (req, res) => {
     // asked for the whole pool. Same default as the service when none is given.
     const shownLimit = Math.min(Math.max(parseInt(limit, 10) || 20, 1), WARMUP_FEED_POOL);
     const sampling = WARMUP_FEED_SHARE < 1 || WARMUP_FEED_PER_ACCOUNT > 0;
-    call('GET', `/public/feed${qs({ limit: sampling ? WARMUP_FEED_POOL : shownLimit, maxAgeDays, contentType })}`)
-        .then(async (r) => {
-            if (r.status === 200 && Array.isArray(r.body?.items)) {
-                const items = await dropHiveOwned(stillWarmingUp(r.body.items.filter((it) => new Date(it.created).getTime() >= sinceMs)));
-                const shown = await dropAiFlagged(await filterByAsset(items));
-                r.body.items = sampleShare(capPerAccount(shown)).slice(0, shownLimit);
-            }
+    const askLimit = sampling ? WARMUP_FEED_POOL : shownLimit;
+    // Keyed by what was ASKED: maxAgeDays itself moves with the clock.
+    const key = `${contentType || ''}|${askLimit}|${Number.isFinite(asked) && asked > 0 ? asked : ''}`;
+    warmupPool(key, `/public/feed${qs({ limit: askLimit, maxAgeDays, contentType })}`, sinceMs)
+        .then((r) => {
+            const body = r.status === 200 && Array.isArray(r.body?.items)
+                ? { ...r.body, items: sampleShare(capPerAccount(r.body.items)).slice(0, shownLimit) }
+                : r.body;
             // A random pick must not be cached, or everyone gets the same half.
-            relay(res, sampling ? 'no-store' : 'public, max-age=30')(r);
+            relay(res, sampling ? 'no-store' : 'public, max-age=30')({ status: r.status, body });
         })
         .catch(failed(res, 'feed'));
 });
@@ -683,5 +709,6 @@ router.post('/internal/claim-assets', internalOnly, async (req, res) => {
     }
 });
 
+router._feedPools = feedPools; // tests empty it between cases
 module.exports = router;
 module.exports.isInternal = isInternal;
