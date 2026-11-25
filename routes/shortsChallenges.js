@@ -10,6 +10,11 @@
  *   GET /shorts-challenges/:week/entries    the week's CHECKED entries, newest
  *                                           first, in the tag feed's video shape
  *                                           (?page, ?limit)
+ *   GET /shorts-challenges/:week/joined/:account
+ *                                           { joined }: whether the account has a
+ *                                           Short in that week that is waiting for
+ *                                           the team or was checked (a turned-down
+ *                                           one does not count), for the Home strip
  *
  * Admin (Authorization: Bearer AD_ADMIN_SECRET, the same admin secret the ads
  * admin uses, so the one admin frontend reaches both; 503 while it is unset):
@@ -203,6 +208,41 @@ router.get('/shorts-challenges/:week/entries', limiter, async (req, res) => {
   const videos = rows.map((e) => embeds.get(`${e.owner}/${e.permlink}`) && feedShape(embeds.get(`${e.owner}/${e.permlink}`), e)).filter(Boolean);
   res.set('Cache-Control', 'public, max-age=60');
   return res.json({ success: true, week, tag: challenge.tag, page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)), videos });
+});
+
+// The frontend's Home strip steps aside once someone took part: a Short of theirs
+// with the week's tag that is waiting for the team (an entry or not yet one) or
+// was checked counts; a turned-down one does not (they may try again), nor one
+// taken down since. Only the yes or no, never which Short or why.
+router.get('/shorts-challenges/:week/joined/:account', limiter, async (req, res) => {
+  const week = String(req.params.week).toUpperCase();
+  const account = String(req.params.account).toLowerCase();
+  if (!isWeekId(week)) return res.status(400).json({ success: false, error: 'Bad week (use 2026-W48)' });
+  if (!ACCOUNT_RE.test(account)) return res.status(400).json({ success: false, error: 'Bad account' });
+  const db = getDb();
+  await ensureReady(db);
+  const challenge = await db.collection(CHALLENGES).findOne({ _id: week });
+  if (!challenge) return res.status(404).json({ success: false, error: 'No challenge that week' });
+
+  // Straight from the uploads, so a Short posted a minute ago counts before the
+  // entry sync has found it
+  const shorts = await db.collection('embed-video').find(
+    {
+      $or: [{ owner: account }, { hive_author: account }],
+      hive_tags_lower: challenge.tag,
+      short: true,
+      status: 'published',
+      createdAt: { $gte: new Date(challenge.starts_at), $lte: new Date(challenge.ends_at) },
+      ...unavailableMatch(),
+    },
+    { projection: { owner: 1, permlink: 1 } },
+  ).limit(20).toArray();
+  const rejected = shorts.length ? await db.collection(ENTRIES).countDocuments({
+    $or: shorts.map((s) => ({ owner: s.owner, permlink: s.permlink })),
+    ...statusFilter('rejected'),
+  }) : 0;
+  res.set('Cache-Control', 'public, max-age=30');
+  return res.json({ success: true, week, account, joined: shorts.length > rejected });
 });
 
 // ── Admin ────────────────────────────────────────────────────────────────────

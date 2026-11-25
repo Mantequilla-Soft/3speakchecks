@@ -142,7 +142,39 @@ describe('public', () => {
     expect(res.body.videos).toEqual([]);
   });
 
+  test('joined: a waiting or checked Short counts, a turned-down or taken-down one does not', async () => {
+    const joined = async (account) => (await request(app).get(`/shorts-challenges/2026-W49/joined/${account}`).expect(200)).body.joined;
+    const entry = (permlink, set) => db().collection('shorts_challenge_entries').updateOne({ permlink }, { $set: set });
+    expect(await joined('badadib')).toBe(false);
+
+    await short('badadib', 'one'); // counts at once, before the entry sync found it
+    expect(await joined('badadib')).toBe(true);
+    expect(await joined('BadAdib')).toBe(true);
+    expect(await joined('someone')).toBe(false);
+    await request(app).get('/shorts-challenges/2026-W49/entries').expect(200); // now an entry, waiting
+    expect(await joined('badadib')).toBe(true);
+
+    await entry('one', { checked: true, reviewed_at: new Date() });
+    expect(await joined('badadib')).toBe(true);
+
+    await entry('one', { checked: false, reviewed_at: new Date() }); // turned down: may try again
+    expect(await joined('badadib')).toBe(false);
+
+    await short('badadib', 'two');
+    expect(await joined('badadib')).toBe(true);
+    await db().collection('embed-video').updateOne({ permlink: 'two' }, { $set: { status: 'deleted' } });
+    expect(await joined('badadib')).toBe(false);
+  });
+
+  test('joined: the Hive author counts as well as the uploading account', async () => {
+    await short('threespeak', 'for-badadib', { hive_author: 'badadib', hive_permlink: 'for-badadib' });
+    const res = await request(app).get('/shorts-challenges/2026-W49/joined/badadib').expect(200);
+    expect(res.body).toEqual({ success: true, week: '2026-W49', account: 'badadib', joined: true });
+  });
+
   test('bad and unknown weeks', async () => {
+    await request(app).get('/shorts-challenges/2026-W49/joined/x').expect(400);
+    await request(app).get('/shorts-challenges/2031-W02/joined/badadib').expect(404);
     await request(app).get('/shorts-challenges/nonsense').expect(400);
     await request(app).get('/shorts-challenges/2031-W02').expect(404);
     await request(app).get('/shorts-challenges/2031-W02/entries').expect(404);
