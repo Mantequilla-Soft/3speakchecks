@@ -297,6 +297,18 @@ router.get('/:username', async (req, res) => {
             .limit(limit)
             .toArray();
 
+        // Which of the video posts are Shorts: their embed upload says so (the
+        // studio's publish-limit check needs the kind, see utils/publishQuota.js)
+        const videoDocs = docs.filter(d => !d.audioPermlink);
+        const shortKeys = new Set();
+        if (videoDocs.length) {
+            const rows = await db.collection('embed-video').find(
+                { owner, permlink: { $in: videoDocs.map(d => d.embedPermlink || d.permlink) }, short: true },
+                { projection: { permlink: 1 } },
+            ).toArray();
+            rows.forEach(r => shortKeys.add(r.permlink));
+        }
+
         // Strip the large `body` / `jsonMetadata` fields from the list view to keep responses small.
         const list = docs.map(d => ({
             id: d._id,
@@ -311,8 +323,9 @@ router.get('/:username', async (req, res) => {
             payoutOptions: d.payoutOptions,
             thumbnail: d.thumbnail,
             premiere: d.premiere === true,
-            // An audio post (scheduled or a draft) names its upload; a video its embed.
-            kind: d.audioPermlink ? 'audio' : 'video',
+            // An audio post (scheduled or a draft) names its upload; a video its
+            // embed, which may be a Short.
+            kind: d.audioPermlink ? 'audio' : (shortKeys.has(d.embedPermlink || d.permlink) ? 'short' : 'video'),
             postedAt: d.postedAt || null,
             broadcastTxId: d.broadcastTxId || null,
             lastError: d.lastError || null,
