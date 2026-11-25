@@ -107,4 +107,4 @@ function capWarmup(query, { owners, allowed }) {
   return query;
 }
 
-module.exports = { warmupAudio, capWarmup, MAX_PER_ACCOUNT, MAX_TOTAL, _test: { rebuild, isWarmupHandle, ownerCache } };
+module.exports = { warmupAudio, capWarmup, isWarmupHandle, MAX_PER_ACCOUNT, MAX_TOTAL, _test: { rebuild, isWarmupHandle, ownerCache } };
