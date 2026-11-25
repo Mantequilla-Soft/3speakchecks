@@ -1,1000 +1,688 @@
-# CheckBanned API aka Pancreas API
+<h1 align="center">3Speak Checker</h1>
 
-A comprehensive REST API for managing and retrieving 3Speak video data, user permissions, and Hive account information from MongoDB.
+<p align="center">
+  <strong>The backend API behind <a href="https://3speak.tv">3speak.tv</a>.</strong><br>
+  Feeds, search, Shorts, audio and podcasts, creator stats, notifications and ads,<br>
+  served from 3Speak's MongoDB and verified against Hive.
+</p>
 
-## Features
+<p align="center">
+  <a href="https://github.com/Mantequilla-Soft/3speakchecks/actions/workflows/tests.yml"><img alt="Tests" src="https://github.com/Mantequilla-Soft/3speakchecks/actions/workflows/tests.yml/badge.svg"></a>
+  <img alt="node 22" src="https://img.shields.io/badge/node-22-339933">
+  <img alt="express 4.18" src="https://img.shields.io/badge/express-4.18-000000">
+  <img alt="mongodb driver 6.1" src="https://img.shields.io/badge/mongodb-6.1-47A248">
+  <img alt="dhive 1.3" src="https://img.shields.io/badge/dhive-1.3-E31337">
+  <img alt="jest 30" src="https://img.shields.io/badge/jest-30-C21325">
+  <img alt="license MIT" src="https://img.shields.io/badge/license-MIT-blue">
+</p>
 
-- Check user permissions and upload eligibility
-- Retrieve Hive usernames from user IDs
-- Get video job IDs from owner and permlink
-- Fetch user's video library with pagination and filtering
-- Search videos by tag with pagination (newest first)
-- Get personalized video feeds based on Hive following list
-- Get shorts feed with optional app filtering
-- Get sorted shorts feed with reward-weighted bucket sorting and deterministic pagination
-- Get per-user shorts feed with pagination (all shorts by a specific user)
-- **Homepage Feeds**: Recommended, New Content, Trending, and First Uploads
-- Automated trending calculation via cron job (every 15 minutes)
-- Batch fetch video view counts with caching
-- Update video thumbnails (protected endpoint)
-- Feature flags for safe deployment (`ENABLE_MONGO_WRITES`)
-- Environment-based configuration
-- CORS enabled for cross-origin requests
-- Health check endpoint
+---
 
-## Setup
+Every 3Speak video, Short and audio post is a Hive post, but a video site cannot build
+its home page out of raw Hive RPC calls: it needs ranked feeds, search, view counts,
+watch history, per-viewer filters and creator analytics, fast. The checker is the
+service that answers those questions. It reads the 3Speak database that the upload
+and encoding pipeline writes, enriches it with Hive data (rewards, votes, follows,
+reputation), ranks it, and serves it as a JSON API to 3speak.tv and to other Hive
+apps that show 3Speak content.
 
-1. Install dependencies:
+It also does the work a frontend should not: it verifies Hive signatures and
+transfers before writing anything that matters, runs the background jobs (trending,
+retention scoring, syncs, scheduled posts, payouts), stitches ads into HLS playback,
+and serves Podcast 2.0 RSS feeds.
+
+The public instance is **https://checker.3speak.tv**. (Its old nickname, the Pancreas
+API, survives in the root endpoint.)
+
+## Contents
+
+- [How it works](#how-it-works)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Reference](#reference): [auth](#auth) · [health](#health) · [videos](#videos) · [feeds](#feeds) · [Shorts and stories](#shorts-and-stories) · [search](#search) · [users and channels](#users-and-channels) · [communities, snaps and playlists](#communities-snaps-and-playlists) · [audio](#audio) · [podcasts](#podcasts) · [RSS](#rss) · [creator tools](#creator-tools) · [creator stats](#creator-stats) · [tips, curation and leaderboards](#tips-curation-and-leaderboards) · [notifications](#notifications) · [advertising](#advertising) · [warm-up accounts](#warm-up-accounts) · [moderation, feedback and privacy](#moderation-feedback-and-privacy) · [service to service](#service-to-service)
+- [Development and tests](#development-and-tests)
+- [Repository layout](#repository-layout)
+- [Security notes](#security-notes)
+- [Contributing](#contributing)
+- [License](#license)
+
+## How it works
+
+```mermaid
+flowchart LR
+  FE["3speak.tv and other Hive apps"] -- "JSON over HTTPS" --> API["3Speak Checker (Express)"]
+  PL["video and audio players"] -- "watch and listen beats, ad sessions" --> API
+  API <--> DB[("MongoDB: the shared 3Speak database")]
+  API -- "posts, votes, follows, signatures, transfers" --> HIVE["Hive RPC nodes"]
+  API -- "follow graph, comment and reward history" --> HAF[("HafSQL")]
+  API --> IPFS["IPFS (captions, media)"]
+  API --> POD["outside podcast feeds and directories"]
+  UP["upload and encoding services"] --> DB
+  JOBS["background jobs"] --> DB
+  JOBS -- "scheduled posts, follows, payouts" --> HIVE
+```
+
+1. **Reads.** Most routes are reads over the collections the rest of 3Speak writes:
+   `videos` (legacy uploads), `embed-video` (current uploads and Shorts),
+   `embed-audio`, `embed-users`, `playlists`, `watch_history` and the watch and
+   listen session data the players report. Feed list responses drop the post body to
+   keep payloads small, and card stats (payout, votes, comments) can be stamped from
+   the checker's own cache instead of one Hive call per card.
+2. **Ranking.** Trending is recomputed every `TRENDING_INTERVAL_MIN` minutes from views,
+   votes, comments, rewards and reshares. Discover, Interests and related videos rank
+   by topic and by how much of a video people actually watch; [algo.md](algo.md)
+   explains the retention score in detail.
+3. **Writes that matter are proven.** A write either carries a Hive signature, carries a
+   session vouch signed by 3Speak's posting delegate, or names something that the
+   checker re-reads from Hive before storing (a post, a community, a transfer). See
+   [Auth](#auth).
+4. **Background jobs.** Each instance keeps its own in-memory pools warm (feed pools,
+   engagement affinity, card stats, the podcast feed worker). Jobs that write shared data,
+   broadcast to Hive or move money (trending flags, community and profile syncs,
+   retention scoring, scheduled posts, ad and listener payouts, the verified-creator
+   follow list) run only where `BACKGROUND_JOBS=true`. Replicas set it to `false` and
+   only serve requests.
+
+## Quick start
+
 ```bash
+git clone https://github.com/Mantequilla-Soft/3speakchecks.git
+cd 3speakchecks
 npm install
+cp .env.example .env    # then set MONGODB_URI and DATABASE_NAME at least
+npm run dev             # nodemon on http://localhost:3000
 ```
-
-2. Configure environment variables:
-```bash
-# Copy the example environment file
-cp .env.example .env
-
-# Edit .env with your actual MongoDB credentials and configuration
-```
-
-Required environment variables:
-- `PORT` - Server port (default: 3000)
-- `MONGODB_URI` - Your MongoDB connection string
-- `DATABASE_NAME` - Your MongoDB database name
-- `COLLECTION_NAME` - Your MongoDB collection name
-- `API_SECRET_KEY` - Secret key for protected endpoints (thumbnail updates)
-
-3. Start the server:
-```bash
-# Development mode with auto-restart
-npm run dev
-
-# Production mode
-npm start
-```
-
-## API Endpoints
-
-### Health Check
-```
-GET /
-```
-Returns API status and available endpoints.
-
-### Check User Permissions
-```
-GET /check/:username
-```
-Checks if a user can make posts based on their `banned` and `canUpload` status.
-
-**Response format:**
-```json
-{
-  "canPost": true,
-  "username": "meno",
-  "banned": false,
-  "canUpload": true
-}
-```
-
-**Logic:**
-- User can post if: `banned = false` AND `canUpload = true`
-- Returns `canPost: false` if user not found or doesn't meet criteria
-
-### Get Hive Username
-```
-GET /gethive/:user_id
-```
-Retrieves the Hive username associated with a user ID by querying the users and hiveaccounts collections.
-
-**Response format:**
-```json
-"meno"
-```
-
-**Logic:**
-- Searches `users` collection for the provided `user_id`
-- Uses the `last_identity` field to find the corresponding Hive account in `hiveaccounts` collection
-- Returns the `account` field (Hive username)
-- Returns `"No user ID found"` if user ID not found or no associated Hive account
-
-### Get Job ID
-```
-GET /getjobid/:owner/:permlink
-```
-Retrieves the job ID for a video by querying the videos collection with owner and permlink.
-
-**Response format:**
-```json
-{
-  "jobId": "7e1bea23-142d-4b37-a882-676298afd323",
-  "owner": "tovia01",
-  "permlink": "lkgdgnazjd"
-}
-```
-
-**Logic:**
-- Searches `videos` collection for matching `owner` and `permlink`
-- Returns the `job_id` field with context
-- Returns `{"error": "Video not found"}` if video not found or job_id missing
-
-### Get Videos by Tag
-```
-GET /videos/tag/:tag?page={page}&limit={limit}
-```
-Retrieves all videos containing a specific tag, sorted by creation date (newest first).
-
-**Query Parameters:**
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `page` | number | 1 | Page number for pagination (minimum: 1) |
-| `limit` | number | 20 | Results per page (minimum: 1, maximum: 100) |
-
-**Response format:**
-```json
-{
-  "tag": "hive",
-  "page": 1,
-  "limit": 20,
-  "total": 156,
-  "totalPages": 8,
-  "videos": [
-    {
-      "_id": "696717c8c4cd0d57d080e0ed",
-      "owner": "meno",
-      "permlink": "1b463a9e",
-      "title": "Video Title",
-      "tags_v2": ["hive", "threespeak", "devlog"],
-      "created": "2026-01-14T04:12:57.275Z",
-      // ... other video fields
-    }
-  ]
-}
-```
-
-**Logic:**
-- Searches `videos` collection for the tag in the `tags_v2` array field
-- Tag matching is case-insensitive
-- Results are sorted by `created` field in descending order (newest first)
-- Returns paginated results with metadata
-
-**Example usage:**
-```bash
-# Get first 20 videos with tag "hive"
-curl http://localhost:3000/videos/tag/hive
-
-# Get page 2 with 50 results
-curl http://localhost:3000/videos/tag/hive?page=2&limit=50
-
-# Get first 10 videos with tag "devlog"
-curl http://localhost:3000/videos/tag/devlog?page=1&limit=10
-```
-
-### Get Personalized Video Feed
-```
-GET /feed/:username?page={page}&limit={limit}
-```
-Retrieves a personalized video feed showing recent videos from accounts that the specified user follows on Hive.
-
-**Query Parameters:**
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `page` | number | 1 | Page number for pagination (minimum: 1) |
-| `limit` | number | 20 | Results per page (minimum: 1, maximum: 100) |
-
-**Response format:**
-```json
-{
-  "username": "meno",
-  "feedType": "personalized",
-  "following": 378,
-  "page": 1,
-  "limit": 20,
-  "total": 11546,
-  "totalPages": 578,
-  "videos": [
-    {
-      "_id": "6965bacac4cd0d57d080b420",
-      "owner": "shiftrox",
-      "permlink": "f9580320",
-      "title": "Video Title",
-      "created": "2026-01-14T12:05:00.000Z",
-      // ... other video fields
-    }
-  ]
-}
-```
-
-**Logic:**
-- Fetches the user's following list from Hive blockchain API (up to 1000 accounts)
-- Following list is cached for 10 minutes to improve performance
-- Filters videos to only show content from followed accounts
-- Results are sorted by `created` field in descending order (newest first)
-- Returns paginated results with metadata
-- **Fallback behavior**: If the following list cannot be fetched or is empty, returns all videos instead (feedType will be "all")
-- Console logs are generated when fallback occurs or API errors happen
-
-**Example usage:**
-```bash
-# Get first 20 videos from accounts meno follows
-curl http://localhost:3000/feed/meno
-
-# Get page 2 with 50 results
-curl "http://localhost:3000/feed/meno?page=2&limit=50"
-
-# Get first 10 videos from another user's feed
-curl "http://localhost:3000/feed/theycallmedan?limit=10"
-```
-
-### Get Shorts Feed
-```
-GET /shorts?page={page}&limit={limit}&app={frontend_app}
-```
-Retrieves a feed of published short-form videos from the embed-video collection, sorted by newest first.
-
-**Query Parameters:**
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `page` | number | 1 | Page number for pagination (minimum: 1) |
-| `limit` | number | 20 | Results per page (minimum: 1, maximum: 100) |
-| `app` | string | all | Optional filter by frontend_app (e.g., "snapie", "threespeak") |
-
-**Response format:**
-```json
-{
-  "success": true,
-  "page": 1,
-  "limit": 20,
-  "total": 150,
-  "totalPages": 8,
-  "app": "all",
-  "shorts": [
-    {
-      "owner": "ismeris",
-      "permlink": "dyprlkq4",
-      "frontend_app": "snapie",
-      "views": 5,
-      "createdAt": "2026-01-24T18:14:29.649Z",
-      "thumbnail_url": "https://ipfs.3speak.tv/ipfs/QmRvP3E4wJAufWCKiuyP2dfkDX8ymzib2KE4bgvwujv4mN",
-      "embed_url": "@ismeris/snap-1737745800000",
-      "embed_title": "My short video"
-    }
-  ]
-}
-```
-
-**Logic:**
-- Fetches from `embed-video` collection with filters: `short: true`, `status: "published"`, and `processed: true`
-- Optional filtering by `frontend_app` for app-specific feeds
-- Results are sorted by `createdAt` field in descending order (newest first)
-- View counts are cached for 5 minutes to improve performance
-- Returns paginated results with metadata including thumbnail URLs, embed URLs, and titles
-- Frontend apps use the `frontend_app` field to display "created with" overlays
-- Only returns fully processed shorts ready for viewing
-
-**Example usage:**
-```bash
-# Get all published shorts
-curl http://localhost:3000/shorts
-
-# Get page 2 with 50 results
-curl "http://localhost:3000/shorts?page=2&limit=50"
-
-# Get only Snapie shorts
-curl "http://localhost:3000/shorts?app=snapie"
-
-# Get only 3Speak shorts
-curl "http://localhost:3000/shorts?app=threespeak"
-```
-
-### Get Sorted Shorts Feed
-```
-GET /shortssorted?page={page}&limit={limit}&app={frontend_app}&seed={seed}
-```
-Retrieves a sorted shorts feed using weighted random scoring with deterministic seeded pagination. Each short receives a composite score combining Hive reward value, recency, and seeded randomness — surfacing higher-rewarded content while still appearing random.
-
-**Query Parameters:**
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `page` | number | 1 | Page number for pagination (minimum: 1) |
-| `limit` | number | 20 | Results per page (minimum: 1, maximum: 100) |
-| `app` | string | all | Optional filter by frontend_app (e.g., "snapie", "threespeak") |
-| `seed` | number | auto-generated | Seed for deterministic shuffle. Reuse across pages for consistent ordering |
-
-**Response format:**
-```json
-{
-  "success": true,
-  "seed": 847293156,
-  "page": 1,
-  "limit": 20,
-  "total": 150,
-  "totalPages": 8,
-  "app": "all",
-  "shorts": [
-    {
-      "owner": "sergiomendes",
-      "permlink": "1fgcz7m4",
-      "frontend_app": "snapie",
-      "views": 11,
-      "hive_reward": 0.33,
-      "hive_title": "My short video title",
-      "hive_body": "Full post body from Hive...",
-      "hive_tags": ["threespeak", "shorts", "hive"],
-      "hive_votes": 12,
-      "hive_comments": 3,
-      "hive_author_reputation": 69.0,
-      "hive_followers": 245,
-      "createdAt": "2026-02-09T16:18:31.943Z",
-      "thumbnail_url": "https://...",
-      "embed_url": "@sergiomendes/20260209t162316225z",
-      "embed_title": "Comment"
-    }
-  ]
-}
-```
-
-**Logic:**
-- Fetches from `embed-video` collection (last 14 days) with the same base filters as `/shorts`
-- Fetches Hive content data (reward, title, body, tags) for all shorts via RPC (`condenser_api.get_content`) in batches of 20 — cached for 15 minutes
-- **Reputation filtering**: Authors with Hive reputation <= 15 are excluded from results
-- Each short gets a weighted sort score: `recency_bonus + normalized_reward * REWARD_WEIGHT + seeded_random * (1 - REWARD_WEIGHT)`
-  - **Recency bonus**: 4 recent buckets (0–8 days, `SHORT_SORT_INTERVAL` days each) + 1 big bucket (8–14 days) where older content competes on reward + randomness
-  - **Reward component**: Normalized against max reward, weighted by `REWARD_WEIGHT` (default: 0.7)
-  - **Random component**: Seeded PRNG provides deterministic variety
-- **Consecutive author dedup**: If the same author appears multiple times in a row after sorting, only the first occurrence is kept
-- **Sorted list caching**: The full sorted order (with title, body, tags) is cached for 15 minutes per seed+app combination — page 2+ requests skip the entire sort pipeline
-- Same seed = same sort order = no duplicates across pages
-- If no `seed` is provided, one is auto-generated and returned in the response
-- Live-changing data (votes, comments, reward, reputation) is fetched fresh for the current page; title, body, and tags come from the cached sorted list
-- Follower counts are cached separately for 4 hours; author reputation is cached for 8 hours
-
-**Example usage:**
-```bash
-# Get sorted shorts (seed auto-generated)
-curl http://localhost:3000/shortssorted
-
-# Get page 2 with same seed for consistent ordering
-curl "http://localhost:3000/shortssorted?page=2&limit=20&seed=847293156"
-
-# Filter by app
-curl "http://localhost:3000/shortssorted?app=snapie&seed=847293156"
-```
-
-### Get User Shorts Feed
-```
-GET /shorts/:username?page={page}&limit={limit}
-```
-Retrieves all shorts by a specific user, sorted by date descending. Same response shape as `/shortssorted` but without weighted scoring, time window limits, or consecutive-author dedup.
-
-**Path Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `username` | string | Hive username (1-50 characters) |
-
-**Query Parameters:**
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `page` | number | 1 | Page number for pagination (minimum: 1) |
-| `limit` | number | 20 | Results per page (minimum: 1, maximum: 100) |
-
-**Response format:**
-```json
-{
-  "success": true,
-  "page": 1,
-  "limit": 20,
-  "total": 42,
-  "totalPages": 3,
-  "shorts": [
-    {
-      "owner": "sergiomendes",
-      "permlink": "1fgcz7m4",
-      "views": 11,
-      "hive_reward": 0.33,
-      "hive_title": "My short video title",
-      "hive_body": "Full post body from Hive...",
-      "hive_tags": ["threespeak", "shorts", "hive"],
-      "hive_votes": 12,
-      "hive_comments": 3,
-      "hive_author_reputation": 69.0,
-      "hive_followers": 245,
-      "createdAt": "2026-02-09T16:18:31.943Z",
-      "thumbnail_url": "https://...",
-      "embed_url": "@sergiomendes/20260209t162316225z",
-      "embed_title": "Comment"
-    }
-  ]
-}
-```
-
-**Logic:**
-- Fetches from `embed-video` collection with filters: `short: true`, `status: "published"`, `processed: true`, `embed_url` exists, `owner: username`
-- No time window — returns all shorts for the user regardless of age
-- No weighted scoring or randomization — simply sorted by `createdAt` descending (newest first)
-- Uses the same Hive data enrichment as `/shortssorted`: rewards, title, body, tags, live votes/comments, reputation, follower counts
-- View counts cached for 5 minutes; Hive rewards cached for 15 minutes; follower counts cached for 4 hours
-
-**Example usage:**
-```bash
-# Get first 20 shorts by a user
-curl http://localhost:3000/shorts/sergiomendes
-
-# Get page 2 with 10 results
-curl "http://localhost:3000/shorts/sergiomendes?page=2&limit=10"
-```
-
----
-
-## Homepage Feeds
-
-The API provides four curated feeds for the 3Speak homepage, each serving different content discovery purposes. All feeds exclude the internal `threespeak-fixer` account and only return published videos.
-
-### Get Recommended Feed
-```
-GET /feeds/recommended?page={page}&limit={limit}
-```
-Returns curated/recommended videos flagged by administrators.
-
-**Query Parameters:**
-
-| Parameter | Type | Default | Max | Description |
-|-----------|------|---------|-----|-------------|
-| `page` | number | 1 | - | Page number for pagination |
-| `limit` | number | 50 | 100 | Results per page |
-
-**Response format:**
-```json
-{
-  "success": true,
-  "feed": "recommended",
-  "page": 1,
-  "limit": 50,
-  "total": 2168,
-  "totalPages": 44,
-  "videos": [
-    {
-      "_id": "697fd107eed099d12ab95ab2",
-      "owner": "theycallmedan",
-      "permlink": "c9d9c5a3",
-      "title": "How to use Hive Encrypt",
-      "recommended": true,
-      "status": "published",
-      "views": 107,
-      // ... other video fields
-    }
-  ]
-}
-```
-
-**Logic:**
-- Returns videos with `recommended: true` flag
-- Only published videos (`status: "published"`)
-- Excludes `threespeak-fixer` internal account
-- Sorted by creation date (newest first)
-
-### Get New Content Feed
-```
-GET /feeds/new?page={page}&limit={limit}
-```
-Returns recently uploaded videos from established creators (excludes first-time uploaders and trending videos).
-
-**Query Parameters:**
-
-| Parameter | Type | Default | Max | Description |
-|-----------|------|---------|-----|-------------|
-| `page` | number | 1 | - | Page number for pagination |
-| `limit` | number | 50 | 100 | Results per page |
-
-**Response format:**
-```json
-{
-  "success": true,
-  "feed": "new",
-  "page": 1,
-  "limit": 50,
-  "total": 129976,
-  "totalPages": 2600,
-  "videos": [
-    {
-      "_id": "698000abc123...",
-      "owner": "username",
-      "permlink": "abc123",
-      "title": "My New Video",
-      "firstUpload": false,
-      "trending": false,
-      "status": "published",
-      // ... other video fields
-    }
-  ]
-}
-```
-
-**Logic:**
-- Returns recent content from established creators
-- Excludes first-time uploaders (`firstUpload != true`)
-- Excludes trending videos (`trending != true`)
-- Only published videos (`status: "published"`)
-- Excludes `threespeak-fixer` internal account
-- Sorted by creation date (newest first)
-
-### Get Trending Feed
-```
-GET /feeds/trending?page={page}&limit={limit}
-```
-Returns the top 50 trending videos based on engagement metrics from the last 7 days.
-
-**Query Parameters:**
-
-| Parameter | Type | Default | Max | Description |
-|-----------|------|---------|-----|-------------|
-| `page` | number | 1 | - | Page number for pagination |
-| `limit` | number | 50 | 100 | Results per page |
-
-**Response format:**
-```json
-{
-  "success": true,
-  "feed": "trending",
-  "page": 1,
-  "limit": 50,
-  "total": 50,
-  "totalPages": 1,
-  "videos": [
-    {
-      "_id": "697fd107eed099d12ab95ab2",
-      "owner": "theycallmedan",
-      "permlink": "c9d9c5a3",
-      "title": "Trending Video",
-      "trending": true,
-      "views": 107,
-      "status": "published",
-      // ... other video fields
-    }
-  ]
-}
-```
-
-**Logic:**
-- Automatically calculated by cron job every 15 minutes
-- Top 50 videos from the last 7 days based on engagement score:
-  - Views: 1 point each
-  - Votes: 2 points each
-  - Comments: 3 points each
-  - Hive rewards: 10 points each
-- Videos flagged with `trending: true`
-- Only published videos (`status: "published"`)
-- Excludes `threespeak-fixer` internal account
-- Sorted by creation date (newest first)
-
-### Get First Uploads Feed
-```
-GET /feeds/firstUploads?page={page}&limit={limit}
-```
-Returns videos from first-time creators (excludes trending videos to avoid duplication).
-
-**Query Parameters:**
-
-| Parameter | Type | Default | Max | Description |
-|-----------|------|---------|-----|-------------|
-| `page` | number | 1 | - | Page number for pagination |
-| `limit` | number | 50 | 100 | Results per page |
-
-**Response format:**
-```json
-{
-  "success": true,
-  "feed": "firstUploads",
-  "page": 1,
-  "limit": 50,
-  "total": 2772,
-  "totalPages": 56,
-  "videos": [
-    {
-      "_id": "697ecc8bc05ccfd7529649c4",
-      "owner": "consumerbreak",
-      "permlink": "lloyvhlxdm",
-      "title": "My First Video",
-      "firstUpload": true,
-      "trending": false,
-      "status": "published",
-      // ... other video fields
-    }
-  ]
-}
-```
-
-**Logic:**
-- Returns videos with `firstUpload: true` flag
-- Excludes trending videos (`trending != true`)
-- Only published videos (`status: "published"`)
-- Excludes `threespeak-fixer` internal account
-- Sorted by creation date (newest first)
-
-**Feed Hierarchy:**
-Videos are shown in only one feed based on priority:
-1. **Trending** (highest priority) - if flagged as trending, appears only here
-2. **Recommended** - manually curated content
-3. **New Content** - recent uploads from established creators
-4. **First Uploads** - content from new creators
-
-**Automated Trending Calculation:**
-The trending feed is automatically updated:
-- On server startup (immediate calculation)
-- Every 15 minutes via cron job
-- Ensures fresh trending content without manual intervention
-
-**Example usage:**
-```bash
-# Get recommended videos
-curl http://localhost:3000/feeds/recommended
-
-# Get new content with pagination
-curl "http://localhost:3000/feeds/new?page=2&limit=20"
-
-# Get trending videos
-curl http://localhost:3000/feeds/trending
-
-# Get first uploads
-curl "http://localhost:3000/feeds/firstUploads?page=1&limit=25"
-```
-
----
-
-### Get Video View Counts
-```
-POST /views
-```
-Fetches view counts for one or more videos in a single batch request.
-
-**Request body:**
-```json
-{
-  "videos": [
-    { "author": "username1", "permlink": "video-permlink-1" },
-    { "author": "username2", "permlink": "video-permlink-2" }
-  ]
-}
-```
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `videos` | array | Yes | Array of video identifiers (1-50 items) |
-| `videos[].author` | string | Yes | Hive username of the video author |
-| `videos[].permlink` | string | Yes | Video permlink |
-
-**Response format:**
-```json
-{
-  "success": true,
-  "data": {
-    "username1/video-permlink-1": 1542,
-    "username2/video-permlink-2": 8923
-  }
-}
-```
-
-**Logic:**
-- Fetches view counts from 3speak.tv API for each video
-- Returns `null` for videos not found
-- Results are cached for 5 minutes to reduce API load
-- Maximum 50 videos per request
-
-**Error responses:**
-- `400` - Invalid request body or missing videos array
-- `400` - Too many videos (max 50)
-- `500` - Internal server error
-
-### Update Video Thumbnail (Protected)
-```
-PUT /video/thumbnail
-```
-Updates the thumbnail URL for a specific video. This endpoint is protected and requires API key authentication.
-
-**Authentication:**
-Requires API key in Authorization header:
-```
-Authorization: Bearer YOUR_API_SECRET_KEY
-```
-
-**Request body:**
-```json
-{
-  "owner": "mantequilla-soft",
-  "permlink": "fd9ef87a",
-  "thumbnail": "ipfs://QmNewThumbnailCID"
-}
-```
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `owner` | string | Yes | Hive username of the video owner |
-| `permlink` | string | Yes | Video permlink |
-| `thumbnail` | string | Yes | New thumbnail URL (must start with ipfs://, http://, or https://) |
-
-**Response format (success):**
-```json
-{
-  "success": true,
-  "message": "Thumbnail updated successfully",
-  "data": {
-    "owner": "mantequilla-soft",
-    "permlink": "fd9ef87a",
-    "thumbnail": "ipfs://QmNewThumbnailCID",
-    "updated_at": "2026-01-24T20:30:00.000Z"
-  }
-}
-```
-
-**Logic:**
-- Validates API key before processing request
-- Validates thumbnail URL format (must be IPFS CID or HTTP/HTTPS URL)
-- Checks if video exists in the `videos` collection
-- Updates thumbnail and adds `thumbnail_updated_at` timestamp
-- Logs all updates for audit purposes
-
-**Error responses:**
-- `401` - Unauthorized (missing or invalid API key)
-- `400` - Invalid request (missing fields or invalid thumbnail format)
-- `404` - Video not found
-- `500` - Internal server error
-
-**Example usage:**
-```bash
-# Update video thumbnail
-curl -X PUT http://localhost:3000/video/thumbnail \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_SECRET_KEY" \
-  -d '{
-    "owner": "meno",
-    "permlink": "abc123",
-    "thumbnail": "ipfs://QmNewThumbnailCID"
-  }'
-
-# Update with full URL
-curl -X PUT http://localhost:3000/video/thumbnail \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_SECRET_KEY" \
-  -d '{
-    "owner": "meno",
-    "permlink": "abc123",
-    "thumbnail": "https://example.com/new-thumbnail.jpg"
-  }'
-```
-
-## Example Usage
 
 ```bash
-# Health check
-curl http://localhost:3000
-
-# Check if user "meno" can make posts
-curl http://localhost:3000/check/meno
-
-# Get Hive username for user ID
-curl http://localhost:3000/gethive/48d37d99-34ec-4098-be92-682dbbb93379
-
-# Get job ID for a video
-curl http://localhost:3000/getjobid/tovia01/lkgdgnazjd
-
-# Get videos by tag (first page, 20 results)
-curl http://localhost:3000/videos/tag/hive
-
-# Get videos by tag with pagination
-curl "http://localhost:3000/videos/tag/hive?page=2&limit=50"
-
-# Get personalized feed for a user
-curl http://localhost:3000/feed/meno
-
-# Get personalized feed with pagination
-curl "http://localhost:3000/feed/meno?page=2&limit=50"
-
-# Get shorts feed (all apps)
-curl http://localhost:3000/shorts
-
-# Get shorts feed with pagination and app filter
-curl "http://localhost:3000/shorts?page=1&limit=20&app=snapie"
-
-# Get sorted shorts feed (reward-weighted, seeded pagination)
-curl http://localhost:3000/shortssorted
-
-# Get sorted shorts page 2 with same seed
-curl "http://localhost:3000/shortssorted?page=2&seed=847293156"
-
-# Get all shorts by a specific user
-curl http://localhost:3000/shorts/sergiomendes
-
-# Get user shorts with pagination
-curl "http://localhost:3000/shorts/sergiomendes?page=2&limit=10"
-
-# Get recommended feed
-curl http://localhost:3000/feeds/recommended
-
-# Get new content feed with pagination
-curl "http://localhost:3000/feeds/new?page=2&limit=30"
-
-# Get trending videos
-curl http://localhost:3000/feeds/trending
-
-# Get first uploads feed
-curl "http://localhost:3000/feeds/firstUploads?page=1&limit=25"
-
-# Update video thumbnail (protected endpoint)
-curl -X PUT http://localhost:3000/video/thumbnail \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_API_SECRET_KEY" \
-  -d '{
-    "owner": "meno",
-    "permlink": "abc123",
-    "thumbnail": "ipfs://QmNewThumbnailCID"
-  }'
-
-# Get view counts for multiple videos
-curl -X POST http://localhost:3000/views \
-  -H "Content-Type: application/json" \
-  -d '{
-    "videos": [
-      {"author": "theycallmedan", "permlink": "video-1"},
-      {"author": "starkerz", "permlink": "video-2"}
-    ]
-  }'
+curl http://localhost:3000/healthz
+curl "http://localhost:3000/feeds/trending?limit=10"
+curl http://localhost:3000/shorts/badadib
 ```
 
-## Database Schema
+The checker expects a MongoDB that holds 3Speak's collections. Against an empty
+database it starts and answers with empty lists. For local work against shared data,
+set `BACKGROUND_JOBS=false` (no broadcasts, payouts or syncs) and, if you only want to
+read, `ENABLE_MONGO_WRITES=false`.
 
-The API uses multiple MongoDB collections:
+`npm start` runs the server without the file watcher.
 
-### contentcreators Collection (for /check endpoint)
-```json
-{
-  "username": "meno",
-  "banned": false,
-  "canUpload": true,
-  // ... other fields
-}
-```
+## Configuration
 
-### users Collection (for /gethive endpoint)
-```json
-{
-  "user_id": "48d37d99-34ec-4098-be92-682dbbb93379",
-  "email": "menosoft@gmail.com",
-  "last_identity": ObjectId("612bf9256b1c8555334eec15"),
-  // ... other fields
-}
-```
+Settings are read from `.env` by [utils/config.js](utils/config.js), which documents
+every option inline; [.env.example](.env.example) is the starting template. Most of the
+several hundred options are tuning knobs with safe defaults. The ones that decide how
+an instance behaves:
 
-### hiveaccounts Collection (for /gethive endpoint)
-```json
-{
-  "_id": ObjectId("612bf9256b1c8555334eec15"),
-  "account": "meno",
-  "user_id": ObjectId("612bf8e0c8382759076be696"),
-  // ... other fields
-}
-```
+| Variable | Purpose | Default |
+|---|---|---|
+| `PORT` | HTTP port | `3000` |
+| `MONGODB_URI` | MongoDB connection string | required |
+| `DATABASE_NAME` | Database name | `threespeak` |
+| `BACKGROUND_JOBS` | `false` makes a replica: serve requests, run no shared jobs | `true` |
+| `CHECKER_INSTANCE` | Instance name reported by `/health/latency` | host name |
+| `ENABLE_MONGO_WRITES` | `false` refuses route writes and skips trending writes | `true` |
+| `MAINTENANCE_MODE` | `true` makes `/healthz` report maintenance | `false` |
+| `HIVE_RPC_ENDPOINTS` | Hive API nodes, comma separated, tried in order | `techcoderx.com`, `api.deathwing.me`, `api.hive.blog` |
+| `HIVE_AUTH_REQUIRED` | Enforce Hive signatures on signed routes (link verification, scheduled posts, ad applications) | `true` |
+| `SIGNATURE_TIMESTAMP_TOLERANCE_MS` | How old a signed request may be | `300000` (5 min) |
+| `AD_SIGNING_DELEGATES` | Accounts whose posting key may sign vouches and delegate signatures | `threespeak` |
+| `HAFSQL_HOST` and related | HafSQL database (follow graph, comment inbox, earnings) | the public HafSQL service |
+| `IPFS_API_URL` | IPFS node for caption edits and the subtitle proxy | `http://127.0.0.1:5001` |
+| `TRENDING_INTERVAL_MIN` | Minutes between trending recalculations | `15` |
+| `TRENDING_*_WEIGHT` | Trending weights for views, votes, comments, rewards, reshares | `1`, `2`, `3`, `10`, `5` |
+| `SHORT_SORT_INTERVAL`, `REWARD_WEIGHT` | Bucket size (days) and reward weight of `/shortssorted` | `2`, `0.7` |
+| `VIDEO_STATS_ENABLED` | Stamp card stats on feed items from the checker's cache | `false` |
+| `ADS_STAGE` | Ads surface: `off`, `beta` or `public` | `beta` |
+| `AD_PAYOUTS_ENABLED` | Run ad payout periods (dry runs until `AD_PAYOUT_ACTIVE_KEY` is set) | `false` |
+| `LIVE_NOTIFY_ENABLED` | "Went live" notifications | `false` |
+| `PULSE_HOTSET_ENABLED` | Serve `GET /pulse/hot-set` | `false` |
+| `PUSH_REQUIRE_PROOF` | Require a session vouch to save push preferences | `false` |
+| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | Web push keys | unset (push off) |
+| `API_SECRET_KEY` | The app key sent by the frontend on the `app key` routes (not a secret, see [Security notes](#security-notes)) | unset |
+| `UPLOAD_SECRET_TOKEN` | Token for `PATCH /api/video/:owner/:permlink/reusable` | unset |
+| `AD_ADMIN_SECRET` | Operator secret for the ads and Shorts challenge admin routes | unset (503) |
+| `GDPR_ADMIN_SECRET` | Operator secret for `/gdpr-admin/*` | unset (503) |
+| `STREAM_STATS_SECRET` | Shared secret of the live-stream service for `/stream-stats/*` | unset (503) |
+| `PULSE_API_KEY` | Key Video Pulse sends to `/pulse/hot-set` | unset (401) |
+| `PUSH_ADMIN_KEY` | Key for `POST /push/test` | unset (403) |
+| `IP_HASH_SECRET`, `PODCAST_ART_SECRET`, `LISTEN_BEAT_KEY` | Server-side HMAC secrets (hashed IPs, art tokens, listen beats) | optional |
+| `AD_PAYOUT_ACTIVE_KEY`, `PPL_PAYOUT_ACTIVE_KEY`, `THREESPEAK_PRO_POSTING_KEY`, `VERIFIED_BADGE_POSTING_KEY` | Hive keys for payouts and broadcasts; only on the instance that runs them | unset |
 
-### videos Collection (for /getjobid, /videos/tag, and /video/thumbnail endpoints)
-```json
-{
-  "owner": "tovia01",
-  "permlink": "lkgdgnazjd",
-  "job_id": "7e1bea23-142d-4b37-a882-676298afd323",
-  "title": "testing video upload OPH",
-  "tags": "hive,hiveproject,threespeak,devlog,pob",
-  "tags_v2": ["hive", "hiveproject", "threespeak", "devlog", "pob"],
-  "thumbnail": "ipfs://QmXXXXXX",
-  "created": "2026-01-14T04:12:57.275Z",
-  // ... other fields
-}
-```
+## Reference
 
-### embed-video Collection (for /shorts endpoint)
-```json
-{
-  "owner": "ismeris",
-  "permlink": "dyprlkq4",
-  "frontend_app": "snapie",
-  "status": "published",
-  "short": true,
-  "thumbnail_url": "https://...",
-  "duration": null,
-  "views": 5,
-  "createdAt": "2026-01-24T18:14:29.649Z",
-  // ... other fields
-}
-```
+Every route returns JSON unless noted. Paths are relative to the server root
+(`https://checker.3speak.tv` for the public instance). List routes generally take
+`page` and `limit` (most cap `limit` at 100), and personalised feeds take
+`currentuser=<hive account>` to apply that viewer's hides and history, and `nsfw=true`
+to include NSFW content. The full parameter list of a route is in the comment above it
+in `routes/`.
 
-**Recommended Indexes for Performance:**
-```javascript
-// For optimal performance of /videos/tag endpoint
-db.videos.createIndex({ tags_v2: 1, created: -1 })
+### Auth
 
-// For optimal performance of /feed endpoint
-db.videos.createIndex({ owner: 1, created: -1 })
+| Mark | Meaning |
+|---|---|
+| none | Public |
+| `signed` | Hive signature under the account's posting authority (its own key, or a delegate in `AD_SIGNING_DELEGATES`) over a message the server builds from the request, with a `timestamp`. The message format is documented at the top of each route file. |
+| `vouch` | Session vouch: `{ user, signature, timestamp }` signed by a 3Speak posting delegate for a session it verified, valid for 24 hours. Proves who is asking, for personal reads and low-stakes personal state. |
+| `chain` | No signature, but the request only names something (a post, a community, a transfer) that the checker reads back from Hive before storing anything. |
+| `user` | The caller names its own account, unproven. Only for personal, low-stakes preferences that remove content from the caller's own feeds. |
+| `app key` | `Authorization: Bearer <API_SECRET_KEY>`. A client identifier, not authentication. |
+| `upload token` | `Authorization: Bearer <UPLOAD_SECRET_TOKEN>` |
+| `reference` | The advertiser's opaque application reference |
+| `session` | The ad or listen session id and token handed out by the session route |
+| `ads admin` | `Authorization: Bearer <AD_ADMIN_SECRET>` (or `X-Admin-Secret`) |
+| `gdpr admin` | `Authorization: Bearer <GDPR_ADMIN_SECRET>` (or `X-Admin-Secret`) |
+| `stream secret` | `Authorization: Bearer <STREAM_STATS_SECRET>` (or `X-Api-Key`) |
+| `pulse key` | `Authorization: Bearer <PULSE_API_KEY>` |
+| `push admin` | `X-Admin-Key: <PUSH_ADMIN_KEY>` |
+| `loopback` | Only from the same machine, with no proxy headers; anything else gets 404 |
 
-// For optimal performance of /shorts endpoint
-db['embed-video'].createIndex({ short: 1, status: 1, createdAt: -1 })
-db['embed-video'].createIndex({ short: 1, status: 1, frontend_app: 1, createdAt: -1 })
-db['embed-video'].createIndex({ short: 1, status: 1, processed: 1, owner: 1, createdAt: -1 })
+### Health
 
-// For optimal performance of homepage feeds
-db.videos.createIndex({ recommended: 1, status: 1, created: -1 })
-db.videos.createIndex({ firstUpload: 1, trending: 1, status: 1, created: -1 })
-db.videos.createIndex({ trending: 1, status: 1, created: -1 })
-db.videos.createIndex({ status: 1, owner: 1, created: -1 })
-```
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/` | | Status and a short list of the original endpoints |
+| GET | `/healthz` | | Liveness for the frontend's maintenance gate: always 200 with `ok` |
+| GET | `/health/latency` | | Instance name, primary flag and database round trip, for picking the fastest instance |
 
-To automatically create all recommended indexes, run:
+### Videos
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/videodetails/:author/:permlink` | | Full details of one video |
+| GET | `/api/video/:owner/:permlink` | | Video details (with the `reusable` flag) from `videos` or `embed-video` |
+| PATCH | `/api/video/:owner/:permlink/reusable` | `upload token` | Set the reusable flag |
+| GET | `/videos/tag/:tag` | | Videos with a tag, newest first |
+| GET | `/videos/tag/:tag/counts` | | Counts only for a tag |
+| POST | `/views` | | View counts for up to 50 `{ author, permlink }` pairs |
+| GET | `/transcription-tags/:author/:permlink` | | Tags the transcription pipeline assigned |
+| POST | `/transcription-tags/ai-batch` | | Which of up to 200 videos are flagged AI-generated |
+| PUT | `/video/thumbnail` | `app key` | Change a video's thumbnail |
+| PUT | `/video/listing` | `app key` | List or unlist a video on 3Speak (it stays playable by link) |
+| PUT | `/video/nsfw` | `app key` | Mark or clear NSFW |
+| PUT | `/video/openpod` | `app key` | Mark an upload as a live-stream recording |
+| POST | `/video/reinstate` | `app key` | Clear the "unavailable" state after a source file is replaced |
+| POST | `/video/report-unavailable` | | Report a video that does not play; checked against the gateways before it is hidden |
+| GET | `/video/unavailable-stats` | | How many videos are currently hidden as unavailable |
+
+### Feeds
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/feed/:username` | | Videos from accounts the user follows on Hive |
+| GET | `/feeds/recommended` | | Curated videos |
+| GET | `/feeds/new` | | New uploads from established creators |
+| GET | `/feeds/firstUploads` | | Videos from first-time creators |
+| GET | `/feeds/trending` | | Videos flagged trending by the scheduled job |
+| GET | `/feeds/trendingSorted` | | Trending ranked by score, with reshare influence |
+| GET | `/feeds/promoted` | | Videos with an active paid promotion |
+| GET | `/feeds/discover` | | Discovery ranked by interests and retention, not popularity |
+| GET | `/feeds/interests` | | The Interests row, from its own topic pool |
+| GET | `/feeds/related/:author/:permlink` | | Sidebar recommendations for a watch page |
+| GET | `/feeds/new-from-following` | | Followed creators with recent videos the viewer has not watched |
+| GET | `/feeds/suggested-creators` | | Creators to follow, from recent interest-matching videos |
+| GET | `/feeds/creator-gated/:username` | | A creator's supporters-only videos |
+| GET | `/feeds/community/:id/new` | | A Hive community's newest videos |
+| GET | `/feeds/community/:id/trending` | | A community's trending videos |
+| GET | `/feeds/community/:id/top` | | A community's most viewed videos over `7d`, `30d`, `365d` or `all` |
+| GET | `/feeds/communities/activity` | | Today and this week per community, for the directory cards |
+| GET | `/feeds/stream-vods` | | Recordings of finished live streams |
+| GET | `/feeds/watched/:username` | | A viewer's watch history as feed cards |
+| POST | `/feeds/continue-watching` | `vouch` | The viewer's Continue watching strip |
+| POST | `/feeds/continue-watching/hide` | `vouch` | Hide or restore one item on that strip |
+
+### Shorts and stories
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/shorts` | | Published Shorts, newest first (`app=` filters by frontend app) |
+| GET | `/shortssorted` | | Shorts ranked by reward, recency and a seeded shuffle (reuse `seed` across pages) |
+| GET | `/shorts/:username` | | All Shorts by one account |
+| GET | `/shorts/stories` | | Creators with unseen Shorts from the last few days |
+| GET | `/stories` | | Creators with a live 24-hour story |
+| GET | `/stories/following` | | Live stories from accounts the viewer follows |
+| GET | `/stories/streak/:user` | | A creator's story streak in days |
+| GET | `/stories/seen` | | Who watched a story |
+| POST | `/stories/register` | `chain` | Mirror a post's story flag onto its upload |
+| POST | `/stories/keep` | `signed` | The author keeps a live story as an ordinary Short |
+| GET | `/sounds/trending` | | Sounds most used by recent Shorts |
+| GET | `/sounds/:id` | | One sound and the Shorts that use it |
+| GET | `/shorts-challenges` | | This week's Shorts challenge, next week's and past weeks |
+| GET | `/shorts-challenges/:week` | | One challenge week (`2026-W48`) |
+| GET | `/shorts-challenges/:week/entries` | | A week's checked entries |
+| GET | `/admin/shorts-challenges` | `ads admin` | Challenge weeks for the team |
+| PUT | `/admin/shorts-challenges/:week` | `ads admin` | Set a week's challenge |
+| GET | `/admin/shorts-challenges/:week/entries` | `ads admin` | All entries of a week, for review |
+| PUT | `/admin/shorts-challenge-entries/:owner/:permlink` | `ads admin` | Check or reject one entry |
+
+### Search
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/search` | | Full-text search; `type` is `video`, `short`, `audio`, `community`, `user`, `playlist` or `all` |
+| GET | `/search/suggest` | | Autocomplete |
+
+### Users and channels
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/check/:username` | | Whether an account may upload (`banned`, `canUpload`) |
+| GET | `/gethive/:user_id` | | Hive account of a legacy 3Speak user id |
+| GET | `/getjobid/:owner/:permlink` | | Encoding job id of a legacy video |
+| GET | `/api/my-videos` | | An account's uploads (`username=`), with status filters |
+| GET | `/user/:username/counts` | | Profile counts (videos, Shorts, views) |
+| POST | `/users/counts` | | The same for up to 100 accounts |
+| GET | `/user/:username/trailer` | | A channel's trailer video |
+| PUT | `/user/trailer` | `app key` | Set or clear the trailer |
+| GET | `/premium/:username` | | Whether an account has 3Speak Pro |
+| GET | `/premium` | | All current Pro accounts |
+| POST | `/check-hidden` | | Which of these accounts are hidden or muted |
+| POST, DELETE | `/user/hide-video` | `user` | "Not interested": hide one video from the caller's feeds |
+| POST, DELETE | `/user/hide-creator` | `user` | Hide every video by a creator from the caller's feeds |
+| GET | `/user/hidden/:username` | | What an account has hidden |
+| POST | `/viewer-tag` | `user` | Record a viewer's topic tag for a video |
+| GET | `/viewer-tag/mine/:username/:author/:permlink` | | Whether this viewer already tagged the video |
+| GET | `/viewer-tags/:author/:permlink` | | Combined topic tags of a video |
+| GET | `/verify/platforms` | | Platforms an account can link (YouTube, SoundCloud, RSS and others) |
+| GET | `/verify/hash/:hive_username` | | The code to place in the outside profile |
+| GET | `/verify/check` | `signed` | Verify a linked outside account |
+| GET | `/verify/unlink` | `signed` | Remove a link, once the code is gone from the profile |
+| GET | `/verify/links/:hive_username` | | An account's verified links |
+| GET | `/galaxy/lists` | | An account's following and followers (from HafSQL) |
+| GET | `/galaxy/scan` | | Follow graph around an account, for the galaxy page |
+
+### Communities, snaps and playlists
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/community/:name` | | Full metadata of a Hive community (about, description, rules) |
+| GET | `/communities/search` | | Search communities |
+| POST | `/community/created` | `chain` | Index a newly created community right away |
+| POST | `/snaps` | `chain` | Index a written community post (snap) after reading it from Hive |
+| GET | `/snaps/:owner` | | An account's snaps |
+| GET | `/snaps/community/:id` | | Snaps filed under a community |
+| GET | `/snaps-feed` | | Fresh snaps for the home feed (`scope=all` or `following`) |
+| POST | `/snaps/interaction` | `user` | The viewer voted or commented on a snap; stop surfacing it |
+| POST, DELETE | `/snaps/hide` | `user` | Hide or unhide one snap |
+| POST, DELETE | `/snaps/hide-creator` | `user` | Hide or unhide a creator's snaps |
+| POST | `/polls/vote` | `vouch` | Vote in a snap poll (one vote per account) |
+| POST | `/polls/results` | | Tallies of several polls (`mine` too with a vouch) |
+| GET | `/polls/creator/:owner` | | A creator's polls and tallies |
+| GET | `/playlists-feed` | | Recently changed public playlists for the home feed |
+| GET | `/badges` | | Hive badge directory |
+| GET | `/badges/:account` | | One badge and its counts |
+| GET | `/badges/:account/recipients` | | Who holds a badge |
+| GET | `/badges/:account/feed` | | Videos by a badge's holders |
+| GET | `/badges/by-creator/:creator` | | Badges an account can award |
+| POST | `/badges/created` | `chain` | Index a new badge account |
+
+### Audio
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/audio` | | Audio posts, with filters |
+| GET | `/audio/grouped` | | Audio grouped by category |
+| GET | `/audio/categories` | | Categories with counts |
+| GET | `/audio/tags` | | Top tags |
+| GET | `/audio/auto-tags` | | Top tags generated from transcripts |
+| GET | `/audio/creators` | | Audio creators |
+| GET | `/audio/playlists` | | Public music playlists, by the artist or by listeners |
+| GET | `/audio/:permlink/subtitles` | | Subtitles of a track |
+| POST | `/audio/resync` | `app key` | Re-read an edited post's title from Hive |
+| POST | `/audio/play-start` | | Open a measured play session |
+| POST | `/audio/play-beat` | `session` | Heartbeat while it plays |
+| POST | `/audio/listen/start` | | Open a listening session for 3Speak audio or a podcast episode (a vouch names the listener) |
+| POST | `/audio/listen/beat` | `session` | Listening heartbeat |
+| GET | `/audio/listen/heatmap` | | The "most replayed" curve of one item |
+
+### Podcasts
+
+Outside podcast feeds, behind the Podcasts tab on 3speak.tv/audio. Private (paid or
+password protected) feeds are never listed, and reading their episodes needs the
+listener's vouch as `vu`, `vts` and `vsig` query parameters.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/podcasts/config` | | Client settings |
+| GET | `/podcasts/subscriptions` | | The shows a user follows (`user=`) |
+| GET | `/podcasts/latest` | | Newest episodes of everything a user follows |
+| GET | `/podcasts/notifications` | | New episodes since each follow |
+| GET | `/podcasts/feed/:id` | | A show and its newest episodes |
+| GET | `/podcasts/feed/:id/older` | | The next page of episodes |
+| GET | `/podcasts/episode/:id` | | One episode |
+| GET | `/podcasts/episode/:id/notes` | | Full show notes |
+| GET | `/podcasts/episode/:id/chapters` | | Chapters |
+| GET | `/podcasts/episode/:id/transcript` | | Transcript as timed cues |
+| GET | `/podcasts/episode/:id/download` | | The audio through the checker, for saving offline |
+| GET | `/podcasts/search` | | Search Podcast Index, Apple Podcasts and fyyd |
+| GET | `/podcasts/person` | | Shows a host or guest appears in |
+| GET | `/podcasts/trending` | | Podcast Index trending shows |
+| GET | `/podcasts/charts` | | Apple Podcasts top charts |
+| GET | `/podcasts/discover` | | Most and recently followed shows on 3Speak |
+| GET | `/podcasts/art/:token/:px.jpg` | | Cover art |
+| GET | `/podcasts/progress` | | How far a user got in episodes |
+| POST | `/podcasts/progress` | `vouch` | Save listening progress |
+| POST | `/podcasts/progress/recent` | `vouch` | The user's Continue listening list |
+| POST | `/podcasts/progress/hide` | `vouch` | Hide or restore one item on it |
+| POST | `/podcasts/subscribe` | `signed` or `vouch` | Follow shows |
+| POST | `/podcasts/unsubscribe` | `signed` or `vouch` | Unfollow a show |
+| POST | `/podcasts/notify` | `signed` or `vouch` | Episode notifications on or off for a show |
+| POST | `/podcasts/resolve` | `signed` or `vouch` | Check a show before adding it to a playlist |
+| POST | `/podcasts/bundle` | | The outside shows a 3Speak playlist names, episodes merged by date |
+| GET | `/podcasts/verified` | | Shows a Hive account proved it publishes |
+| GET | `/podcasts/verified/:user/episode/:id/download` | | Audio of one of those episodes, for the podcast import |
+
+### RSS
+
+Podcast 2.0 feeds and their assets. Not JSON.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/rss/:username.xml` | | A channel's feed |
+| GET | `/rss/playlist/:id.xml` | | A public playlist's feed, with episodes of the outside shows it names |
+| GET | `/rss/playlist/:id/card.json` | | Link preview data for a playlist |
+| GET | `/rss/cover/user/:username.jpg` | | Square channel cover |
+| GET | `/rss/cover/playlist/:id.jpg` | | Square playlist cover |
+| GET | `/rss/cover/episode/:owner/:permlink.jpg` | | Episode art |
+| GET | `/rss/chapters/:owner/:permlink.json` | | Chapters, Podcast Namespace JSON |
+| GET | `/rss/transcript/:owner/:permlink/:lang.srt` | | Captions as SRT (`.vtt` for WebVTT) |
+| GET | `/rss/transcript/:owner/:permlink.txt` | | The transcript written into the post |
+
+### Creator tools
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/scheduled-posts/:username` | | An account's scheduled posts and drafts |
+| POST | `/scheduled-posts/create` | `app key` + `signed` | Queue a post or save a draft |
+| POST | `/scheduled-posts/update` | `app key` + `signed` | Edit a queued post or draft |
+| POST | `/scheduled-posts/publish` | `app key` + `signed` | Turn a draft into a scheduled post |
+| POST | `/scheduled-posts/cancel` | `app key` + `signed` | Cancel a queued post |
+| GET | `/publish-quota/:owner` | | The daily publish limit for `kind=video` or `short` |
+| GET | `/premieres/upcoming` | | Upcoming and live premieres |
+| GET | `/premieres/:owner/:permlink` | | One premiere |
+| POST | `/premieres/reminders` | `vouch` | The viewer's premiere reminders |
+| POST | `/premieres/:owner/:permlink/remind` | `vouch` | "Notify me" on or off |
+| GET | `/premieres/:owner/:permlink/chat` | | Premiere chat messages (polled) |
+| POST | `/premieres/:owner/:permlink/chat` | `vouch` | Send a chat message while live |
+| POST | `/premieres/:owner/:permlink/chat/remove` | `vouch` | Remove a message (its author or the creator) |
+| POST | `/subtitles/edit` | `signed` | The author corrects or adds captions; stored on IPFS |
+| GET | `/subtitle-proxy/:cid` | | Same-origin proxy for a caption file |
+| POST | `/comments/pin` | `signed` | The author pins or unpins comments on their video |
+| POST | `/collabs/register` | `chain` | Open invites for the co-creators a post names |
+| POST | `/collabs/respond` | `vouch` | Accept or decline a collab |
+| POST | `/collabs/mine` | `vouch` | The caller's collab invites |
+| GET | `/collabs/post/:author/:permlink` | | Accepted co-creators of a post |
+| POST | `/derived/register` | `chain` | Index a post made from another (clip, audiogram, remix, reaction) |
+| GET | `/derived/:author/:permlink` | | What was made from a post |
+| POST | `/creator-inbox` | `vouch` | Comments left for the creator |
+| POST | `/creator-inbox/done` | `vouch` | Mark an inbox comment done |
+| POST | `/creator-stats/clip-ideas` | `vouch` | Suggested Short clips from the owner's long video |
+
+### Creator stats
+
+The first nine routes below also answer under `/analytics/` (for example
+`/analytics/overview`).
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/creator-stats/overview` | | Totals and best performing videos (`username`, `days`) |
+| GET | `/creator-stats/timeseries` | | Daily watch time and views |
+| GET | `/creator-stats/weekly-top` | | Top videos by watch time per week |
+| GET | `/creator-stats/video` | | One video's retention and most replayed parts (`kind=audio` for audio) |
+| GET | `/creator-stats/demographics` | | Countries, devices and time of day |
+| GET | `/creator-stats/has-data` | | Whether a video has any watch data |
+| GET | `/creator-stats/follows` | | Who started following, and whom the account followed |
+| GET | `/creator-stats/hive-year` | | Data for the yearly recap |
+| GET | `/creator-stats/ad-income` | | Paid ad income by kind |
+| GET | `/creator-stats/earnings` | | Earnings per day by source (votes, curation, tips, ads, boosts, Lightning) |
+| GET | `/creator-stats/reach` | | Card impressions, opens and where viewers found a video |
+| POST | `/reach/seen` | | Cards seen, sampled, from the frontend |
+| POST | `/reach/open` | | A video opened, and from which surface |
+
+### Tips, curation and leaderboards
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| POST | `/supports/record` | `chain` | Record a tip after finding the real transfer in the tipper's Hive history |
+| GET | `/supports/:author` | | Tips to a creator |
+| GET | `/supports/:author/supporters` | | A creator's supporters, biggest first |
+| GET | `/supports/by/:tipper` | | Tips an account sent |
+| GET | `/supports/by/:tipper/supported` | | Creators an account supported |
+| POST | `/supports/hide` | `signed` | The creator hides or shows a tip |
+| GET | `/boosts/:author/:permlink` | | A post's boost wall |
+| GET | `/curation/:user` | | A voter's curation picks and rewards on 3Speak |
+| POST | `/curation/vote` | `vouch` | Report a vote just broadcast from 3Speak |
+| GET | `/promote/quote` | | Price and recipient for paid promotion |
+| GET | `/promote/status/:author/:permlink` | | A video's promotion status |
+| PUT | `/promote/claim` | `app key` | Claim a promotion; the payment is verified on Hive |
+| GET | `/leaderboard` | | One ranked board (`window`, `metric`) |
+| GET | `/leaderboard/summary` | | Top N of every metric for a window |
+| GET | `/leaderboard/user/:username` | | A creator's stats and ranks |
+| GET | `/leaderboard/topics` | | Topics with a leaderboard |
+| GET | `/leaderboard/topic` | | One topic's leaderboard |
+| GET | `/leaderboard/badges/:username` | | Rank badges for a profile |
+
+### Notifications
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/push/vapid-key` | | Public key a browser needs to subscribe |
+| POST | `/push/subscribe` | `user` | Register a browser for web push |
+| POST | `/push/unsubscribe` | `user` | Remove one browser (all browsers needs a `vouch`) |
+| GET | `/push/prefs` | | An account's push preferences |
+| POST | `/push/prefs` | `user` or `vouch` | Save them (`vouch` required when `PUSH_REQUIRE_PROOF=true`) |
+| POST | `/push/test` | `push admin` | Send a test notification |
+| POST | `/notify/levels` | `vouch` | Notification level per followed creator |
+| POST | `/notify/level` | `vouch` | Set one (`all`, `highlights`, `off`) |
+| POST | `/notify/feed` | `vouch` | The bell's notification feed |
+| GET | `/announcements/latest` | | The newest announcement for everybody |
+| POST | `/announcements/latest` | `vouch` | The same, plus one addressed to the caller |
+| POST | `/announcements/:number/replies` | optional `vouch` | Reply to an announcement that allows replies |
+
+### Advertising
+
+Self-serve ads on 3Speak. `ADS_STAGE=off` turns every non-admin route here into a 404.
+Bookings are paid by a Hive transfer that the checker verifies itself, so nothing in
+a request body counts as payment.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/advertise/access/:account` | | Whether an account may use the ad surfaces yet |
+| GET | `/advertise/has-product/:account` | | Whether an account is an advertiser |
+| GET | `/advertise/inventory` | | Audience figures and deliverable slots |
+| POST | `/advertise/apply` | `signed` | Apply as an advertiser; returns a reference |
+| GET | `/advertise/application/:reference` | `reference` | Application status |
+| POST | `/advertise/mine` | `signed` or `vouch` | All applications of an account |
+| POST | `/advertise/branding` | `reference` | Set the advertiser's name, logo and slogan |
+| POST | `/advertise/product/discard` | `reference` | Withdraw a pending application |
+| GET | `/advertise/pricing` | | Rate card and where to pay |
+| GET | `/advertise/slots` | | What is for sale in a window |
+| GET | `/advertise/forecast` | | Plays a booking would be quoted, before it is made |
+| POST | `/advertise/campaigns` | `reference` | Create a flight |
+| GET | `/advertise/campaigns` | `reference` | The advertiser's campaigns |
+| POST | `/advertise/campaigns/:id/creative` | `reference` | Attach an uploaded spot |
+| POST | `/advertise/campaigns/:id/audio` | `reference` | Attach an audio spot |
+| POST | `/advertise/campaigns/:id/claim` | `reference` | Verify the payment on Hive and schedule the flight |
+| POST | `/advertise/creatives` | `reference` | Submit a spot for review before booking |
+| GET | `/advertise/creatives` | `reference` | The advertiser's spots |
+| POST | `/advertise/creatives/audio` | `reference` | Submit an audio spot |
+| POST | `/advertise/creatives/listen` | `reference` | Hear a spoken ticker before saving it |
+| GET | `/advertise/selfpromo/options` | | Whether a creator's own video can run as an ad, and the price |
+| POST | `/advertise/selfpromo/book` | | Book that flight (inert until paid through `/claim`) |
+| GET | `/advertise/creator/prefs/:account` | | Whether a creator carries ads |
+| POST | `/advertise/creator/prefs` | `signed` | A creator's ad opt-out and settings |
+| POST | `/advertise/creator/video-ads/sync` | `chain` | Copy a video's "ads on this video" choice from its Hive post |
+| POST | `/advertise/creator/audio-ads/sync` | `chain` | The same for an audio post |
+| GET | `/advertise/viewer/prefs/:account` | | Whether a viewer opted into viewer rewards |
+| POST | `/advertise/viewer/prefs` | `signed` | Opt in or out of viewer rewards |
+| POST | `/advertise/listener/prefs` | `signed` | Opt in or out of listener rewards |
+| GET | `/advertise/admin/applications` | `ads admin` | Application queue |
+| POST | `/advertise/admin/applications/:id/decide` | `ads admin` | Approve or reject an application |
+| GET | `/advertise/admin/creatives` | `ads admin` | Creative review queue |
+| POST | `/advertise/admin/creatives/:id/decide` | `ads admin` | Approve or reject a spot |
+| GET | `/advertise/admin/inventory` | `ads admin` | Full inventory snapshot |
+| POST | `/advertise/admin/inventory/refresh` | `ads admin` | Rebuild it |
+| GET, POST | `/advertise/admin/rates` | `ads admin` | Platform rates per format |
+| GET | `/advertise/admin/advertisers/rates` | `ads admin` | Advertisers whose rates differ from the platform's |
+| GET, POST | `/advertise/admin/advertisers/:id/rates` | `ads admin` | One advertiser's rates |
+| GET | `/advertise/admin/refunds` | `ads admin` | Refused payments to send back |
+| POST | `/advertise/admin/refunds/:trxId/settle` | `ads admin` | Record a refund with its Hive transaction id |
+
+Ad delivery is server-side: the spot is stitched into the HLS playlist the player
+already asked for. It lives under `/m`, a path that reads like ordinary streaming.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| POST | `/m/session` | | Decide whether an ad runs and open a session; returns a manifest URL |
+| GET | `/m/:sid.m3u8` | `session` | The stitched playlist |
+| GET | `/m/:sid/:n` | `session` | A measured segment (redirect to the CDN) |
+| GET | `/m/:sid/s/:vk/:i` | `session` | A segment with a banner burned in |
+| GET | `/m/:sid/short.m3u8` | `session` | A Shorts spot's own playlist |
+| GET | `/m/:sid/i` | `session` | Where the break landed |
+| POST | `/m/:sid/w` | `session` | Seconds of the spot actually watched |
+| POST | `/m/:sid/skipped` | `session` | The viewer skipped |
+| GET | `/m/:sid/c`, `/m/:sid/bc`, `/m/:sid/tc` | `session` | Click-through of the spot, banner or ticker |
+| POST | `/m/:sid/banner-shown`, `/m/:sid/ticker-shown` | `session` | An overlay banner or ticker was displayed |
+| POST | `/m/:sid/dismiss` | `session` | The viewer closed the banner |
+| POST | `/m/:sid/posted` | `session` | Complete a pre-upload spot once the upload exists |
+| GET | `/m/tts/:file` | | A spoken ticker's audio |
+
+### Warm-up accounts
+
+People who use 3Speak before they have a Hive account. Their content lives in a hosted
+incubation service; these routes pass reads through to it.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| POST | `/incubation/authors` | | Handles to identities, in bulk |
+| GET | `/incubation/profile/:handle` | | Profile, interests and counts |
+| GET | `/incubation/user/:handle/posts` | | One user's posts |
+| GET | `/incubation/post/:handle/:permlink` | | One off-Hive post |
+| GET | `/incubation/feed` | | Warm-up content for the feeds |
+| GET | `/incubation/review` | | Warm-up posts by review state |
+| GET | `/incubation/replies` | | Off-Hive replies under one post |
+| POST | `/incubation/replies/for` | | The same for many posts |
+| GET | `/incubation/likes` | | 3Speak likes of one post |
+| POST | `/incubation/likes/for` | | The same for many posts |
+| GET, PUT | `/incubation/internal/contact/:userId` | `loopback` | Contact details a user gave |
+| GET | `/incubation/internal/contact-by-handle/:handle` | `loopback` | The same, by handle |
+| GET | `/incubation/internal/watch/:handle` | `loopback` | Seconds watched |
+| GET | `/incubation/internal/listen/:handle` | `loopback` | Seconds listened |
+| GET | `/incubation/internal/audio/:handle` | `loopback` | Audio upload count |
+| GET | `/incubation/internal/social/:userId` | `loopback` | Linked outside accounts |
+| POST | `/incubation/internal/social/verify`, `/incubation/internal/social/unlink` | `loopback` | Link or unlink an outside account |
+| POST | `/incubation/internal/claim-assets` | `loopback` | Move uploads to the Hive account the user graduated to |
+
+### Moderation, feedback and privacy
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| POST | `/reports` | | Report a live stream into the moderation queue |
+| POST | `/reviews` | | Product feedback, optionally with a private screenshot |
+| POST | `/client-errors` | | Frontend page-error reports (no account name, no IP) |
+| GET | `/gdpr-request/scope` | | What data is tied to an account |
+| POST | `/gdpr-request` | | File a data export or deletion request |
+| GET | `/gdpr-admin/requests` | `gdpr admin` | List requests |
+| GET | `/gdpr-admin/export/:username` | `gdpr admin` | Export an account's data |
+| POST | `/gdpr-admin/delete` | `gdpr admin` | Delete an account's data (`dryRun` supported) |
+| POST | `/gdpr-admin/close` | `gdpr admin` | Mark a request fulfilled |
+
+### Service to service
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| POST | `/stream-stats/viewer` | `stream secret` | A new viewer joined a live stream |
+| POST | `/stream-stats/peak` | `stream secret` | New concurrent-viewer peak |
+| POST | `/stream-stats/end` | `stream secret` | The stream ended |
+| POST | `/stream-stats/boost` | `stream secret` | A boost message during a stream |
+| POST | `/stream-stats/clips-ready` | `stream secret` | A stream's clips are cut; notify host and clippers |
+| GET | `/stream-stats/:streamId` | `stream secret` | A stream's aggregate |
+| GET | `/pulse/hot-set` | `pulse key` | Old videos people are watching again, for Video Pulse |
+
+## Development and tests
+
 ```bash
-cd scripts
-node create-indexes.js
+npm run dev             # nodemon, restarts on change
+npm start               # plain node
+npm test                # the Jest suite
+npm run test:coverage   # plus a coverage report in coverage/
+npm run test:watch      # watch mode
+npx jest tests/feeds    # one area
 ```
 
-## Environment Variables
+The suite needs Node.js 22 and nothing else: it starts its own throwaway MongoDB,
+never reads `.env`, and refuses outbound network, so it is safe to run anywhere. It
+covers routes, services and utils with a coverage ratchet in `jest.config.js`. See
+[tests/README.md](tests/README.md) for how tests are written. The
+[Tests workflow](.github/workflows/tests.yml) runs it on every pull request and every
+push to `main`.
 
-| Variable | Description | Default | Required |
-|----------|-------------|---------|----------|
-| `PORT` | Server port | 3000 | No |
-| `MONGODB_URI` | MongoDB connection string | - | Yes |
-| `DATABASE_NAME` | MongoDB database name | - | Yes |
-| `COLLECTION_NAME` | MongoDB collection name | - | Yes |
-| `API_SECRET_KEY` | Secret key for protected endpoints | - | Yes* |
-| `AUTH_JWT_SECRET` | JWT secret for authentication | - | No |
-| `ENABLE_MONGO_WRITES` | Enable MongoDB write operations (trending calc, thumbnail updates) | `true` | No |
-| `SHORT_SORT_INTERVAL` | Time bucket size in days for `/shortssorted` recency bonus | `2` | No |
-| `REWARD_WEIGHT` | Weight for reward vs randomness in sort score (0-1, higher = more reward influence) | `0.7` | No |
-| `HIVE_RPC_ENDPOINTS` | Hive RPC endpoints (comma-separated, tries in order on failure) | `https://techcoderx.com,https://api.deathwing.me,https://api.hive.blog` | No |
+Two things to know when adding a route:
 
-*Required only if using protected endpoints like `/video/thumbnail`
+- **Mount it before `streamStatsRoutes`** in `server.js`. That router gates every request
+  that reaches it, so a route mounted after it answers 401.
+- **Larger bodies need their own parser.** The global JSON parser stops at 100 kB; a
+  route that takes more mounts `express.json({ limit })` and is listed in
+  `utils/jsonBody.js`.
 
-## Production Deployment
+Maintenance and backfill scripts live in [scripts/](scripts/README.md).
 
-### Setting up as a System Service
+## Repository layout
 
-1. **On your production server**, clone and setup:
-```bash
-git clone https://github.com/menobass/3speakbanchecker.git
-cd 3speakbanchecker
-npm install --production
+```
+.
+├── server.js              # Express app: middleware, route mounts, background job schedule
+├── routes/                # one router per area, see Reference
+├── services/              # background jobs and workers: trending, retention, syncs, payouts, podcast polling
+│   └── platforms/         # link verification adapters (YouTube, SoundCloud, TikTok, Instagram, BitChute, Rumble, RSS)
+├── utils/                 # config, database, Hive RPC, signature checks, ranking, ads model
+├── config/                # search-weights.json, search ranking weights
+├── data/                  # seed data: comment mute list, Shorts challenge weeks
+├── public/rss/            # XSL stylesheet so feeds render in a browser
+├── scripts/               # maintenance, backfill and ad check scripts
+├── tests/                 # Jest suite
+├── deploy/                # deploy tooling for the production instances
+├── nginx/                 # example reverse proxy config
+├── .github/workflows/     # tests.yml (CI) and deploy.yml
+├── algo.md                # how the retention ranking works
+├── WATCH-REWARDS-PLAN.md  # parked design for viewer watch-time rewards
+├── .env.example           # configuration template
+└── jest.config.js
 ```
 
-2. **Configure environment**:
-```bash
-cp .env.example .env
-# Edit .env with your production values
-```
+## Security notes
 
-3. **Install as systemd service**:
-```bash
-sudo ./setup-service.sh
-```
+- **The app key is not a secret.** `API_SECRET_KEY` is sent by the 3speak.tv frontend
+  from the browser, so anyone can read it from the bundle. It identifies the client
+  and nothing more: treat every route marked `app key` as callable by anyone, and put
+  real protection (a Hive signature, a vouch, or a check on Hive) on anything new.
+  Scheduled posts already require a signature on top of it, and promotion claims are
+  checked against the Hive transfer.
+- **Signatures are bound to the request.** The server builds the signed message from
+  the request itself (action, account, target, timestamp), so a signature for one
+  action cannot be replayed for another, and old ones expire after
+  `SIGNATURE_TIMESTAMP_TOLERANCE_MS`. Delegate signatures are accepted only from
+  `AD_SIGNING_DELEGATES`, which is what lets HiveSigner and Butter Auth users, who hold
+  no key in the browser, act on their own account.
+- **Money is verified on Hive.** Ad bookings, promotions and tips are recorded only
+  for a real transfer the checker finds itself, with each transaction id counted once.
+  Nothing in a request body is taken as proof of payment.
+- **Operator routes fail closed.** The ads admin, GDPR admin, stream stats and Pulse
+  secrets are compared in constant time, and when one is unset its routes refuse every
+  request instead of opening up.
+- **`user` routes are unproven by design.** Hides, viewer tags and push subscriptions
+  take the caller's word for its own account because they only change what that
+  account sees. Do not reuse that pattern for anything that writes public state.
+- **Only one instance should broadcast.** Payouts, scheduled posts and follow
+  broadcasts run where `BACKGROUND_JOBS=true`. Ad payouts are off until
+  `AD_PAYOUTS_ENABLED=true`, and stay dry runs without `AD_PAYOUT_ACTIVE_KEY`. Run every
+  other instance with `BACKGROUND_JOBS=false`, and keep Hive keys only where they are used.
 
-This will:
-- Install the service to start automatically on boot
-- Configure proper logging via syslog
-- Set security restrictions
-- Start the service immediately
+## Contributing
 
-### Service Management Commands
-```bash
-sudo systemctl start checkbanned-api     # Start service
-sudo systemctl stop checkbanned-api      # Stop service
-sudo systemctl restart checkbanned-api   # Restart service
-sudo systemctl status checkbanned-api    # Check status
-sudo journalctl -u checkbanned-api -f    # View live logs
-```
+Issues and pull requests are welcome. Questions and ideas go to the
+[3Speak Discord](https://discord.gg/NSFS2VGj83).
 
-## Security Notes
+## License
 
-- Never commit your `.env` file to version control
-- Use strong authentication credentials for MongoDB
-- Consider using environment variables or secrets management in production
-- Ensure your MongoDB instance is properly secured
-- The systemd service runs with restricted permissions for security
+[MIT](LICENSE) © Mantequilla Soft.
