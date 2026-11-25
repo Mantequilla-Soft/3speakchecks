@@ -32,6 +32,12 @@
  * Enforced when SCHEDULED_POSTS_REQUIRE_SIGNATURE=true. Until the app sends the
  * signature, an unsigned write is still taken (the old app-key model) and logged
  * once per owner and action.
+ *
+ * Daily publish limit (utils/publishQuota.js): create (not a draft), update
+ * (when the time changes) and publish refuse a video or Short that would go
+ * over the free accounts' limit at its time with a 429 { error, code:
+ * 'daily_publish_limit', kind, limit, conflicts, next_free_at, upgrade_url },
+ * after the checks above. Any lookup error lets it through.
  */
 
 const express = require('express');
@@ -42,6 +48,7 @@ const { verifyHiveAuthority } = require('../utils/hiveAuth');
 const { validateApiKey } = require('../utils/middleware');
 const { asText } = require('../utils/input');
 const { COLLECTION, hasThreespeakPostingAuthority } = require('../services/scheduledPosts');
+const { publishLimitRefusal } = require('../utils/publishQuota');
 const { SIGNATURE_TIMESTAMP_TOLERANCE_MS, HIVE_AUTH_REQUIRED, AD_SIGNING_DELEGATES } = require('../utils/config');
 
 const VALID_PAYOUT = new Set(['default', 'powerup', 'decline']);
@@ -201,6 +208,12 @@ router.post('/create', validateApiKey, express.json({ limit: '2mb' }), async (re
             return res.status(403).json({ error: 'owner has not granted @threespeak posting authority' });
         }
 
+        // ─── the daily publish limit (free accounts) ───────────────────
+        if (!isDraft) {
+            const refusal = await publishLimitRefusal(owner, { permlink, embedPermlink, audioPermlink: audio.audioPermlink }, scheduledMs);
+            if (refusal) return res.status(429).json(refusal);
+        }
+
         // ─── upsert (allow re-scheduling a not-yet-posted entry) ──────
         const db = await getDb();
         const coll = db.collection(COLLECTION);
@@ -284,6 +297,18 @@ router.get('/:username', async (req, res) => {
             .limit(limit)
             .toArray();
 
+        // Which of the video posts are Shorts: their embed upload says so (the
+        // studio's publish-limit check needs the kind, see utils/publishQuota.js)
+        const videoDocs = docs.filter(d => !d.audioPermlink);
+        const shortKeys = new Set();
+        if (videoDocs.length) {
+            const rows = await db.collection('embed-video').find(
+                { owner, permlink: { $in: videoDocs.map(d => d.embedPermlink || d.permlink) }, short: true },
+                { projection: { permlink: 1 } },
+            ).toArray();
+            rows.forEach(r => shortKeys.add(r.permlink));
+        }
+
         // Strip the large `body` / `jsonMetadata` fields from the list view to keep responses small.
         const list = docs.map(d => ({
             id: d._id,
@@ -298,8 +323,9 @@ router.get('/:username', async (req, res) => {
             payoutOptions: d.payoutOptions,
             thumbnail: d.thumbnail,
             premiere: d.premiere === true,
-            // An audio post (scheduled or a draft) names its upload; a video its embed.
-            kind: d.audioPermlink ? 'audio' : 'video',
+            // An audio post (scheduled or a draft) names its upload; a video its
+            // embed, which may be a Short.
+            kind: d.audioPermlink ? 'audio' : (shortKeys.has(d.embedPermlink || d.permlink) ? 'short' : 'video'),
             postedAt: d.postedAt || null,
             broadcastTxId: d.broadcastTxId || null,
             lastError: d.lastError || null,
@@ -427,6 +453,20 @@ router.post('/update', validateApiKey, express.json({ limit: '2mb' }), async (re
         // A draft keeps no time: it gets one from POST /publish.
         const isDraftDoc = await db.collection(COLLECTION).countDocuments({ owner, permlink, status: 'draft' }, { limit: 1 });
         if (isDraftDoc) { delete $set.scheduledOn; delete $set.attempts; delete $set.lastError; }
+        // A new time for a scheduled post: the daily publish limit at that time,
+        // without the post itself. The same time again is no new publish.
+        if ($set.scheduledOn) {
+            const current = await db.collection(COLLECTION).findOne(
+                { owner, permlink, status: 'scheduled' },
+                { projection: { scheduledOn: 1, embedPermlink: 1, audioPermlink: 1 } },
+            ).catch(() => null); // fail open, like the limit check itself
+            const moved = current && (!current.scheduledOn || current.scheduledOn.getTime() !== $set.scheduledOn.getTime());
+            if (moved) {
+                const embedPermlink = 'embedPermlink' in $set ? $set.embedPermlink : current.embedPermlink;
+                const refusal = await publishLimitRefusal(owner, { permlink, embedPermlink, audioPermlink: current.audioPermlink }, $set.scheduledOn.getTime());
+                if (refusal) return res.status(429).json(refusal);
+            }
+        }
         const result = await db.collection(COLLECTION).findOneAndUpdate(
             { owner, permlink, status: { $in: EDITABLE } },
             { $set },
@@ -483,6 +523,15 @@ router.post('/publish', validateApiKey, express.json(), async (req, res) => {
         const db = await getDb();
         const now = new Date();
         const due = new Date(Math.max(ms, now.getTime()));
+        // The daily publish limit at the time it goes out.
+        const draft = await db.collection(COLLECTION).findOne(
+            { owner, permlink, status: 'draft' },
+            { projection: { embedPermlink: 1, audioPermlink: 1 } },
+        ).catch(() => null); // fail open, like the limit check itself
+        if (draft) {
+            const refusal = await publishLimitRefusal(owner, { permlink, embedPermlink: draft.embedPermlink, audioPermlink: draft.audioPermlink }, due.getTime());
+            if (refusal) return res.status(429).json(refusal);
+        }
         const result = await db.collection(COLLECTION).findOneAndUpdate(
             { owner, permlink, status: 'draft' },
             { $set: { status: 'scheduled', scheduledOn: due, attempts: 0, lastError: null, updatedAt: now } },

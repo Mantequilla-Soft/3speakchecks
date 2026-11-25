@@ -269,6 +269,23 @@ describe('GET /scheduled-posts/:username', () => {
     expect(cancelled.body.scheduled_posts.map((p) => p.permlink)).toEqual(['gone']);
   });
 
+  test('says which posts are Shorts, from their embed upload', async () => {
+    await seed({ permlink: 'clip', scheduledOn: new Date(inFuture(DAY)) });
+    await seed({ permlink: 'hive-link', embedPermlink: 'asset1', scheduledOn: new Date(inFuture(2 * DAY)) });
+    await seed({ permlink: 'long', scheduledOn: new Date(inFuture(3 * DAY)) });
+    await seed({ permlink: 'pod', audioPermlink: 'aud1', scheduledOn: new Date(inFuture(4 * DAY)) });
+    await db().collection('embed-video').insertMany([
+      { owner: 'alice', permlink: 'clip', short: true },
+      { owner: 'alice', permlink: 'asset1', short: true },
+      { owner: 'alice', permlink: 'long', short: false },
+      { owner: 'bob', permlink: 'pod', short: true },
+    ]);
+    const res = await request(app).get('/scheduled-posts/alice').expect(200);
+    expect(res.body.scheduled_posts.map((p) => [p.permlink, p.kind])).toEqual([
+      ['clip', 'short'], ['hive-link', 'short'], ['long', 'video'], ['pod', 'audio'],
+    ]);
+  });
+
   test('a blank username is a 400', async () => {
     await request(app).get('/scheduled-posts/%20').expect(400);
   });
