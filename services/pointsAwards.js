@@ -10,14 +10,29 @@
  *   remix   a remix or reaction (`derived-content`, kinds remix + reaction) of
  *           someone else's post, to its maker (100 points), for posts from the
  *           last REMIX_WINDOW_HOURS.
+ *   and the "ways to earn" kinds, each in its own finder:
+ *     services/pointsAwards/watching.js  first5, vodtime, listen, finish, reach,
+ *                                        playlist, premiere, premheld
+ *     services/pointsAwards/content.js   first, referral + invited, storystreak,
+ *                                        challenge, remixed, tip
+ *     services/pointsAwards/hive.js      tag, reply, community, followers
+ *   The watch and listen kinds read `points-activity`, which
+ *   services/pointsAwards/activity.js fills from the open player and listen
+ *   sessions every POINTS_ACTIVITY_SYNC_MIN minutes.
  *
  * The points server decides amounts and limits (once per board and month,
- * once per source post per maker, 3 remixes a day) and every award id pays
- * once there, so sending one twice is harmless. Final answers are kept in
- * `points-award-log` so the same id is not sent every hour.
+ * once per source post per maker, daily caps) and every award id pays once
+ * there, so sending one twice is harmless. Final answers are kept in
+ * `points-award-log` so the same id is not sent every hour. A finder that fails
+ * (HafSQL down, say) is logged and skipped; the others still send.
+ *
+ * Nothing from before the launch is paid: POINTS_AWARDS_SINCE (a date), or when
+ * unset the UTC day of the first run, stored in `points-award-state` so a restart
+ * keeps it. POINTS_FIRSTS_SINCE moves the cut-off for the `first` kinds alone.
  *
  * Hidden creators and LEADERBOARD_EXCLUDED_USERS never place on a board, like
- * on /leaderboard; hidden creators earn no remix award either.
+ * on /leaderboard. Hidden creators and banned accounts (contentcreators.banned)
+ * earn no award of any kind.
  *
  * Off unless POINTS_AWARD_URL and POINTS_AWARD_SECRET are both set.
  */
@@ -25,6 +40,11 @@
 const { getDb } = require('../utils/db');
 const { hiddenListSync } = require('../utils/hiddenCreators');
 const { ENABLE_MONGO_WRITES, LEADERBOARD_EXCLUDED_USERS } = require('../utils/config');
+const { syncActivity, ensureActivityIndexes } = require('./pointsAwards/activity');
+const watching = require('./pointsAwards/watching');
+const content = require('./pointsAwards/content');
+const hive = require('./pointsAwards/hive');
+const { dayStartMs } = require('./pointsAwards/common');
 
 const AWARD_URL = (process.env.POINTS_AWARD_URL || '').trim().replace(/\/+$/, '');
 const AWARD_SECRET = (process.env.POINTS_AWARD_SECRET || '').trim();
@@ -34,6 +54,18 @@ const REMIX_WINDOW_HOURS = 72;
 const LOG = 'points-award-log';
 const LOG_TTL_DAYS = 120;
 const SEND_CHUNK = 200;
+const STATE = 'points-award-state';
+const ACTIVITY_SYNC_MIN = Math.max(1, parseFloat(process.env.POINTS_ACTIVITY_SYNC_MIN || '2'));
+// A session can outlive its last heartbeat by a few minutes only, so each sync
+// re-reads a little before where the last one started.
+const ACTIVITY_OVERLAP_MS = 5 * 60 * 1000;
+
+const parseDate = (v) => {
+    const t = Date.parse(String(v || '').trim());
+    return Number.isFinite(t) ? new Date(t) : null;
+};
+const SINCE_ENV = parseDate(process.env.POINTS_AWARDS_SINCE);
+const FIRSTS_SINCE_ENV = parseDate(process.env.POINTS_FIRSTS_SINCE);
 
 // The main boards (routes/leaderboard.js METRICS) that leaderboard-daily
 // carries. story_streak is a run of days, not a daily sum: not a board here.
@@ -97,6 +129,72 @@ async function remixAwards(db, now = Date.now(), hidden = new Set()) {
         }));
 }
 
+/**
+ * The launch: POINTS_AWARDS_SINCE, else the UTC day of the first run, stored once
+ * (the first writer wins, so two processes agree).
+ */
+async function launchDate(db, now = Date.now()) {
+    if (SINCE_ENV) return SINCE_ENV;
+    const today = new Date(dayStartMs(now));
+    if (ENABLE_MONGO_WRITES) {
+        await db.collection(STATE).updateOne({ _id: 'launch' }, { $setOnInsert: { since: today, at: new Date(now) } }, { upsert: true });
+    }
+    const doc = await db.collection(STATE).findOne({ _id: 'launch' });
+    return doc && doc.since ? new Date(doc.since) : today;
+}
+
+/** Awards minus those to hidden creators and banned accounts. */
+async function withoutBlocked(db, awards, hidden) {
+    const users = [...new Set(awards.map((a) => a.user))];
+    if (!users.length) return awards;
+    const banned = new Set(await db.collection('contentcreators').distinct('username', { username: { $in: users }, banned: true }));
+    return awards.filter((a) => !hidden.has(a.user) && !banned.has(a.user));
+}
+
+// Every finder takes the run's context (services/pointsAwards/common.js).
+const FINDERS = [
+    ['rank', ({ db, now, launch, excluded }) => {
+        const month = previousMonth(now);
+        return month && month.end > launch ? monthlyWinners(db, month, excluded) : [];
+    }],
+    ['remix', ({ db, now, hidden }) => remixAwards(db, now, hidden)],
+    ['daily', watching.dailyAwards],
+    ['finish', watching.finishAwards],
+    ['reach', watching.reachAwards],
+    ['playlist', watching.playlistAwards],
+    ['premiere', watching.premiereAwards],
+    ['first', (ctx) => content.firstAwards(ctx)],
+    ['storystreak', content.storyStreakAwards],
+    ['challenge', content.challengeAwards],
+    ['remixed', content.remixedAwards],
+    ['tip', content.tipAwards],
+    ['tag', hive.tagAwards],
+    ['reply', hive.replyAwards],
+    ['community', hive.communityAwards],
+    ['followers', hive.followerAwards],
+];
+
+/** Every finder's awards, one id once; a finder that throws is logged and left out. */
+async function findAwards(ctx, finders = FINDERS) {
+    const seen = new Set();
+    const out = [];
+    for (const [label, find] of finders) {
+        let found;
+        try {
+            found = await find(ctx);
+        } catch (err) {
+            console.error(`[pointsAwards] ${label} failed:`, err && err.message);
+            continue;
+        }
+        for (const a of found || []) {
+            if (!a || !a.id || !a.user || seen.has(a.id)) continue;
+            seen.add(a.id);
+            out.push(a);
+        }
+    }
+    return out;
+}
+
 async function unsent(db, awards) {
     if (!awards.length) return [];
     const done = await db.collection(LOG).find({ id: { $in: awards.map((a) => a.id) } }, { projection: { _id: 0, id: 1 } }).toArray();
@@ -117,16 +215,14 @@ async function post(awards, fetchImpl = fetch) {
 }
 
 /** One run: build the awards, send what has no final answer yet, log those. */
-async function runPointsAwards({ now = Date.now(), db = getDb(), fetchImpl = fetch } = {}) {
+async function runPointsAwards({ now = Date.now(), db = getDb(), fetchImpl = fetch, finders = FINDERS } = {}) {
     if (!AWARD_URL || !AWARD_SECRET) return { sent: 0, awarded: 0 };
     const hidden = new Set(hiddenListSync());
     const excluded = new Set([...hidden, ...LEADERBOARD_EXCLUDED_USERS]);
-    const month = previousMonth(now);
-    const all = [
-        ...(month ? await monthlyWinners(db, month, excluded) : []),
-        ...await remixAwards(db, now, hidden),
-    ];
-    const todo = await unsent(db, all);
+    const launch = await launchDate(db, now);
+    const firstsSince = FIRSTS_SINCE_ENV || launch;
+    const all = await findAwards({ db, now, launch, firstsSince, hidden, excluded }, finders);
+    const todo = await unsent(db, await withoutBlocked(db, all, hidden));
     let sent = 0;
     let awarded = 0;
     for (let i = 0; i < todo.length; i += SEND_CHUNK) {
@@ -158,6 +254,9 @@ async function ensureIndexes(db) {
     try {
         await db.collection(LOG).createIndex({ id: 1 }, { unique: true, name: 'award_id' });
         await db.collection(LOG).createIndex({ expires_at: 1 }, { expireAfterSeconds: 0, name: 'award_ttl' });
+        await ensureActivityIndexes(db);
+        // The tip finder reads supports by time, which routes/supports.js does not index.
+        await db.collection('supports').createIndex({ tippedAt: 1 }, { name: 'points_tipped_at' });
     } catch (err) {
         indexed = false;
         console.error('[pointsAwards] index setup failed:', err && err.message);
@@ -180,6 +279,27 @@ function schedule() {
         tick();
         setInterval(tick, INTERVAL_MIN * 60 * 1000).unref?.();
     }, FIRST_RUN_MS).unref?.();
+
+    // Named watch and listen sessions into points-activity, never overlapping itself.
+    let since = new Date(Date.now() - 6 * 3600 * 1000);
+    let syncing = false;
+    const sync = () => {
+        if (syncing) return;
+        syncing = true;
+        const started = Date.now();
+        // Upserts by _id: no index needed, so this does not wait for ensureIndexes.
+        syncActivity({ db: getDb(), since, now: started })
+            .then(() => { since = new Date(started - ACTIVITY_OVERLAP_MS); })
+            .catch((err) => console.error('[pointsAwards] activity sync failed:', err && err.message))
+            .finally(() => { syncing = false; });
+    };
+    setTimeout(() => {
+        sync();
+        setInterval(sync, ACTIVITY_SYNC_MIN * 60 * 1000).unref?.();
+    }, 60 * 1000).unref?.();
 }
 
-module.exports = { schedule, runPointsAwards, monthlyWinners, remixAwards, previousMonth, RANK_METRICS };
+module.exports = {
+    schedule, runPointsAwards, monthlyWinners, remixAwards, previousMonth, launchDate, withoutBlocked, findAwards,
+    RANK_METRICS, FINDERS,
+};

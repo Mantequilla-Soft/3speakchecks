@@ -5,10 +5,30 @@
  */
 process.env.POINTS_AWARD_URL = 'https://points.test';
 process.env.POINTS_AWARD_SECRET = 'secret-for-tests';
+// Launched before the months these tests pay, so the launch cut-off does not hide them.
+process.env.POINTS_AWARDS_SINCE = '2026-10-01';
 jest.mock('../utils/db', () => ({ getDb: jest.fn() }));
 jest.mock('../utils/hiddenCreators', () => ({ hiddenListSync: jest.fn(() => ['hiddenguy']) }));
+jest.mock('../utils/hafsql', () => ({ query: jest.fn(async () => [{ head: 1 }]) }));
 
-const { monthlyWinners, remixAwards, previousMonth, runPointsAwards, RANK_METRICS } = require('../services/pointsAwards');
+const { monthlyWinners, remixAwards, previousMonth, runPointsAwards, RANK_METRICS, FINDERS } = require('../services/pointsAwards');
+
+// The two kinds this file is about; the other finders have their own tests (tests/pointsAwards/).
+const RANK_AND_REMIX = FINDERS.filter(([label]) => label === 'rank' || label === 'remix');
+
+/** Any other collection: empty, and every write accepted. */
+const emptyCollection = () => {
+    const cursor = { sort: () => cursor, limit: () => cursor, toArray: async () => [] };
+    return {
+        find: () => cursor,
+        findOne: async () => null,
+        distinct: async () => [],
+        aggregate: () => cursor,
+        updateOne: async () => ({}),
+        bulkWrite: async () => ({}),
+        createIndex: async () => 'ok',
+    };
+};
 
 const day = (d) => new Date(`2026-11-${String(d).padStart(2, '0')}T00:00:00Z`);
 const row = (user, d, over = {}) => ({ user, date: day(d), ...Object.fromEntries(RANK_METRICS.map((m) => [m, 0])), ...over });
@@ -56,7 +76,7 @@ function fakeDb({ daily = [], derived = [], log = [] } = {}) {
                     bulkWrite: async (ops) => { for (const o of ops) logged.push(o.updateOne.update.$setOnInsert); },
                 };
             }
-            throw new Error(`unexpected collection ${name}`);
+            return emptyCollection();
         },
     };
 }
@@ -139,7 +159,7 @@ describe('runPointsAwards', () => {
                 json: async () => ({ results: awards.map((a) => (a.kind === 'rank' ? { id: a.id, awarded: true, points: 100 } : { id: a.id, awarded: false, reason: 'error' })) }),
             };
         });
-        const out = await runPointsAwards({ now, db, fetchImpl });
+        const out = await runPointsAwards({ now, db, fetchImpl, finders: RANK_AND_REMIX });
         expect(fetchImpl).toHaveBeenCalledTimes(1);
         const [url, init] = fetchImpl.mock.calls[0];
         expect(url).toBe('https://points.test/points/awards');
@@ -152,7 +172,7 @@ describe('runPointsAwards', () => {
 
     test('the points server failing throws (the next run tries again)', async () => {
         const db = fakeDb({ daily: [row('alice', 10, { video_uploads: 1 })] });
-        await expect(runPointsAwards({ now: Date.parse('2026-12-03T12:00:00Z'), db, fetchImpl: async () => ({ ok: false, status: 502 }) }))
+        await expect(runPointsAwards({ now: Date.parse('2026-12-03T12:00:00Z'), db, finders: RANK_AND_REMIX, fetchImpl: async () => ({ ok: false, status: 502 }) }))
             .rejects.toThrow('502');
     });
 });
@@ -181,9 +201,12 @@ describe('schedule', () => {
         const indexes = [];
         const db = fakeDb({ daily: [row('alice', 10, { video_uploads: 1 })] });
         const base = db.collection.bind(db);
-        db.collection = (name) => (name === 'points-award-log'
-            ? { ...base(name), createIndex: async (spec, opts) => { indexes.push(opts.name); } }
-            : base(name));
+        const sessionReads = [];
+        db.collection = (name) => {
+            if (name === 'points-award-log') return { ...base(name), createIndex: async (spec, opts) => { indexes.push(opts.name); } };
+            if (name === 'view-sessions') return { ...base(name), find: (q) => { sessionReads.push(q.lastBeatAt.$gte); return base(name).find(); } };
+            return base(name);
+        };
         getDb.mockReturnValue(db);
         global.fetch = jest.fn(async () => ({ ok: false, status: 503 }));
         const log = jest.spyOn(console, 'log').mockImplementation(() => {});
@@ -193,6 +216,11 @@ describe('schedule', () => {
         await jest.advanceTimersByTimeAsync(9 * 60 * 1000);
         await jest.advanceTimersByTimeAsync(60 * 60 * 1000);
         expect(indexes).toEqual(['award_id', 'award_ttl']);
+        // The activity sync: a minute after start, then every 2 minutes, each from
+        // 5 minutes before the previous one started (6 hours back the first time).
+        expect(sessionReads).toHaveLength(35);
+        expect(sessionReads[0]).toEqual(new Date(Date.parse('2026-12-03T06:00:00Z')));
+        expect(sessionReads[1]).toEqual(new Date(Date.parse('2026-12-03T11:56:00Z')));
         expect(global.fetch).toHaveBeenCalledTimes(2);
         expect(err.mock.calls[0][0]).toMatch(/run failed/);
         delete global.fetch;
@@ -219,7 +247,7 @@ describe('schedule', () => {
 
     test('a points server answer without results counts nothing', async () => {
         const db = fakeDb({ daily: [row('alice', 10, { video_uploads: 1 })] });
-        const out = await runPointsAwards({ now: Date.parse('2026-12-03T12:00:00Z'), db, fetchImpl: async () => ({ ok: true, json: async () => ({}) }) });
+        const out = await runPointsAwards({ now: Date.parse('2026-12-03T12:00:00Z'), db, finders: RANK_AND_REMIX, fetchImpl: async () => ({ ok: true, json: async () => ({}) }) });
         expect(out).toEqual({ sent: 1, awarded: 0 });
         expect(db.logged).toEqual([]);
     });
