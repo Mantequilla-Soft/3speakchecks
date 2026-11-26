@@ -22,6 +22,7 @@ const { syncAllDurations } = require('./services/durationSync');
 const { syncPremiumFromSubs } = require('./services/premiumSubsSync');
 const { schedule: scheduleCollectSubs } = require('./services/collectSubscriptions');
 const { schedule: scheduleVerifiedFollow } = require('./services/verifiedFollow');
+const { schedule: schedulePointsAwards } = require('./services/pointsAwards');
 const { schedule: scheduleAudioPayouts } = require('./services/audioPayouts');
 const { schedule: scheduleListenConsolidation } = require('./services/listenConsolidation');
 const { schedule: scheduleScheduledPosts } = require('./services/scheduledPosts');
@@ -460,6 +461,11 @@ async function startServer() {
     // contentcreators.verified creator it isn't already following. Self-gated on
     // env (account + posting key); logs "disabled" when credentials aren't set.
     scheduleVerifiedFollow();
+
+    // 3Speak Points awards: last month's #1 of every main leaderboard board and
+    // remixes/reactions, sent to the points server (hangouts) that pays and
+    // mints them. Self-gated on POINTS_AWARD_URL + POINTS_AWARD_SECRET.
+    schedulePointsAwards();
 
     // Pay-per-listen weekly payout (period ends Sun 00:00 UTC, checked every
     // 12h with catch-up). Runs in DRY RUN until PPL_PAYOUT_ACTIVE_KEY is set.
