@@ -305,3 +305,178 @@ describe('the in-process pool cache', () => {
     expect((await discover().expect(200)).body.total).toBe(2);
   });
 });
+
+describe('Discover #1: one promoted video per page load', () => {
+  const promote = (permlink, hours = 24) => db().collection('embed-video')
+    .updateOne({ permlink }, { $set: { promotedUntil: F.hoursFromNow(hours) } });
+  /** Every page of one seed, concatenated. */
+  async function allPages(query, limit) {
+    const first = (await discover({ ...query, limit, page: 1 }).expect(200)).body;
+    const out = [...first.videos];
+    for (let page = 2; page <= first.totalPages; page += 1) {
+      out.push(...(await discover({ ...query, limit, page }).expect(200)).body.videos);
+    }
+    return { first, all: out };
+  }
+
+  test('with nothing promoted the feed is unchanged, and an ended promotion changes nothing', async () => {
+    await seedMany(6);
+    const before = (await discover({ limit: 3, debug: 1 }).expect(200)).body;
+    expect(before).not.toHaveProperty('promoted_pick');
+    expect(before.videos.some((v) => 'promoted' in v)).toBe(false);
+
+    await promote('v4', -1);
+    await F.resetFeedCaches(db());
+    const after = (await discover({ limit: 3, debug: 1 }).expect(200)).body;
+    expect(F.permlinks(after.videos)).toEqual(F.permlinks(before.videos));
+    expect(after.total).toBe(before.total);
+  });
+
+  test('the promoted video is #1 with promoted: true, and appears nowhere else in the feed', async () => {
+    await seedMany(7);
+    await promote('v5');
+
+    const { first, all } = await allPages({ seed: 7 }, 3);
+
+    expect(first.total).toBe(7);
+    expect(first.videos[0]).toMatchObject({
+      permlink: 'hive-v5', promoted: true, promotedUntil: F.hoursFromNow(24).toISOString(),
+      images: { thumbnail: 'https://img.example/v5.png' },
+    });
+    expect(all.filter((v) => v.promoted)).toHaveLength(1);
+    // Page 1 = [promo, first 2 ranked], then no gap and no repeat: every video once.
+    expect(all).toHaveLength(7);
+    expect(new Set(F.permlinks(all)).size).toBe(7);
+  });
+
+  test('page 2 continues exactly where page 1 stopped', async () => {
+    await seedMany(9);
+    await promote('v8');
+    const ranked = F.permlinks((await discover({ seed: 3, limit: 50 }).expect(200)).body.videos).slice(1);
+
+    const p1 = (await discover({ seed: 3, limit: 4, page: 1 }).expect(200)).body.videos;
+    const p2 = (await discover({ seed: 3, limit: 4, page: 2 }).expect(200)).body.videos;
+
+    expect(F.permlinks(p1)).toEqual(['hive-v8', ...ranked.slice(0, 3)]);
+    expect(F.permlinks(p2)).toEqual(ranked.slice(3, 7));
+  });
+
+  test('a promoted video outside the pool still gets #1, as a normal card', async () => {
+    await seedMany(3);
+    await db().collection('embed-video').insertOne(F.embedVideo({
+      owner: 'outsider', permlink: 'promo', promotedUntil: F.hoursFromNow(5), createdAt: F.daysAgo(500),
+    }));
+
+    const res = (await discover().expect(200)).body;
+
+    expect(res.total).toBe(4);
+    expect(res.videos[0]).toMatchObject({
+      owner: 'outsider', author: 'outsider', permlink: 'hive-promo', title: 'Title promo', promoted: true,
+      spkvideo: { video_v2: 'promo', play_url: 'https://ipfs.3speak.tv/ipfs/cid-promo' },
+    });
+    expect(res.videos[0]).not.toHaveProperty('_pool');
+  });
+
+  test('two promotions share #1: different seeds pick both, one seed always the same', async () => {
+    await seedMany(6);
+    await promote('v1');
+    await promote('v4');
+
+    const picks = [];
+    for (let seed = 1; seed <= 20; seed += 1) {
+      const [top] = (await discover({ seed }).expect(200)).body.videos;
+      expect(top.promoted).toBe(true);
+      picks.push(top.permlink);
+    }
+    expect(new Set(picks)).toEqual(new Set(['hive-v1', 'hive-v4']));
+    // Roughly equal turns, not one video almost always.
+    expect(picks.filter((p) => p === 'hive-v1').length).toBeGreaterThanOrEqual(5);
+    expect(picks.filter((p) => p === 'hive-v4').length).toBeGreaterThanOrEqual(5);
+
+    for (const seed of [3, 11]) {
+      const again = (await discover({ seed }).expect(200)).body.videos[0].permlink;
+      expect(again).toBe(picks[seed - 1]);
+    }
+    // The other promotion stays in the ranked list like any video.
+    const page = (await discover({ seed: 3 }).expect(200)).body.videos;
+    expect(page.filter((v) => v.promoted)).toHaveLength(1);
+    expect(F.permlinks(page).sort()).toEqual(['hive-v0', 'hive-v1', 'hive-v2', 'hive-v3', 'hive-v4', 'hive-v5']);
+  });
+
+  test('debug=1 says how many promotions there were and which one was picked', async () => {
+    await seedMany(3);
+    await promote('v0');
+    await promote('v2');
+    const res = (await discover({ debug: 1 }).expect(200)).body;
+    expect(res.promoted_pick).toEqual({ n: 2, index: expect.any(Number) });
+    expect(res.videos[0].permlink).toBe(['hive-v0', 'hive-v2'][res.promoted_pick.index]);
+  });
+
+  test('chrono=1 also opens with the promoted video', async () => {
+    await seedMany(4);
+    await promote('v3');
+    const res = (await discover({ chrono: 1 }).expect(200)).body;
+    expect(F.permlinks(res.videos)).toEqual(['hive-v3', 'hive-v0', 'hive-v1', 'hive-v2']);
+  });
+
+  test('the Interests variant is not affected', async () => {
+    await seedMany(3, (i) => ({ entry: { winnerTag: i === 2 ? 'food' : 'music' } }));
+    await promote('v2');
+    const res = (await discover({ interestsOnly: 1, interests: 'music' }).expect(200)).body;
+    expect(F.permlinks(res.videos).sort()).toEqual(['hive-v0', 'hive-v1']);
+    expect(res.videos.some((v) => v.promoted)).toBe(false);
+  });
+
+  test.each([
+    ['a Short', { short: true }],
+    ['an unlisted video', { listed_on_3speak: false }],
+    ['a video with unavailable media', { unavailable: true }],
+    ['a hidden-from-feed video', { hiddenFromFeed: true }],
+    ['an NSFW video', { hive_tags: ['nsfw'] }],
+  ])('%s is never the promoted #1', async (_label, fields) => {
+    await seedMany(3);
+    await db().collection('embed-video').updateOne({ permlink: 'v1' }, { $set: { promotedUntil: F.hoursFromNow(5), ...fields } });
+    const res = (await discover().expect(200)).body;
+    expect(res.videos.some((v) => v.promoted)).toBe(false);
+  });
+
+  test('an NSFW promotion is #1 for a viewer who opted in', async () => {
+    await seedMany(2);
+    await db().collection('embed-video').updateOne({ permlink: 'v1' }, { $set: { promotedUntil: F.hoursFromNow(5), hive_tags: ['nsfw'] } });
+    expect((await discover({ nsfw: 'true' }).expect(200)).body.videos[0]).toMatchObject({ permlink: 'hive-v1', promoted: true });
+  });
+
+  test('a promotion the viewer dismissed or watched is not their #1', async () => {
+    await seedMany(3);
+    await promote('v1');
+    await F.dismissVideo(db(), 'viewer', 'creator1', 'hive-v1');
+    expect((await discover({ currentuser: 'viewer' }).expect(200)).body.videos.some((v) => v.promoted)).toBe(false);
+
+    await db().collection('watch_history').insertOne(F.watched('other', 'creator1', 'hive-v1'));
+    expect((await discover({ currentuser: 'other' }).expect(200)).body.videos.some((v) => v.promoted)).toBe(false);
+    expect((await discover({ currentuser: 'other', hidewatched: 0 }).expect(200)).body.videos[0].promoted).toBe(true);
+  });
+
+  test('an upload posted under another Hive author is checked against both keys', async () => {
+    await seedMany(2);
+    await db().collection('embed-video').insertOne(F.embedVideo({
+      owner: 'uploader', hive_author: 'poster', permlink: 'promo', promotedUntil: F.hoursFromNow(5),
+    }));
+    await db().collection('watch_history').insertOne(F.watched('viewer', 'poster', 'hive-promo'));
+    expect((await discover({ currentuser: 'viewer' }).expect(200)).body.videos.some((v) => v.promoted)).toBe(false);
+    expect((await discover({ currentuser: 'nobody' }).expect(200)).body.videos[0])
+      .toMatchObject({ owner: 'uploader', author: 'poster', promoted: true });
+  });
+
+  test('a promotion that ends drops out even while the candidate list is cached', async () => {
+    await seedMany(3);
+    await promote('v1', 1);
+    expect((await discover().expect(200)).body.videos[0].promoted).toBe(true);
+
+    // Past the end, and past the cache TTL: the stale list is served once more
+    // while it reloads, and the clock check still drops the ended promotion.
+    F.advanceClock(1.5 * 60 * 60 * 1000);
+    const res = (await discover().expect(200)).body;
+    expect(res.videos.some((v) => v.promoted)).toBe(false);
+  });
+});

@@ -64,6 +64,7 @@ const { getInterestPool } = require('../utils/interestPool');
 const { getTranscriptionTags } = require('../utils/transcriptionTags');
 const { expandTag } = require('../utils/interestTags');
 const { pickWinner, fetchViewerWeights } = require('../utils/effectiveTags');
+const { promotedMatch, filterPromotedForUser } = require('../utils/promoted');
 
 /**
  * GET /feeds/interests — the "Interests" row / tab.
@@ -352,6 +353,45 @@ router.get('/suggested-creators', async (req, res) => {
     }
 });
 
+// Discover #1 rotation. Every promotion (HBD, HIVE or points) shares the first
+// Discover slot: each page load puts ONE currently promoted video first, picked
+// from the request seed, so the promotions take turns at #1 about equally.
+// Candidates are exactly what /feeds/promoted would show this viewer. The raw list
+// is cached briefly (one Mongo query per DISCOVER_PROMO_TTL_MS, not per load) and
+// re-checked against the clock, so an expired promotion never outlives its end.
+const DISCOVER_PROMO_TTL_MS = 30 * 1000;
+const DISCOVER_PROMO_MAX = 200;
+
+// Sorted by key, so the pick depends on the seed only, never on Mongo order.
+function loadDiscoverPromos(db, req) {
+    return db.collection('embed-video').find(promotedMatch(req), {
+        projection: { owner: 1, permlink: 1, hive_author: 1, hive_permlink: 1, createdAt: 1, promotedUntil: 1 },
+    }).sort({ hive_author: 1, hive_permlink: 1 }).limit(DISCOVER_PROMO_MAX).toArray();
+}
+
+/** The promoted embed doc this seed puts at #1 ({ ev, n, index }), or null. */
+async function pickDiscoverPromo(db, req, seed) {
+    const nsfw = req.query.nsfw === 'true';
+    const docs = await getCached(`discover-promos:${nsfw ? 'nsfw' : 'sfw'}`, DISCOVER_PROMO_TTL_MS,
+        () => loadDiscoverPromos(db, req), []);
+    const now = Date.now();
+    const live = docs
+        .filter((ev) => new Date(ev.promotedUntil).getTime() > now)
+        .map((ev) => ({ owner: ev.owner, author: ev.hive_author, permlink: ev.hive_permlink, ev }));
+    const candidates = await filterPromotedForUser(db, req, live);
+    const n = candidates.length;
+    if (!n) return null;
+    // Mixed so consecutive seeds (the 5-minute buckets) spread over the candidates.
+    const index = Math.floor(mulberry32(seed ^ 0x9e3779b9)() * n);
+    return { ev: candidates[index].ev, n, index };
+}
+
+/** Does pool entry e address the embed video ev (by its asset or its Hive post)? */
+function isSameVideo(e, ev) {
+    return (e.owner === ev.owner && e.assetPermlink === ev.permlink)
+        || (e.author === ev.hive_author && e.permlink === ev.hive_permlink);
+}
+
 /**
  * GET /feeds/discover — interest + retention driven discovery.
  *
@@ -366,6 +406,7 @@ router.get('/suggested-creators', async (req, res) => {
  *
  * then random picks from the lower half are interleaved into every Nth slot.
  * All randomness is seeded (?seed=, else a 5-min bucket) so pagination is stable.
+ * Slot #1 goes to one promoted video (pickDiscoverPromo), `promoted: true` on its card.
  * Query: ?page&limit&interests&currentuser&nsfw&seed&debug=1
  */
 router.get('/discover', async (req, res) => {
@@ -490,7 +531,31 @@ router.get('/discover', async (req, res) => {
         // Last: no creator takes more than DISCOVER_CREATOR_MAX of any
         // DISCOVER_CREATOR_WINDOW slots, so one busy uploader can't fill screen 1.
         // Nothing is dropped, the extras move a few slots down. Skipped in chrono mode.
-        const finalEntries = chrono ? withInterests : spreadByCreator(withInterests);
+        let finalEntries = chrono ? withInterests : spreadByCreator(withInterests);
+
+        // Discover #1: one promoted video (seeded pick) goes first and leaves the
+        // ranked list on EVERY page, so page 1 = [promo, first limit-1 ranked] and
+        // page 2 carries on without a gap or a repeat. Not on the Interests variant.
+        // Its own pool entry when it is pooled (debug=1 keeps its scores), else a
+        // minimal one that hydrate() turns into the same card as any other video.
+        let promo = null;
+        if (!interestsOnly) {
+            const pick = await pickDiscoverPromo(db, req, seed);
+            if (pick) {
+                const { ev } = pick;
+                const pooled = finalEntries.find((e) => isSameVideo(e, ev));
+                const entry = {
+                    ...(pooled || {
+                        source: 'embed', src: 'promoted', created: ev.createdAt,
+                        owner: ev.owner, assetPermlink: ev.permlink,
+                        author: ev.hive_author, permlink: ev.hive_permlink,
+                    }),
+                    promotedUntil: ev.promotedUntil,
+                };
+                finalEntries = [entry, ...finalEntries.filter((e) => !isSameVideo(e, ev))];
+                promo = { entry, n: pick.n, index: pick.index };
+            }
+        }
 
         const total = finalEntries.length;
         const pageEntries = finalEntries.slice(skip, skip + limit);
@@ -501,6 +566,10 @@ router.get('/discover', async (req, res) => {
         videos.forEach((v) => {
             const p = v._pool || {};
             delete v._pool;
+            if (promo && p === promo.entry) {
+                v.promoted = true;
+                v.promotedUntil = p.promotedUntil;
+            }
             if (debug) {
                 v.discover_score = Math.round(p.discover_score * 100000) / 100000;
                 v.base = p.base;
@@ -537,6 +606,7 @@ router.get('/discover', async (req, res) => {
             totalPages: Math.ceil(total / limit),
             seed,           // pass back so the client can pin it across pages
             poolSize: pool.length,
+            ...(debug && promo ? { promoted_pick: { n: promo.n, index: promo.index } } : {}),
             videos
         });
     } catch (error) {
@@ -729,16 +799,8 @@ router.get('/promoted', async (req, res) => {
         const embedVideoCollection = db.collection('embed-video');
         const now = new Date();
 
-        const embedVideosRaw = await embedVideoCollection.find({
-            ...feedAgeMatch('createdAt'), ...unavailableMatch(), ...hiddenFromFeedMatch(),
-            status: 'published',
-            short: false,
-            listed_on_3speak: true,
-            promotedUntil: { $gt: now },
-            hive_author: { $nin: [null, ...HIDDEN_AUTHORS, ...hiddenListSync()] },
-            hive_permlink: { $ne: null },
-            ...nsfwFilterHiveTags(req)
-        }).sort({ promotedUntil: 1 }).limit(limit).toArray();
+        const embedVideosRaw = await embedVideoCollection.find(promotedMatch(req, now))
+            .sort({ promotedUntil: 1 }).limit(limit).toArray();
 
         const videos = embedVideosRaw.map(ev => ({
             owner: ev.owner,
@@ -767,12 +829,7 @@ router.get('/promoted', async (req, res) => {
 
         // Dismissals (always) + already-watched (hidewatched=1) BEFORE the client sees
         // them; filtering only in the browser flashed a watched promo on first paint.
-        // An embed's uploader can differ from its Hive author, so the watched check
-        // runs on both keys. No ?currentuser= → unchanged (filterForUser no-ops).
-        let visible = await filterForUser(db, req, videos);
-        if (visible.some((v) => v.author && v.author !== v.owner)) {
-            visible = await filterForUser(db, req, visible, (v) => `${v.author}:${v.permlink}`);
-        }
+        const visible = await filterPromotedForUser(db, req, videos);
 
         res.json({ success: true, feed: 'promoted', limit, total: visible.length, videos: visible });
     } catch (error) {
