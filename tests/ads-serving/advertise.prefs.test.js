@@ -228,6 +228,16 @@ describe('viewer rewards: consent to be identified', () => {
     expect(await db().collection(AD_VIEWER_WATCH_COLLECTION).countDocuments()).toBe(1);
   });
 
+  test('opting out also deletes the watching kept for 3Speak Points, not the listening', async () => {
+    await db().collection('points-activity').insertMany([
+      { _id: 'watch|alice|x/1|d', kind: 'watch', user: 'alice' },
+      { _id: 'listen|alice|x/2|d', kind: 'listen', user: 'alice' },
+      { _id: 'watch|bob|x/1|d', kind: 'watch', user: 'bob' },
+    ]);
+    await setViewer(viewerBody(threespeak, false, { account: 'alice' })).expect(200);
+    expect(await db().collection('points-activity').distinct('_id')).toEqual(['listen|alice|x/2|d', 'watch|bob|x/1|d']);
+  });
+
   test('anything that is not literally true is a decline, and the signature has to say "off"', async () => {
     const ts = Date.now();
     await setViewer({ account: 'alice', rewardsEnabled: 'yes', timestamp: ts, signature: alice.sign(viewerMsg('alice', 'on', ts)) }).expect(401);
@@ -278,6 +288,15 @@ describe('listener rewards: a separate consent', () => {
     const res = await setListener(listenerBody(threespeak, false, { account: 'alice' })).expect(200);
     expect(res.body.removedListenRows).toBe(1);
     expect(await db().collection(AD_VIEWER_PREFS_COLLECTION).findOne({ _id: 'alice' })).toMatchObject({ listenEnabled: false, listenSignedBy: 'threespeak' });
+  });
+
+  test('opting out also deletes the listening kept for 3Speak Points, not the watching', async () => {
+    await db().collection('points-activity').insertMany([
+      { _id: 'watch|alice|x/1|d', kind: 'watch', user: 'alice' },
+      { _id: 'listen|alice|x/2|d', kind: 'listen', user: 'alice' },
+    ]);
+    await setListener(listenerBody(threespeak, false, { account: 'alice' })).expect(200);
+    expect(await db().collection('points-activity').distinct('_id')).toEqual(['watch|alice|x/1|d']);
   });
 
   test.each([

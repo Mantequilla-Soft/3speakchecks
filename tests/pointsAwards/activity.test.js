@@ -5,7 +5,7 @@
  */
 jest.mock('../../utils/hiddenCreators', () => ({ hiddenListSync: jest.fn(() => []) }));
 const testDb = require('../helpers/db');
-const { syncActivity, ensureActivityIndexes, ACTIVITY, _test } = require('../../services/pointsAwards/activity');
+const { syncActivity, forgetActivity, ensureActivityIndexes, ACTIVITY, _test } = require('../../services/pointsAwards/activity');
 
 const db = testDb.use();
 const NOW = Date.parse('2026-11-27T12:00:00Z');
@@ -21,7 +21,12 @@ const listen = (over = {}) => ({
     accumulatedMs: 120_000, coveredBuckets: [0, 1], bucketCount: 100, startedAt: at(5), lastBeatAt: at(1), ...over,
 });
 
-async function seed({ views = [], listens = [] } = {}) {
+// alice opted into viewer rewards, carol into listener rewards (ad_viewer_prefs).
+async function seed({ views = [], listens = [], prefs = [
+    { _id: 'alice', rewardsEnabled: true },
+    { _id: 'carol', listenEnabled: true },
+] } = {}) {
+    if (prefs.length) await db().collection('ad_viewer_prefs').insertMany(prefs);
     await db().collection('embed-video').insertMany([
         { owner: 'bob', permlink: 'abc12345', hive_author: 'bob', hive_permlink: 'my-video', short: false, status: 'published' },
         { owner: 'bob', permlink: 'short001', hive_author: 'bob', hive_permlink: 'my-short', short: true, status: 'published' },
@@ -70,7 +75,7 @@ describe('syncActivity', () => {
             view({ lastBeatAt: at(120) }),
             view({ visibleContentMs: 0, contentMs: 0 }),
         ] });
-        expect(await syncActivity({ db: db(), since: at(60), now: NOW })).toEqual({ sessions: 2, written: 0 });
+        expect(await syncActivity({ db: db(), since: at(60), now: NOW })).toEqual({ sessions: 1, written: 0 });
         expect(await rows()).toEqual([]);
     });
 
@@ -98,9 +103,33 @@ describe('syncActivity', () => {
             listen({ source: 'embed' }),
             listen({ listener: null }),
         ] });
-        expect(await syncActivity({ db: db(), since: at(60), now: NOW })).toEqual({ sessions: 2, written: 1 });
+        expect(await syncActivity({ db: db(), since: at(60), now: NOW })).toEqual({ sessions: 1, written: 1 });
         const [r] = await rows();
         expect(r).toMatchObject({ kind: 'listen', user: 'carol', item: 'dave/aud00001', post: 'dave/my-song', secs: 120, pct: 2 });
+    });
+
+    test('only people who opted in are stored: viewer rewards for watching, listener rewards for listening', async () => {
+        await seed({
+            views: [view({ viewer: 'frank' }), view({ viewer: 'gina' }), view({ viewer: 'carol' })],
+            listens: [listen({ listener: 'gina' }), listen({ listener: 'alice' })],
+            prefs: [
+                { _id: 'alice', rewardsEnabled: true },              // watching only
+                { _id: 'carol', listenEnabled: true },               // listening only
+                { _id: 'gina', rewardsEnabled: false, listenEnabled: false },
+            ],
+        });
+        expect(await syncActivity({ db: db(), since: at(60), now: NOW })).toEqual({ sessions: 0, written: 0 });
+        expect(await rows()).toEqual([]);
+    });
+
+    test('forgetActivity deletes one kind of one person', async () => {
+        await seed({ views: [view(), view({ viewer: 'carol' })], listens: [listen()], prefs: [
+            { _id: 'alice', rewardsEnabled: true },
+            { _id: 'carol', rewardsEnabled: true, listenEnabled: true },
+        ] });
+        await syncActivity({ db: db(), since: at(60), now: NOW });
+        expect(await forgetActivity(db(), 'carol', 'listen')).toBe(1);
+        expect((await rows()).map((r) => `${r.kind}|${r.user}`)).toEqual(['watch|alice', 'watch|carol']);
     });
 
     test('nothing is written with Mongo writes off', async () => {

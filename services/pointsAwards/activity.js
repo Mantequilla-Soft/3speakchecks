@@ -18,6 +18,13 @@
  * end is not finishing). Both only ever go up ($max): several sessions of one
  * item on one day count as the best of them, not as their sum.
  *
+ * 🚨 Only people who opted in: watching for viewers with viewer rewards on
+ * (`rewardsEnabled`), listening for listeners with listener rewards on
+ * (`listenEnabled`) in ad_viewer_prefs. That opt-in is the consent to keep a
+ * name with what someone watched (see services/viewerProgress.js); nobody else
+ * gets a row, and opting out deletes theirs (forgetActivity, called from the
+ * prefs routes in routes/advertise.js).
+ *
  * Not stored: your own videos and audio, private mode, live streams, embeds on
  * other sites (they have no viewer), outside podcast episodes (no 3Speak owner to
  * tell "not your own" by). Rows go after ROW_TTL_DAYS.
@@ -25,7 +32,7 @@
  * Only runs while 3Speak Points awards are on (POINTS_AWARD_URL + secret).
  */
 
-const { ENABLE_MONGO_WRITES } = require('../../utils/config');
+const { ENABLE_MONGO_WRITES, AD_VIEWER_PREFS_COLLECTION } = require('../../utils/config');
 const { name, postKey, dayKey, DAY_MS } = require('./common');
 
 const ACTIVITY = 'points-activity';
@@ -96,7 +103,16 @@ async function audioMeta(db, sessions) {
     };
 }
 
-/** Copy the named sessions with a heartbeat since `since` into points-activity. */
+/** The names among `names` that said yes to `field` ('rewardsEnabled' or 'listenEnabled'). */
+async function optedIn(db, names, field) {
+    if (!names.length) return new Set();
+    const rows = await db.collection(AD_VIEWER_PREFS_COLLECTION)
+        .find({ _id: { $in: names }, [field]: true }, { projection: { _id: 1 } })
+        .toArray();
+    return new Set(rows.map((r) => r._id));
+}
+
+/** Copy the opted-in named sessions with a heartbeat since `since` into points-activity. */
 async function syncActivity({ db, since, now = Date.now() }) {
     if (!ENABLE_MONGO_WRITES) return { sessions: 0, written: 0 };
     const [views, listens] = await Promise.all([
@@ -108,7 +124,13 @@ async function syncActivity({ db, since, now = Date.now() }) {
             { lastBeatAt: { $gte: since }, listener: { $type: 'string' }, kind: 'audio', source: '3speak', private: { $ne: true } },
             { projection: { _id: 0, listener: 1, owner: 1, id: 1, accumulatedMs: 1, coveredBuckets: 1, bucketCount: 1, startedAt: 1, lastBeatAt: 1 } },
         ).toArray(),
-    ]);
+    ]).then(async ([v, l]) => {
+        const [watchers, listeners] = await Promise.all([
+            optedIn(db, [...new Set(v.map((x) => x.viewer))], 'rewardsEnabled'),
+            optedIn(db, [...new Set(l.map((x) => x.listener))], 'listenEnabled'),
+        ]);
+        return [v.filter((x) => watchers.has(x.viewer)), l.filter((x) => listeners.has(x.listener))];
+    });
     const vMeta = await videoMeta(db, views);
     const aMeta = await audioMeta(db, listens);
     const ops = [
@@ -117,6 +139,12 @@ async function syncActivity({ db, since, now = Date.now() }) {
     ].filter(Boolean);
     if (ops.length) await db.collection(ACTIVITY).bulkWrite(ops, { ordered: false });
     return { sessions: views.length + listens.length, written: ops.length };
+}
+
+/** Opting out: delete what was kept of `user`'s watching or listening. Returns the count. */
+async function forgetActivity(db, user, kind) {
+    const r = await db.collection(ACTIVITY).deleteMany({ user, kind });
+    return r.deletedCount || 0;
 }
 
 async function ensureActivityIndexes(db) {
@@ -129,4 +157,4 @@ async function ensureActivityIndexes(db) {
     await c.createIndex({ expires_at: 1 }, { expireAfterSeconds: 0, name: 'activity_ttl' });
 }
 
-module.exports = { syncActivity, ensureActivityIndexes, ACTIVITY, ROW_TTL_DAYS, _test: { rowOf, coverage } };
+module.exports = { syncActivity, forgetActivity, ensureActivityIndexes, ACTIVITY, ROW_TTL_DAYS, _test: { rowOf, coverage } };
