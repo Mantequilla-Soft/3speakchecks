@@ -23,7 +23,7 @@ const { dayKey, dayStartMs, finishedDays, windowStart, postKey, DAY_MS } = requi
 
 const FIRST5_SECS = 5 * 60;
 const FINISH_PCT = 90;
-const REACH_MIN_VIEWERS = Math.max(1, parseInt(process.env.REACH_MIN_VIEWERS, 10) || 50);
+const REACH_MIN_VIEWERS = Math.max(1, parseInt(process.env.REACH_MIN_VIEWERS, 10) || 20);
 const REACH_DAYS = 7;
 // A watcher counts for reach after this many seconds of the video.
 const REACH_MIN_SECS = 10;
