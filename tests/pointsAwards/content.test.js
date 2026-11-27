@@ -161,18 +161,20 @@ describe('tipAwards', () => {
             tip({ trx_id: 'hbd', currency: 'HBD', amount: 2.5, hbd_value: 2.5 }),
             tip({ trx_id: 'hive', currency: 'HIVE', amount: 10, hbd_value: 0.234567 }),
             tip({ trx_id: 'sats', currency: 'SATS', amount: 1500, hbd_value: 0 }),
+            tip({ trx_id: 'small', currency: 'HIVE', amount: 1, hbd_value: 0.034 }),
         ]);
         expect(c.SATS_PER_HBD).toBe(1000);
         expect(await c.tipAwards(ctx())).toEqual([
             { id: 'tip:hbd', user: 'fan', kind: 'tip', ref: 'maker', units: 2500 },
             { id: 'tip:hive', user: 'fan', kind: 'tip', ref: 'maker', units: 235 },
             { id: 'tip:sats', user: 'fan', kind: 'tip', ref: 'maker', units: 1500 },
+            { id: 'tip:small', user: 'fan', kind: 'tip', ref: 'maker', units: 34 },
         ]);
     });
 
     test('no award for dust, yourself, an unknown tipper, before the window, or a streaming day still running', async () => {
         await db().collection('supports').insertMany([
-            tip({ trx_id: 'dust', currency: 'HIVE', hbd_value: 0.099 }),
+            tip({ trx_id: 'dust', currency: 'HIVE', hbd_value: 0.009 }),
             tip({ trx_id: 'self', currency: 'HBD', hbd_value: 5, tipper: 'maker' }),
             tip({ trx_id: 'anon', currency: 'SATS', amount: 5000, tipper: null }),
             tip({ trx_id: 'old', currency: 'HBD', hbd_value: 5, tippedAt: hoursAgo(80) }),

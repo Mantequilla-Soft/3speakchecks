@@ -24,9 +24,9 @@ const { windowStart, dayKey, dayStartMs, postKey, DAY_MS } = require('./common')
 // Lightning tips are recorded in sats and never converted (services/lightningSupports.js),
 // so the points need a rate. Sats in one HBD (about one US dollar).
 const SATS_PER_HBD = Math.max(1, parseFloat(process.env.POINTS_SATS_PER_HBD) || 1000);
-// A tip below this (milli-HBD) earns nothing: the flat 100 per tip would otherwise
+// A tip below this (milli-HBD, default 0.01 HBD) earns nothing: the flat 100 per tip would otherwise
 // make dust tips between two accounts of one person a points tap.
-const TIP_MIN_MILLI_HBD = Math.max(0, parseInt(process.env.POINTS_TIP_MIN_MILLI_HBD, 10) || 100);
+const TIP_MIN_MILLI_HBD = Math.max(0, parseInt(process.env.POINTS_TIP_MIN_MILLI_HBD, 10) || 10);
 const STREAK_DAYS = 7;
 const STREAK_LOOKBACK_DAYS = 60;
 const CHALLENGE_WEEKS_BACK = 6;
