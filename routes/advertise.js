@@ -50,6 +50,7 @@ const { syncVideoAdFlagFromChain } = require('../utils/videoAdOptOut');
 const { syncAudioAdChoiceFromChain } = require('../utils/audioAdChoice');
 const { audioEnabledOf } = require('../utils/adEligibility');
 const { ISO_COUNTRIES } = require('../utils/isoCountries');
+const { forgetActivity } = require('../services/pointsAwards/activity');
 const {
   ADVERTISERS_COLLECTION,
   AD_CREATOR_PREFS_COLLECTION,
@@ -1244,8 +1245,9 @@ router.post('/viewer/prefs', featureVisible, express.json({ limit: '8kb' }), asy
     if (!rewardsEnabled) {
       const r = await getDb().collection(AD_VIEWER_WATCH_COLLECTION).deleteMany({ viewer: name });
       removed = r.deletedCount || 0;
-      // Continue watching rows exist under the same consent, so they go too.
+      // Continue watching rows and 3Speak Points watching exist under the same consent, so they go too.
       await getDb().collection(VIEWER_PROGRESS_COLLECTION).deleteMany({ viewer: name });
+      await forgetActivity(getDb(), name, 'watch');
     }
 
     res.json({ success: true, account: name, rewardsEnabled, decided: true, removedWatchRows: removed });
@@ -1323,6 +1325,8 @@ router.post('/listener/prefs', featureVisible, express.json({ limit: '8kb' }), a
     if (!listenEnabled) {
       const r = await getDb().collection(AD_LISTENER_LISTEN_COLLECTION).deleteMany({ listener: name });
       removed = r.deletedCount || 0;
+      // 3Speak Points listening exists under the same consent.
+      await forgetActivity(getDb(), name, 'listen');
     }
 
     res.json({ success: true, account: name, listenEnabled, listenDecided: true, removedListenRows: removed });

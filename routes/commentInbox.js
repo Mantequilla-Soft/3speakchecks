@@ -194,4 +194,6 @@ router.post('/creator-inbox/done', limiter(120), async (req, res) => {
 });
 
 module.exports = router;
+// The service accounts above, also left out of 3Speak Points reply awards (services/pointsAwards/hive.js).
+module.exports.NOT_PEOPLE = NOT_PEOPLE;
 module.exports._test = { isQuestion, loadInbox, NOT_PEOPLE, reset: () => { cache.clear(); indexesEnsured = false; } };
